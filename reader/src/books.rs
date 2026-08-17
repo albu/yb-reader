@@ -167,6 +167,10 @@ pub struct ReaderScreen {
     turns_since_full: usize,
     pending_turns: i32,
     time_str: String,
+    vocab_db: Option<crate::vocab::VocabDb>,
+    vocab_prof: crate::vocab::VocabProfile,
+    page_words: Vec<(String, RectF)>,
+    page_annotations: Vec<(RectF, crate::vocab::WordEntry)>,
 }
 
 impl ReaderScreen {
@@ -185,6 +189,9 @@ impl ReaderScreen {
             plog(&format!("loaded instant page snapshot for {}", name));
         }
 
+        let vocab_db = crate::vocab::VocabDb::open();
+        let vocab_prof = crate::vocab::VocabProfile::load();
+
         ReaderScreen {
             path,
             w,
@@ -201,8 +208,13 @@ impl ReaderScreen {
             turns_since_full: 0,
             pending_turns: 0,
             time_str: current_time_str(),
+            vocab_db,
+            vocab_prof,
+            page_words: Vec::new(),
+            page_annotations: Vec::new(),
         }
     }
+
 
     fn book_name(&self) -> String {
         self.path
@@ -397,7 +409,124 @@ impl ReaderScreen {
             }
         }
     }
+
+    fn compute_annotations(&mut self) {
+        self.page_words.clear();
+        self.page_annotations.clear();
+
+        let Some(doc) = &self.doc else { return };
+        let Ok(page) = doc.load_page(self.page_no as i32) else { return };
+        let Ok(tp) = page.to_text_page(mupdf::TextPageFlags::empty()) else { return };
+
+        let bounds = page.bounds().unwrap_or_default();
+        let scale_x = self.w as f32 / bounds.width().max(1.0);
+        let scale_y = self.h as f32 / bounds.height().max(1.0);
+
+        let mut candidate_entries: Vec<(RectF, crate::vocab::WordEntry)> = Vec::new();
+
+        for block in tp.blocks() {
+            for line in block.lines() {
+                let mut cur_word = String::new();
+                let mut min_x = f32::MAX;
+                let mut min_y = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut max_y = f32::MIN;
+
+                for ch in line.chars() {
+                    if let Some(c) = ch.char() {
+                        if c.is_whitespace() {
+                            if !cur_word.is_empty() {
+                                let r = RectF::new(
+                                    min_x * scale_x,
+                                    min_y * scale_y,
+                                    max_x * scale_x,
+                                    max_y * scale_y,
+                                );
+                                self.page_words.push((cur_word.clone(), r));
+                                if let Some(db) = &self.vocab_db {
+                                    if let Some(entry) = db.lookup(&cur_word) {
+                                        if self.vocab_prof.should_annotate(&entry) {
+                                            candidate_entries.push((r, entry));
+                                        }
+                                    }
+                                }
+                                cur_word.clear();
+                                min_x = f32::MAX;
+                                min_y = f32::MAX;
+                                max_x = f32::MIN;
+                                max_y = f32::MIN;
+                            }
+                        } else {
+                            cur_word.push(c);
+                            let q = ch.quad();
+                            min_x = min_x.min(q.ul.x).min(q.ll.x);
+                            min_y = min_y.min(q.ul.y).min(q.ur.y);
+                            max_x = max_x.max(q.ur.x).max(q.lr.x);
+                            max_y = max_y.max(q.ll.y).max(q.lr.y);
+                        }
+                    }
+                }
+                if !cur_word.is_empty() {
+                    let r = RectF::new(
+                        min_x * scale_x,
+                        min_y * scale_y,
+                        max_x * scale_x,
+                        max_y * scale_y,
+                    );
+                    self.page_words.push((cur_word.clone(), r));
+                    if let Some(db) = &self.vocab_db {
+                        if let Some(entry) = db.lookup(&cur_word) {
+                            if self.vocab_prof.should_annotate(&entry) {
+                                candidate_entries.push((r, entry));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Budget annotations: take highest-difficulty words up to max_per_page
+        candidate_entries.sort_by(|a, b| b.1.difficulty.cmp(&a.1.difficulty));
+        self.page_annotations = candidate_entries
+            .into_iter()
+            .take(self.vocab_prof.max_per_page)
+            .collect();
+    }
+
+    fn find_word_at_pos(&self, vx: f32, vy: f32) -> Option<(String, RectF)> {
+        for (w, r) in &self.page_words {
+            // Hit test with generous touch padding
+            if vx >= r.x0 - 8.0 && vx <= r.x1 + 8.0 && vy >= r.y0 - 8.0 && vy <= r.y1 + 8.0 {
+                return Some((w.clone(), *r));
+            }
+        }
+        None
+    }
+
+
+    fn open_word_dialog(&mut self, entry: crate::vocab::WordEntry) -> Action {
+        let mut prof = self.vocab_prof.clone();
+        let word = entry.word.clone();
+        let diff = entry.difficulty;
+
+        Action::Push(Box::new(crate::word_dialog::WordDialog::new(
+            entry,
+            move |action| {
+                match action {
+                    crate::word_dialog::WordAction::StarLearning => {
+                        prof.record_lookup(&word, diff);
+                    }
+                    crate::word_dialog::WordAction::MarkKnown => {
+                        prof.mark_known(&word, diff);
+                    }
+                    crate::word_dialog::WordAction::Close => {}
+                }
+                Action::Pop
+            },
+        )))
+    }
 }
+
 
 impl Screen for ReaderScreen {
     fn default_edges(&self) -> bool {
@@ -618,11 +747,32 @@ impl Screen for ReaderScreen {
             p.blit_gray(0, 0, w, h, gray, w as usize);
         }
 
-        // Trigger neighbor pre-caching once doc is available
+        // Trigger neighbor pre-caching and Word Wise annotation extraction
         if self.doc.is_some() {
             self.pre_cache_neighbors(w as u32, h as u32);
+            if self.page_words.is_empty() {
+                self.compute_annotations();
+            }
         }
 
+
+        // Render Word Wise Inline Annotations
+        if self.vocab_prof.style == crate::vocab::AnnotationStyle::Interlinear {
+            for (r, entry) in &self.page_annotations {
+                let gloss = p.truncate(5.5, &entry.gloss_en, 180.0);
+                let gx = r.x0.round() as i32;
+                let gy = (r.y0 - 4.0).max(pt(20.0) as f32).round() as i32;
+                p.text(gx, gy, 5.5, if is_night { 190 } else { 75 }, &gloss);
+            }
+        } else if self.vocab_prof.style == crate::vocab::AnnotationStyle::Margin {
+            let mut my = h - pt(28.0);
+            for (_, entry) in self.page_annotations.iter().take(2) {
+                let line = format!("• {}: {}", entry.word, entry.gloss_en);
+                let trunc = p.truncate(7.0, &line, p.width_pt() - 32.0);
+                p.text(pt(16.0), my, 7.0, if is_night { 190 } else { 85 }, &trunc);
+                my += pt(10.0);
+            }
+        }
 
         // Header Status Line (Clock + Battery + Title)
         if self.settings.show_header {
@@ -645,23 +795,20 @@ impl Screen for ReaderScreen {
             }
         }
 
-        // Footer info
-        let footer = if self.doc.is_none() {
-            if self.pending_turns != 0 {
-                "Loading target page…".to_string()
-            } else {
-                format!("page {} · Loading book…", self.page_no + 1)
-            }
-        } else if self.settings.split.sub_box_count() > 1 {
+        // Bottom Footer Line (Reading Progress)
+        let footer = if self.loading.is_some() {
+            format!("page {} · Loading book…", self.page_no + 1)
+        } else if self.settings.split.total_steps(self.total) > self.total {
             format!(
-                "{} [{}.{}/{}]",
-                self.settings.split.preset.short_name(),
+                "page {} ({}/{}) · {}/{}",
                 self.page_no + 1,
                 self.sub_idx + 1,
-                self.total
+                self.settings.split.sub_box_count(),
+                self.settings.split.page_sub_to_step(self.page_no, self.sub_idx) + 1,
+                self.settings.split.total_steps(self.total)
             )
         } else {
-            format!("{} / {}", self.page_no + 1, self.total)
+            format!("page {} / {}", self.page_no + 1, self.total)
         };
 
 
@@ -753,7 +900,16 @@ impl Screen for ReaderScreen {
                     return self.open_settings_dialog();
                 }
 
-                // 6. Page turns
+                // 6. Word Tap: Check if user tapped a word on the page for definition / translation
+                if let Some((word_text, _rect)) = self.find_word_at_pos(vx as f32, vy as f32) {
+                    if let Some(db) = &self.vocab_db {
+                        if let Some(entry) = db.lookup(&word_text) {
+                            return self.open_word_dialog(entry);
+                        }
+                    }
+                }
+
+                // 7. Page turns
                 if vx < vis_w / 3 {
                     self.turn(false)
                 } else {
@@ -988,6 +1144,63 @@ mod tests {
     }
 
     #[test]
+    fn test_mupdf_page_text_methods() {
+        let pdf_path = "/tmp/sample_book.pdf";
+        if !std::path::Path::new(pdf_path).exists() {
+            return;
+        }
+        let doc = Document::open(pdf_path).expect("open doc");
+        let page = doc.load_page(20).expect("load page 20");
+        let tp = page.to_text_page(mupdf::TextPageFlags::empty()).expect("to_text_page");
+
+        let mut words = Vec::new();
+        for block in tp.blocks() {
+            for line in block.lines() {
+                let mut cur_word = String::new();
+                let mut min_x = f32::MAX;
+                let mut min_y = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut max_y = f32::MIN;
+
+                for ch in line.chars() {
+                    if let Some(c) = ch.char() {
+                        if c.is_whitespace() {
+                            if !cur_word.is_empty() {
+                                words.push((cur_word.clone(), min_x, min_y, max_x, max_y));
+                                cur_word.clear();
+                                min_x = f32::MAX;
+                                min_y = f32::MAX;
+                                max_x = f32::MIN;
+                                max_y = f32::MIN;
+                            }
+                        } else {
+                            cur_word.push(c);
+                            let q = ch.quad();
+                            min_x = min_x.min(q.ul.x).min(q.ll.x);
+                            min_y = min_y.min(q.ul.y).min(q.ur.y);
+                            max_x = max_x.max(q.ur.x).max(q.lr.x);
+                            max_y = max_y.max(q.ll.y).max(q.lr.y);
+                        }
+                    }
+                }
+                if !cur_word.is_empty() {
+                    words.push((cur_word, min_x, min_y, max_x, max_y));
+                }
+            }
+        }
+
+        println!("Extracted {} words from page 20. First 10:", words.len());
+        for (w, x0, y0, x1, y1) in words.iter().take(10) {
+            println!("  '{}' at [{:.1}, {:.1}, {:.1}, {:.1}]", w, x0, y0, x1, y1);
+        }
+        assert!(!words.is_empty());
+    }
+
+
+
+
+
+    #[test]
     fn test_render_subbox_horizontal2_landscape() {
         let pdf_path = "/tmp/sample_book.pdf";
         if !std::path::Path::new(pdf_path).exists() {
@@ -1001,6 +1214,7 @@ mod tests {
         let r1 = render_page(&doc, 20, 1, &settings, 1236, 1648);
         assert!(r1.is_some());
     }
+
 
     #[test]
     fn test_render_subbox_horizontal3_landscape() {
