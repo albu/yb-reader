@@ -7,6 +7,7 @@ pub struct WordDialog {
     entry: WordEntry,
     is_learning: bool,
     on_action: Option<Box<dyn FnOnce(WordAction) -> Action>>,
+    bg: Option<Vec<u8>>,
     dims: (i32, i32),
 }
 
@@ -17,7 +18,7 @@ pub enum WordAction {
 }
 
 impl WordDialog {
-    pub fn new<F>(entry: WordEntry, is_learning: bool, on_action: F) -> Self
+    pub fn new<F>(entry: WordEntry, is_learning: bool, bg: Option<Vec<u8>>, on_action: F) -> Self
     where
         F: FnOnce(WordAction) -> Action + 'static,
     {
@@ -25,6 +26,7 @@ impl WordDialog {
             entry,
             is_learning,
             on_action: Some(Box::new(on_action)),
+            bg,
             dims: (1236, 1648),
         }
     }
@@ -43,13 +45,25 @@ impl Screen for WordDialog {
         false
     }
 
+    fn on_enter(&mut self) -> Action {
+        // Fast partial refresh - NEVER flash full screen when opening dictionary sheet!
+        Action::Redraw
+    }
+
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
         self.dims = (w, h);
 
+        if let Some(bg) = &self.bg {
+            p.blit_gray(0, 0, w, h, bg, w as usize);
+        } else {
+            p.clear(255);
+        }
+
         // Bottom docked card
         let card_w = w - pt(16.0);
         let card_x = pt(8.0);
+
 
         // Wrap text to calculate required height
         let max_text_w = (card_w - pt(28.0)) as f32;

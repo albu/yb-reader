@@ -580,10 +580,12 @@ impl ReaderScreen {
         let word = entry.word.clone();
         let diff = entry.difficulty;
         let is_learning = prof.learning_words.contains(&word);
+        let bg = self.page_gray.clone();
 
         Action::Push(Box::new(crate::word_dialog::WordDialog::new(
             entry,
             is_learning,
+            bg,
             move |action| {
                 match action {
                     crate::word_dialog::WordAction::StarLearning => {
@@ -598,6 +600,7 @@ impl ReaderScreen {
             },
         )))
     }
+
 
 }
 
@@ -823,15 +826,15 @@ plog(&format!(
             }
         }
 
-
         // Render Word Wise Inline Annotations
         if self.vocab_prof.style == crate::vocab::AnnotationStyle::Interlinear {
+
             for (r, entry) in &self.page_annotations {
                 let full_gloss = &entry.gloss_en;
-                let short = if full_gloss.len() > 18 {
+                let short = if full_gloss.len() > 16 {
                     let mut s = String::new();
                     for w in full_gloss.split_whitespace() {
-                        if s.len() + w.len() + 1 > 17 {
+                        if s.len() + w.len() + 1 > 15 {
                             s.push('…');
                             break;
                         }
@@ -857,8 +860,18 @@ plog(&format!(
                 p.rect_outline_t(pill_r, 1, if is_night { 80 } else { 200 });
                 p.text(gx, gy, font_sz, if is_night { 235 } else { 30 }, &short);
             }
-
-
+        } else if self.vocab_prof.style == crate::vocab::AnnotationStyle::DottedUnderline {
+            for (r, _) in &self.page_annotations {
+                let y = (r.y1 - 1.0).round() as i32;
+                let x0 = r.x0.round() as i32;
+                let x1 = r.x1.round() as i32;
+                let dot_fg = if is_night { 190 } else { 80 };
+                let mut x = x0;
+                while x + 2 <= x1 {
+                    p.rect(yui::painter::Rect::new(x, y, 2, 2), dot_fg);
+                    x += 4;
+                }
+            }
         } else if self.vocab_prof.style == crate::vocab::AnnotationStyle::Margin {
             let mut my = h - pt(28.0);
             for (_, entry) in self.page_annotations.iter().take(2) {
@@ -870,6 +883,7 @@ plog(&format!(
         }
 
         // Header Status Line (Clock + Battery + Title)
+
         if self.settings.show_header {
             let (bat_cap, _) = sysinfo::battery();
             let bat_str = format!("{}%", bat_cap);
