@@ -88,46 +88,114 @@ def build():
                 break
     print(f"Loaded {len(word_ranks)} frequency ranks.")
 
+    PREFIXES = ["counter", "under", "over", "anti", "semi", "auto", "post", "pre", "non", "mis", "dis", "sub", "super", "inter", "un", "re", "in", "im", "de", "co"]
+    SUFFIXES = ["lessness", "fulness", "ability", "ibility", "lessly", "fully", "ation", "ition", "liness", "ness", "able", "ible", "ment", "tion", "sion", "ally", "ized", "ised", "ize", "ise", "est", "ish", "ful", "less", "ing", "ity", "ous", "ive", "ed", "ly", "er", "or", "al", "en", "s"]
+
+
+    def find_deep_root(w, depth=0):
+        if depth > 3:
+            return w, word_ranks.get(w, 999999)
+        best_root = w
+        best_rank = word_ranks.get(w, 999999)
+
+        candidates = [w]
+        for p in PREFIXES:
+            if w.startswith(p) and len(w) > len(p) + 2:
+                candidates.append(w[len(p):])
+
+        for cand in candidates:
+            r = word_ranks.get(cand, 999999)
+            if r < best_rank:
+                best_rank = r
+                best_root = cand
+
+            for s in SUFFIXES:
+                if cand.endswith(s) and len(cand) > len(s) + 2:
+                    stem = cand[:-len(s)]
+                    for variant in [stem, stem + "e", stem + "y"]:
+                        r_var = word_ranks.get(variant, 999999)
+                        if r_var < best_rank:
+                            best_rank = r_var
+                            best_root = variant
+                        # Recurse one more level
+                        if depth < 2:
+                            rec_root, rec_rank = find_deep_root(variant, depth + 1)
+                            if rec_rank < best_rank:
+                                best_rank = rec_rank
+                                best_root = rec_root
+
+        return best_root, best_rank
+
+    def is_transparent(defn):
+        d = defn.lower().strip()
+        if (d.startswith("in a ") or d.startswith("in an ")) and (d.endswith("manner") or d.endswith("way")):
+            return True
+        if d.startswith("not ") and len(d.split()) <= 4:
+            return True
+        if d.startswith("the quality of being ") or d.startswith("the state of being ") or d.startswith("quality of being "):
+            return True
+        if d.startswith("having the quality of ") or d.startswith("an quality of "):
+            return True
+        return False
+
+    def rank_to_diff(r):
+        if r <= 1000:
+            return int(r * 15 / 1000), 1
+        elif r <= 3000:
+            return 15 + int((r - 1000) * 15 / 2000), 2
+        elif r <= 7500:
+            return 30 + int((r - 3000) * 20 / 4500), 3
+        elif r <= 16000:
+            return 50 + int((r - 7500) * 20 / 8500), 4
+        elif r <= 32000:
+            return 70 + int((r - 16000) * 18 / 16000), 5
+        else:
+            return 88 + min(12, int((r - 32000) * 12 / 20000)), 6
+
     # 3. Process candidate words
     vocab = {}
     
     # First pass: Ranked words with WordNet definitions
-    for w, rank in word_ranks.items():
+    for w, raw_rank in word_ranks.items():
         w_clean = clean_word(w)
         if len(w_clean) < 2 or len(w_clean) > 28:
             continue
 
         gloss_en = all_defs.get(w_clean, "")
-        if not gloss_en and rank > 25000:
+        if not gloss_en and raw_rank > 25000:
             continue
 
-        # Difficulty: 0 (most common) to 100 (rarest/advanced)
-        if rank <= 1000:
-            cefr = 1  # A1
-            diff = int(rank * 15 / 1000)
-        elif rank <= 3000:
-            cefr = 2  # A2
-            diff = 15 + int((rank - 1000) * 15 / 2000)
-        elif rank <= 7500:
-            cefr = 3  # B1
-            diff = 30 + int((rank - 3000) * 20 / 4500)
-        elif rank <= 16000:
-            cefr = 4  # B2
-            diff = 50 + int((rank - 7500) * 20 / 8500)
-        elif rank <= 32000:
-            cefr = 5  # C1
-            diff = 70 + int((rank - 16000) * 18 / 16000)
+        # Morphological root decomposition
+        root, root_rank = find_deep_root(w_clean)
+        
+        # Transparent definitions ("In a ... manner", "Not ...") or common roots
+        if is_transparent(gloss_en) and root_rank < 30000:
+            diff, cefr = 10, 1  # Suppress from automatic annotation
+        elif root and root_rank < 12000 and root_rank < raw_rank:
+            root_diff, root_cefr = rank_to_diff(root_rank)
+            diff = min(55, root_diff + 6)
+            cefr = root_cefr if diff < 50 else 3
         else:
-            cefr = 6  # C2
-            diff = 88 + min(12, int((rank - 32000) * 12 / 20000))
+            diff, cefr = rank_to_diff(raw_rank)
 
         vocab[w_clean] = (diff, cefr, gloss_en, "")
 
     # Second pass: ensure rich literary/advanced WordNet words are included
     for w_clean, gloss_en in all_defs.items():
         if w_clean not in vocab and 3 <= len(w_clean) <= 24:
-            # Unranked rare words -> C2 difficulty (92)
-            vocab[w_clean] = (92, 6, gloss_en, "")
+            root, root_rank = find_deep_root(w_clean)
+            if is_transparent(gloss_en) and root_rank < 30000:
+                diff, cefr = 10, 1
+            elif root and root_rank < 12000:
+                root_diff, root_cefr = rank_to_diff(root_rank)
+                diff = min(55, root_diff + 6)
+                cefr = root_cefr
+            else:
+                diff = 92
+                cefr = 6
+            vocab[w_clean] = (diff, cefr, gloss_en, "")
+
+
 
     sorted_words = sorted(vocab.keys())
     count = len(sorted_words)
