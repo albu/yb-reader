@@ -21,14 +21,13 @@ def clean_word(w):
 def clean_gloss(raw_def):
     if not raw_def:
         return ""
-    # Strip example sentences after semicolon or quote
-    first_clause = re.split(r'[;"]', raw_def)[0].strip()
+    # Strip example sentences starting with quotes (WordNet uses `"example"`)
+    parts = re.split(r'\s*;\s*"', raw_def)
+    definition = parts[0].strip()
     # Strip leading parenthesis qualifiers like "(of language)"
-    first_clause = re.sub(r'^\([^\)]+\)\s*', '', first_clause)
-    first_clause = first_clause.strip()
-    if len(first_clause) > 55:
-        first_clause = first_clause[:52] + "..."
-    return first_clause.capitalize()
+    definition = re.sub(r'^\([^\)]+\)\s*', '', definition).strip()
+    return definition.capitalize()
+
 
 def parse_wordnet_file(z, filename):
     entries = {}

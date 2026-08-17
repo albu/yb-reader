@@ -43,20 +43,49 @@ impl Screen for WordDialog {
         let (w, h) = p.size();
 
         // Card dimensions (centered modal)
-        let card_w = pt(250.0).min(w - pt(24.0));
-        let card_h = pt(190.0);
+        let card_w = pt(255.0).min(w - pt(24.0));
         let card_x = (w - card_w) / 2;
-        let card_y = (h - card_h) / 2;
 
+        // Wrap text to calculate required height
+        let max_text_w = (card_w - pt(28.0)) as f32;
+        let mut lines = Vec::new();
+
+        if !self.entry.gloss_en.is_empty() {
+            let words: Vec<&str> = self.entry.gloss_en.split_whitespace().collect();
+            let mut cur_line = String::new();
+            for word in words {
+                let test = if cur_line.is_empty() {
+                    word.to_string()
+                } else {
+                    format!("{} {}", cur_line, word)
+                };
+                if p.text_width(10.0, &test) > max_text_w {
+                    if !cur_line.is_empty() {
+                        lines.push(cur_line);
+                    }
+                    cur_line = word.to_string();
+                } else {
+                    cur_line = test;
+                }
+
+            }
+            if !cur_line.is_empty() {
+                lines.push(cur_line);
+            }
+        }
+
+        let body_h = pt(40.0) + (lines.len().max(1) as i32 * pt(15.0));
+        let card_h = (pt(75.0) + body_h).clamp(pt(150.0), pt(280.0));
+        let card_y = (h - card_h) / 2;
         let card_rect = Rect::new(card_x, card_y, card_w, card_h);
 
-        // Backdrop
+        // Backdrop Card
         p.rect(card_rect, 255);
         p.rect_outline_t(card_rect, 3, 0);
 
         // Header: Word Title + CEFR Badge
         let title_y = card_y + pt(24.0);
-        let title = p.truncate(14.0, &self.entry.word, (card_w - pt(70.0)) as f32);
+        let title = p.truncate(14.0, &self.entry.word, (card_w - pt(85.0)) as f32);
         p.text(card_x + pt(14.0), title_y, 14.0, 0, &title);
 
         let badge_text = format!("{} (lvl {})", self.entry.cefr_str(), self.entry.difficulty);
@@ -66,34 +95,14 @@ impl Screen for WordDialog {
 
         // Body: English Gloss
         let mut text_y = title_y + pt(26.0);
-        if !self.entry.gloss_en.is_empty() {
-            p.text(card_x + pt(14.0), text_y, 8.0, 110, "DEFINITION");
-            text_y += pt(14.0);
+        p.text(card_x + pt(14.0), text_y, 8.0, 110, "DEFINITION");
+        text_y += pt(15.0);
 
-            let max_chars = 38;
-            let words: Vec<&str> = self.entry.gloss_en.split_whitespace().collect();
-            let mut line = String::new();
-
-            for word in words {
-                if line.len() + word.len() + 1 > max_chars {
-                    p.text(card_x + pt(14.0), text_y, 9.5, 0, &line);
-                    text_y += pt(14.0);
-                    line = word.to_string();
-                } else if line.is_empty() {
-                    line = word.to_string();
-                } else {
-                    line.push(' ');
-                    line.push_str(word);
-                }
-            }
-            if !line.is_empty() {
-                p.text(card_x + pt(14.0), text_y, 9.5, 0, &line);
-                text_y += pt(16.0);
-            }
+        for line in &lines {
+            p.text(card_x + pt(14.0), text_y, 10.0, 0, line);
+            text_y += pt(15.0);
         }
 
-
-        // Translation (if available)
         if !self.entry.gloss_tr.is_empty() {
             text_y += pt(4.0);
             p.text(card_x + pt(14.0), text_y, 8.0, 110, "TRANSLATION");
@@ -102,36 +111,36 @@ impl Screen for WordDialog {
         }
 
         // Action Buttons Row at bottom
-        let btn_y = card_y + card_h - pt(38.0);
-        let btn_h = pt(28.0);
+        let btn_y = card_y + card_h - pt(36.0);
+        let btn_h = pt(26.0);
         let btn_w = (card_w - pt(36.0)) / 2;
 
-        // Button 1: [ ★ Learning ]
+        // Button 1: [ ★ Star / Learn ]
         let btn1_x = card_x + pt(12.0);
         let btn1_rect = Rect::new(btn1_x, btn_y, btn_w, btn_h);
         p.rect(btn1_rect, 245);
         p.rect_outline_t(btn1_rect, 1, 0);
-        p.text_center(btn_y + pt(18.0), 8.5, 0, "★ Star / Learn");
+        p.text_center_in(btn1_x, btn1_x + btn_w, btn_y + pt(17.0), 8.5, 0, "★ Star / Learn");
 
         // Button 2: [ ✓ Mark Known ]
         let btn2_x = btn1_x + btn_w + pt(12.0);
         let btn2_rect = Rect::new(btn2_x, btn_y, btn_w, btn_h);
         p.rect(btn2_rect, 245);
         p.rect_outline_t(btn2_rect, 1, 0);
-        p.text_center(btn_y + pt(18.0), 8.5, 0, "✓ Mark Known");
+        p.text_center_in(btn2_x, btn2_x + btn_w, btn_y + pt(17.0), 8.5, 0, "✓ Mark Known");
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
         match g {
             Gesture::Tap { x, y } => {
                 let (w, h) = (1236, 1648); // Screen bounds
-                let card_w = pt(250.0).min(w - pt(24.0));
-                let card_h = pt(190.0);
+                let card_w = pt(255.0).min(w - pt(24.0));
+                let card_h = pt(200.0);
                 let card_x = (w - card_w) / 2;
                 let card_y = (h - card_h) / 2;
 
-                let btn_y = card_y + card_h - pt(38.0);
-                let btn_h = pt(28.0);
+                let btn_y = card_y + card_h - pt(36.0);
+                let btn_h = pt(26.0);
                 let btn_w = (card_w - pt(36.0)) / 2;
 
                 let btn1_x = card_x + pt(12.0);
@@ -163,4 +172,5 @@ impl Screen for WordDialog {
             _ => Action::Keep,
         }
     }
+
 }

@@ -306,9 +306,6 @@ impl ReaderScreen {
         }
     }
 
-
-
-
     fn open_settings_dialog(&mut self) -> Action {
         let settings = self.settings;
         let is_pdf = self.is_pdf();
@@ -334,11 +331,11 @@ impl ReaderScreen {
             samples,
             move |new_settings| {
                 positions::record_pos(&path_name, page_no, total, 0, Some(new_settings));
-                Action::Redraw
+                Action::Pop
             },
         )))
-
     }
+
 
     fn open_curtain(&mut self) -> Action {
         Action::Push(Box::new(CurtainScreen::new()))
@@ -656,7 +653,7 @@ impl Screen for ReaderScreen {
                 ));
             }
         }
-        plog(&format!(
+plog(&format!(
             "book closed rss={} avail={}",
             rss_mib(),
             avail_mib()
@@ -665,6 +662,10 @@ impl Screen for ReaderScreen {
 
     fn on_resume(&mut self) -> Action {
         self.time_str = current_time_str();
+        self.vocab_prof = crate::vocab::VocabProfile::load();
+        self.page_words.clear();
+        self.page_annotations.clear();
+
         let pos = positions::resume_pos(&self.book_name());
         if let Some(s) = pos.settings {
             let font_changed = (s.font_size - self.settings.font_size).abs() > 0.01
@@ -714,41 +715,31 @@ impl Screen for ReaderScreen {
             return Action::Keep;
         };
         match rx.try_recv() {
-            Ok(Ok(ready)) => {
+            Ok(Ok(BookReady { doc, total })) => {
+                self.doc = Some(doc.0);
+                self.total = total;
                 self.loading = None;
-                self.total = ready.total;
-                let SendDoc(doc) = ready.doc;
-                self.doc = Some(doc);
-
-                // Drain any pending fast turns queued during background loading
                 if self.pending_turns != 0 {
-                    let total_steps = self.settings.split.total_steps(self.total);
-                    let cur_step = self
-                        .settings
-                        .split
-                        .page_sub_to_step(self.page_no, self.sub_idx);
-                    let target_step = (cur_step as i32 + self.pending_turns)
-                        .clamp(0, (total_steps as i32).saturating_sub(1)) as usize;
-                    let (new_page, new_sub) = self.settings.split.step_to_page_sub(target_step);
-                    self.page_no = new_page;
-                    self.sub_idx = new_sub;
-                    self.page_gray = None;
+                    let steps = self.settings.split.total_steps(self.total);
+                    let cur_step = self.settings.split.page_sub_to_step(self.page_no, self.sub_idx);
+                    let target_step = (cur_step as i32 + self.pending_turns).clamp(0, steps.saturating_sub(1) as i32) as usize;
+                    let (target_page, target_sub) = self.settings.split.step_to_page_sub(target_step);
+                    self.page_no = target_page;
+                    self.sub_idx = target_sub;
                     self.pending_turns = 0;
                 }
-
                 self.save_progress();
                 Action::Redraw
             }
             Ok(Err(e)) => {
-                plog(&format!("open {}: {}", self.path.display(), e));
+                self.err = Some(e);
                 self.loading = None;
-                self.err = Some("Could not open book".to_string());
                 Action::Redraw
             }
-            Err(TryRecvError::Empty) => Action::Keep,
-            Err(TryRecvError::Disconnected) => {
+            Err(mpsc::TryRecvError::Empty) => Action::Keep,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.err = Some("Loader thread disconnected".to_string());
                 self.loading = None;
-                self.err = Some("Could not open book".to_string());
                 Action::Redraw
             }
         }
@@ -833,11 +824,35 @@ impl Screen for ReaderScreen {
         // Render Word Wise Inline Annotations
         if self.vocab_prof.style == crate::vocab::AnnotationStyle::Interlinear {
             for (r, entry) in &self.page_annotations {
-                let gloss = p.truncate(5.5, &entry.gloss_en, 180.0);
+                let full_gloss = &entry.gloss_en;
+                let short = if full_gloss.len() > 18 {
+                    let mut s = String::new();
+                    for w in full_gloss.split_whitespace() {
+                        if s.len() + w.len() + 1 > 17 {
+                            s.push('…');
+                            break;
+                        }
+                        if !s.is_empty() {
+                            s.push(' ');
+                        }
+                        s.push_str(w);
+                    }
+                    s
+                } else {
+                    full_gloss.clone()
+                };
+
+                let font_sz = 5.0;
+                let tw = p.text_width(font_sz, &short).round() as i32;
                 let gx = r.x0.round() as i32;
-                let gy = (r.y0 - 4.0).max(pt(20.0) as f32).round() as i32;
-                p.text(gx, gy, 5.5, if is_night { 190 } else { 75 }, &gloss);
+                let gy = (r.y0 - pt(2.5) as f32).round() as i32;
+
+                // Draw solid background pill behind gloss to cleanly prevent collision with glyph ascenders/descenders
+                let pill_r = yui::painter::Rect::new(gx - 2, gy - pt(5.5), tw + 4, pt(6.5));
+                p.rect(pill_r, if is_night { 0 } else { 255 });
+                p.text(gx, gy, font_sz, if is_night { 210 } else { 60 }, &short);
             }
+
         } else if self.vocab_prof.style == crate::vocab::AnnotationStyle::Margin {
             let mut my = h - pt(28.0);
             for (_, entry) in self.page_annotations.iter().take(2) {
