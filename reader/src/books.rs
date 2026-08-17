@@ -842,16 +842,19 @@ plog(&format!(
                     full_gloss.clone()
                 };
 
-                let font_sz = 5.0;
+                let font_sz = 4.5;
                 let tw = p.text_width(font_sz, &short).round() as i32;
-                let gx = r.x0.round() as i32;
-                let gy = (r.y0 - pt(2.5) as f32).round() as i32;
+                let word_mid = ((r.x0 + r.x1) / 2.0).round() as i32;
+                let gx = (word_mid - tw / 2).max(pt(6.0));
+                let gy = (r.y0 - pt(2.0) as f32).round() as i32;
 
-                // Draw solid background pill behind gloss to cleanly prevent collision with glyph ascenders/descenders
-                let pill_r = yui::painter::Rect::new(gx - 2, gy - pt(5.5), tw + 4, pt(6.5));
+                // Draw floating outline pill badge directly centered above the word
+                let pill_r = yui::painter::Rect::new(gx - pt(2.0), gy - pt(4.5), tw + pt(4.0), pt(5.5));
                 p.rect(pill_r, if is_night { 0 } else { 255 });
-                p.text(gx, gy, font_sz, if is_night { 210 } else { 60 }, &short);
+                p.rect_outline_t(pill_r, 1, if is_night { 80 } else { 200 });
+                p.text(gx, gy, font_sz, if is_night { 235 } else { 30 }, &short);
             }
+
 
         } else if self.vocab_prof.style == crate::vocab::AnnotationStyle::Margin {
             let mut my = h - pt(28.0);

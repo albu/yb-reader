@@ -92,7 +92,9 @@ struct Touch {
     x_set: bool,
     y_set: bool,
     _down: Instant,
+    long_press_fired: bool,
 }
+
 
 pub struct Input {
     f: File,
@@ -349,6 +351,23 @@ impl Input {
         let deadline = Instant::now() + timeout;
 
         loop {
+            // Check active hold for immediate long-press trigger while finger is held down!
+            for t in self.slots.values_mut() {
+                if !t.long_press_fired && t.x_set && t.y_set {
+                    let dx = (t.x - t.down_x).abs();
+                    let dy = (t.y - t.down_y).abs();
+                    if dx <= 25 && dy <= 25 && t._down.elapsed() >= Duration::from_millis(360) {
+                        t.long_press_fired = true;
+                        let g = Gesture::LongPress {
+                            x: t.x.max(0) as u32,
+                            y: t.y.max(0) as u32,
+                        };
+                        crate::log::plog(&format!("input: {:?}", g));
+                        return Some(g);
+                    }
+                }
+            }
+
             let remain = deadline.saturating_duration_since(Instant::now());
             if remain.is_zero() {
                 return None;
@@ -366,7 +385,7 @@ impl Input {
                 },
             ];
             let n_fds = if pwr_fd >= 0 { 2 } else { 1 };
-            let ms = remain.as_millis().min(i64::MAX as u128) as libc::c_int;
+            let ms = (remain.as_millis() as libc::c_int).min(40);
             let rv = unsafe { libc::poll(pfds.as_mut_ptr(), n_fds, ms) };
             if rv < 0 {
                 let e = std::io::Error::last_os_error();
@@ -376,7 +395,7 @@ impl Input {
                 return None;
             }
             if rv == 0 {
-                return None;
+                continue;
             }
 
             // Check power key events first
@@ -421,10 +440,7 @@ impl Input {
         }
     }
 
-
-
     fn drain_events(&mut self) -> Option<Gesture> {
-
         let mut buf = [0u8; 512];
         let mut result = None;
         loop {
@@ -488,6 +504,7 @@ impl Input {
                             x_set: false,
                             y_set: false,
                             _down: now,
+                            long_press_fired: false,
                         },
                     );
                 }
@@ -495,8 +512,6 @@ impl Input {
             }
             ABS_MT_POSITION_X => {
                 if let Some(t) = self.slots.get_mut(&self.current_slot) {
-                    // First X of the touch defines the press-down position;
-                    // without this every tap looks like a swipe from (0,0).
                     if !t.x_set {
                         t.down_x = value;
                         t.x_set = true;
@@ -545,6 +560,9 @@ impl Input {
 
         if let Some(t) = self.released.pop() {
             self.released.clear();
+            if t.long_press_fired {
+                return None; // Finger lifted after long-press already triggered while holding!
+            }
             let dx = t.x - t.down_x;
             let dy = t.y - t.down_y;
             if dx.abs() > SWIPE_MIN_DIST || dy.abs() > SWIPE_MIN_DIST {
@@ -567,17 +585,12 @@ impl Input {
                     ey: t.y.max(0) as u32,
                 });
             }
-            if t._down.elapsed() >= Duration::from_millis(450) {
-                return Some(Gesture::LongPress {
-                    x: t.x.max(0) as u32,
-                    y: t.y.max(0) as u32,
-                });
-            }
             return Some(Gesture::Tap {
                 x: t.x.max(0) as u32,
                 y: t.y.max(0) as u32,
             });
         }
+
 
 
         // Legacy single-touch protocol (BTN_TOUCH + ABS_X/Y): on release.
