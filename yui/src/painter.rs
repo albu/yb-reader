@@ -96,6 +96,77 @@ impl<'a> Painter<'a> {
         self.text(x, y, size_pt, color, text);
     }
 
+    /// Draws text centered at (cx, cy), rotated by 0, 90, or 270 degrees.
+    pub fn text_center_rotated(
+        &mut self,
+        cx: i32,
+        cy: i32,
+        size_pt: f32,
+        color: u8,
+        text: &str,
+        rotation: u16,
+    ) {
+        if rotation == 0 {
+            let tw = self.text_width(size_pt, text) as i32;
+            let x = cx - tw / 2;
+            self.text(x, cy, size_pt, color, text);
+            return;
+        }
+
+        let tw = (self.text_width(size_pt, text).ceil() as usize).max(1);
+        let th = ((size_pt * PX * 1.5).ceil() as usize).max(1);
+        let mut tmp = vec![255u8; tw * th];
+        let baseline = (size_pt * PX * 1.1) as i32;
+        self.font
+            .draw(&mut tmp, tw, 0, baseline, size_pt * PX, color, text);
+
+        if rotation == 270 {
+            // 270 deg CW: width `tw` spans along physical Y, height `th` along physical X
+            let ox = cx - (th as i32) / 2;
+            let oy = cy - (tw as i32) / 2;
+
+            for r in 0..th {
+                let dx = ox + r as i32;
+                if dx < 0 || dx >= self.w {
+                    continue;
+                }
+                for c in 0..tw {
+                    let dy = oy + (tw - 1 - c) as i32;
+                    if dy < 0 || dy >= self.h {
+                        continue;
+                    }
+                    let pixel = tmp[r * tw + c];
+                    if pixel < 255 {
+                        let dst = &mut self.buf[dy as usize * self.stride + dx as usize];
+                        *dst = (*dst as u32 * pixel as u32 / 255) as u8;
+                    }
+                }
+            }
+        } else if rotation == 90 {
+            let ox = cx - (th as i32) / 2;
+            let oy = cy - (tw as i32) / 2;
+
+            for r in 0..th {
+                let dx = ox + (th - 1 - r) as i32;
+                if dx < 0 || dx >= self.w {
+                    continue;
+                }
+                for c in 0..tw {
+                    let dy = oy + c as i32;
+                    if dy < 0 || dy >= self.h {
+                        continue;
+                    }
+                    let pixel = tmp[r * tw + c];
+                    if pixel < 255 {
+                        let dst = &mut self.buf[dy as usize * self.stride + dx as usize];
+                        *dst = (*dst as u32 * pixel as u32 / 255) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+
     /// Centered within [x0, x1) — for cells (nav tabs, list columns).
     pub fn text_center_in(&mut self, x0: i32, x1: i32, y: i32, size_pt: f32, color: u8, text: &str) {
         let tw = self.text_width(size_pt, text) as i32;
@@ -171,12 +242,41 @@ impl<'a> Painter<'a> {
         }
     }
 
+    pub fn circle_fill(&mut self, cx: i32, cy: i32, r: i32, color: u8) {
+        let r2 = r * r;
+        for dy in -r..=r {
+            let y = cy + dy;
+            let dx = ((r2 - dy * dy) as f32).sqrt().round() as i32;
+            self.hline_t(y, cx - dx, cx + dx, 1, color);
+        }
+    }
+
+    pub fn circle_outline_t(&mut self, cx: i32, cy: i32, r: i32, t: i32, color: u8) {
+        let t = t.max(1);
+        let r_out2 = r * r;
+        let r_in = (r - t).max(0);
+        let r_in2 = r_in * r_in;
+        for dy in -r..=r {
+            let y = cy + dy;
+            let dy2 = dy * dy;
+            let dx_out = ((r_out2 - dy2) as f32).sqrt().round() as i32;
+            if dy.abs() >= r_in {
+                self.hline_t(y, cx - dx_out, cx + dx_out, 1, color);
+            } else {
+                let dx_in = ((r_in2 - dy2) as f32).sqrt().round() as i32;
+                self.hline_t(y, cx - dx_out, cx - dx_in, 1, color);
+                self.hline_t(y, cx + dx_in, cx + dx_out, 1, color);
+            }
+        }
+    }
+
     /// Slider bar: light-gray track with a black fill for `frac` of it.
     pub fn bar(&mut self, r: Rect, frac: f32) {
         self.rect(r, 200);
         let fw = (r.w as f32 * frac.clamp(0.0, 1.0)) as i32;
         if fw > 0 {
             self.rect(Rect::new(r.x, r.y, fw, r.h), 0);
+
         }
     }
 

@@ -14,7 +14,7 @@ const ICON_Y_OFF_PT: f32 = 8.0;
 const ICON_W_PT: f32 = 17.0;
 const ICON_H_PT: f32 = 14.0;
 const UNDERLINE_PT: f32 = 3.0;
-const STROKE: i32 = 2;
+
 
 /// Line-art tab icons (drawn with Painter primitives, no font needed).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,19 +85,49 @@ fn draw_icon(p: &mut Painter, icon: Icon, x: i32, y: i32, color: u8) {
     match icon {
         Icon::Home => {
             let mid = x + w / 2;
-            let roof = y + h / 2;
-            p.line_w(x + 1, roof, mid, y + STROKE, STROKE, color);
-            p.line_w(mid, y + STROKE, x + w - 1, roof, STROKE, color);
-            p.rect_outline_t(Rect::new(x + pt(3.0), roof, w - pt(6.0), h / 2 - STROKE), STROKE, color);
+            let roof_top = y + pt(1.0);
+            let eaves_y = y + h / 2 - pt(1.0);
+            // Chimney
+            p.rect(Rect::new(x + w - pt(5.0), roof_top + pt(2.0), pt(2.5), pt(5.0)), color);
+            // Roof peak lines
+            p.line_w(x + pt(1.0), eaves_y, mid, roof_top, 3, color);
+            p.line_w(mid, roof_top, x + w - pt(1.0), eaves_y, 3, color);
+            // House body
+            let body_x = x + pt(3.0);
+            let body_w = w - pt(6.0);
+            let body_y = eaves_y;
+            let body_h = h - (eaves_y - y) - pt(1.0);
+            p.rect_outline_t(Rect::new(body_x, body_y, body_w, body_h), 2, color);
+            // Centered Door
+            let door_w = pt(4.5);
+            let door_h = pt(6.5);
+            let door_x = x + (w - door_w) / 2;
+            let door_y = body_y + body_h - door_h;
+            p.rect(Rect::new(door_x, door_y, door_w, door_h), color);
         }
         Icon::Books => {
-            let spine = x + w / 2;
-            p.line_w(spine, y + 2, spine, y + h - 2, STROKE, color);
-            p.rect_outline_t(Rect::new(x + 1, y + 2, w / 2 - 2, h - 5), STROKE, color);
-            p.rect_outline_t(Rect::new(spine + 1, y + 2, w / 2 - 2, h - 5), STROKE, color);
+            let mid = x + w / 2;
+            let pad_y = pt(2.0);
+            let book_h = h - 2 * pad_y;
+            // Central spine
+            p.line_w(mid, y + pad_y, mid, y + pad_y + book_h, 3, color);
+            // Left page curve
+            p.line_w(mid, y + pad_y, x + pt(2.0), y + pad_y + pt(2.0), 2, color);
+            p.line_w(x + pt(2.0), y + pad_y + pt(2.0), x + pt(2.0), y + pad_y + book_h - pt(1.0), 2, color);
+            p.line_w(x + pt(2.0), y + pad_y + book_h - pt(1.0), mid, y + pad_y + book_h, 2, color);
+            // Right page curve
+            p.line_w(mid, y + pad_y, x + w - pt(2.0), y + pad_y + pt(2.0), 2, color);
+            p.line_w(x + w - pt(2.0), y + pad_y + pt(2.0), x + w - pt(2.0), y + pad_y + book_h - pt(1.0), 2, color);
+            p.line_w(x + w - pt(2.0), y + pad_y + book_h - pt(1.0), mid, y + pad_y + book_h, 2, color);
+            // Text line hints on pages
+            p.hline_t(y + pad_y + pt(5.0), x + pt(4.5), mid - pt(3.0), 1, color);
+            p.hline_t(y + pad_y + pt(8.0), x + pt(4.5), mid - pt(3.0), 1, color);
+            p.hline_t(y + pad_y + pt(5.0), mid + pt(3.0), x + w - pt(4.5), 1, color);
+            p.hline_t(y + pad_y + pt(8.0), mid + pt(3.0), x + w - pt(4.5), 1, color);
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {

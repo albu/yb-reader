@@ -24,15 +24,16 @@ cd "$DIR"
 # exec'd reader); mkdir is atomic, so only one wins. Without this, two
 # readers both read the touchscreen and every tap fires twice.
 LOCK=/tmp/yb-reader.lock
-if ! mkdir "$LOCK" 2>/dev/null; then
+if ! mkdir -m 777 "$LOCK" 2>/dev/null; then
     if pgrep -x reader >/dev/null 2>&1; then
         exit 0
     fi
     # No reader but a lock: leftovers from a crash — reclaim it.
-    rmdir "$LOCK" 2>/dev/null
-    mkdir "$LOCK" 2>/dev/null || exit 0
+    rm -rf "$LOCK" 2>/dev/null
+    mkdir -m 777 "$LOCK" 2>/dev/null || exit 0
 fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+trap 'rm -rf "$LOCK" 2>/dev/null' EXIT INT TERM
+
 
 lipc-set-prop com.lab126.pillow disableEnablePillow disable 2>/dev/null
 # Freeze the on-screen UI (awesome, the WM) and the Java framework core

@@ -78,8 +78,10 @@ impl Screen for MenuScreen {
             | Gesture::Swipe { dir: SwipeDir::South, .. } => Action::Quit,
             Gesture::Swipe { .. } => Action::Keep,
             Gesture::TwoFingerTap => Action::Keep,
+            _ => Action::Keep,
         }
     }
+
 }
 
 /// --- MessageScreen layout (pt): ported from ui.rs::message ---
@@ -125,6 +127,152 @@ impl Screen for MessageScreen {
         false
     }
 }
+
+/// Low-power sleep overlay: turns off frontlight, locks touch input,
+/// renders a clean "Sleeping" badge, and wakes up on power button press.
+pub struct SleepScreen {
+    prev_bright: i32,
+    prev_tone: i32,
+    image: Option<Vec<u8>>,
+}
+
+impl SleepScreen {
+    pub fn new() -> SleepScreen {
+        let fl = ybdev::frontlight::Frontlight::open().ok();
+        let prev_bright = fl.as_ref().map(|f| f.get()).unwrap_or(0);
+        let prev_tone = fl.as_ref().map(|f| f.tone_get()).unwrap_or(0);
+        if let Some(f) = &fl {
+            f.set(0);
+            f.tone_set(0);
+        }
+
+        // Shut off Wi-Fi radio power amplifier to eliminate standby drain
+        let _ = std::process::Command::new("/sbin/ifconfig")
+            .args(&["wlan0", "down"])
+            .output();
+        let _ = std::process::Command::new("lipc-set-prop")
+            .args(&["-i", "com.lab126.cmd", "wirelessEnable", "0"])
+            .status();
+        let _ = std::process::Command::new("lipc-set-prop")
+            .args(&["-i", "com.lab126.wifid", "enable", "0"])
+            .status();
+
+        let image = pick_random_screensaver(1236, 1648);
+
+
+        SleepScreen {
+            prev_bright,
+            prev_tone,
+            image,
+        }
+    }
+}
+
+fn pick_random_screensaver(dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
+    let dirs = [
+        "/mnt/us/screensavers",
+        "/mnt/us/extensions/reader/screensavers",
+        "/tmp/dev_screensaver",
+    ];
+    let mut files = Vec::new();
+    for d in dirs {
+        if let Ok(entries) = std::fs::read_dir(d) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(ext) = p.extension() {
+                    let ext_str = ext.to_string_lossy().to_ascii_lowercase();
+                    if ext_str == "png" || ext_str == "jpg" || ext_str == "jpeg" {
+                        files.push(p);
+                    }
+                }
+            }
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let choice = &files[(seed as usize) % files.len()];
+    let data = std::fs::read(choice).ok()?;
+    ybdev::img::load_png_fitted(&data, dst_w, dst_h)
+}
+
+impl Screen for SleepScreen {
+    fn on_enter(&mut self) -> Action {
+        Action::Redraw
+    }
+
+    fn on_resume(&mut self) -> Action {
+        Action::Redraw
+    }
+
+    fn draw(&mut self, p: &mut Painter) {
+        let (w, h) = p.size();
+        if let Some(img) = &self.image {
+            p.blit_gray(0, 0, w, h, img, w as usize);
+        } else {
+            let bw = pt(220.0);
+            let bh = pt(60.0);
+            let bx = (w - bw) / 2;
+            let by = (h - bh) / 2;
+
+            p.rect(crate::painter::Rect::new(bx, by, bw, bh), 255);
+            p.rect_outline_t(crate::painter::Rect::new(bx, by, bw, bh), 2, 0);
+            p.text_center(by + pt(22.0), 12.0, 0, "Sleeping");
+            p.text_center(by + pt(44.0), 8.0, 100, "Press Power Button to Wake");
+        }
+    }
+
+    fn on_gesture(&mut self, g: Gesture) -> Action {
+        match g {
+            Gesture::PowerButton => Action::Pop,
+            _ => Action::Keep, // Ignore all touch events while sleeping
+        }
+    }
+
+    fn default_edges(&self) -> bool {
+        false
+    }
+
+    fn is_sleep(&self) -> bool {
+        true
+    }
+
+    fn tick_interval(&self) -> std::time::Duration {
+        // In standby sleep, we set tick to 24h so CPU stays in deep WFI sleep
+        std::time::Duration::from_secs(86400)
+    }
+
+    fn on_leave(&mut self) {
+        // Restore frontlight
+        if let Ok(fl) = ybdev::frontlight::Frontlight::open() {
+            fl.set(self.prev_bright);
+            fl.tone_set(self.prev_tone);
+        }
+        // Restore Wi-Fi
+        let _ = std::process::Command::new("/sbin/ifconfig")
+            .args(&["wlan0", "up"])
+            .output();
+            fl.tone_set(self.prev_tone);
+        }
+    }
+}
+
+
+
+
+impl Drop for SleepScreen {
+    fn drop(&mut self) {
+        if let Ok(fl) = ybdev::frontlight::Frontlight::open() {
+            fl.set(self.prev_bright);
+            fl.tone_set(self.prev_tone);
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

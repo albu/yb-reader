@@ -408,8 +408,10 @@ impl Screen for MirrorScreen {
             // down/up/anything else: exit, even mid-sync
             Gesture::Swipe { .. } => Action::Pop,
             Gesture::TwoFingerTap => Action::Keep,
+            _ => Action::Keep,
         }
     }
+
 
     fn on_tick(&mut self) -> Action {
         self.ping_tick();

@@ -1,0 +1,500 @@
+//! PDF Split & Crop and Reading Configuration (Typography, Contrast Curves,
+//! Background Whitening, Night Mode, and Layout).
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitPreset {
+    FitPage,
+    Horizontal2, // 2-split: Top half -> Bottom half (Landscape)
+    Horizontal3, // 3-split: Top -> Mid -> Bottom (Landscape)
+    Vertical2,   // 2-split: Left column -> Right column (Portrait)
+    Grid4,       // 4-split: 2 columns x 2 rows (Landscape)
+}
+
+impl Default for SplitPreset {
+    fn default() -> Self {
+        SplitPreset::FitPage
+    }
+}
+
+impl SplitPreset {
+    #[allow(dead_code)]
+    pub fn name(&self) -> &'static str {
+        match self {
+            SplitPreset::FitPage => "Fit Page",
+            SplitPreset::Horizontal2 => "2-Split Landscape (Top/Bottom)",
+            SplitPreset::Horizontal3 => "3-Split Landscape (Top/Mid/Bottom)",
+            SplitPreset::Vertical2 => "2-Column Portrait (Left/Right)",
+            SplitPreset::Grid4 => "4-Grid Landscape (2x2)",
+        }
+    }
+
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            SplitPreset::FitPage => "Fit",
+            SplitPreset::Horizontal2 => "2-Split",
+            SplitPreset::Horizontal3 => "3-Split",
+            SplitPreset::Vertical2 => "2-Col",
+            SplitPreset::Grid4 => "4-Grid",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContrastMode {
+    Normal,       // Default 1:1 grayscale
+    BoldText,     // Darkens anti-aliased font edges by ~25%
+    HighContrast, // Strong S-curve for crisp punchy text
+    ScanClean,    // Aggressive black boost + paper whitening for scans
+}
+
+impl Default for ContrastMode {
+    fn default() -> Self {
+        ContrastMode::Normal
+    }
+}
+
+impl ContrastMode {
+    #[allow(dead_code)]
+    pub fn name(&self) -> &'static str {
+
+        match self {
+            ContrastMode::Normal => "Normal",
+            ContrastMode::BoldText => "Bold / Darkened",
+            ContrastMode::HighContrast => "High Contrast",
+            ContrastMode::ScanClean => "Ultra Clean (Scans)",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RectF {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl RectF {
+    pub fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
+        Self { x0, y0, x1, y1 }
+    }
+
+    pub fn width(&self) -> f32 {
+        (self.x1 - self.x0).max(0.001)
+    }
+
+    pub fn height(&self) -> f32 {
+        (self.y1 - self.y0).max(0.001)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitConfig {
+    pub preset: SplitPreset,
+    /// Rotation in degrees (0 = portrait, 270 = landscape CW/default, 90 = landscape CCW)
+    pub rotation: u16,
+    /// Overlap fraction (e.g. 0.06 = 6% overlap between adjacent split boxes)
+    pub overlap: f32,
+    /// Normalized margin crops (0.0 .. 0.4)
+    pub margin_left: f32,
+    pub margin_top: f32,
+    pub margin_right: f32,
+    pub margin_bottom: f32,
+}
+
+impl Default for SplitConfig {
+    fn default() -> Self {
+        Self {
+            preset: SplitPreset::FitPage,
+            rotation: 0,
+            overlap: 0.06,
+            margin_left: 0.0,
+            margin_top: 0.0,
+            margin_right: 0.0,
+            margin_bottom: 0.0,
+        }
+    }
+}
+
+impl SplitConfig {
+    pub fn for_preset(preset: SplitPreset) -> Self {
+        match preset {
+            SplitPreset::FitPage => Self {
+                preset: SplitPreset::FitPage,
+                rotation: 0,
+                overlap: 0.0,
+                margin_left: 0.0,
+                margin_top: 0.0,
+                margin_right: 0.0,
+                margin_bottom: 0.0,
+            },
+            SplitPreset::Horizontal2 => Self {
+                preset: SplitPreset::Horizontal2,
+                rotation: 270, // Landscape default
+                overlap: 0.08,
+                margin_left: 0.02,
+                margin_top: 0.02,
+                margin_right: 0.02,
+                margin_bottom: 0.02,
+            },
+            SplitPreset::Horizontal3 => Self {
+                preset: SplitPreset::Horizontal3,
+                rotation: 270, // Landscape default
+                overlap: 0.10, // 10% each side = 20% overlap between adjacent views
+                margin_left: 0.02,
+                margin_top: 0.02,
+                margin_right: 0.02,
+                margin_bottom: 0.02,
+            },
+            SplitPreset::Vertical2 => Self {
+                preset: SplitPreset::Vertical2,
+                rotation: 0,
+                overlap: 0.05,
+                margin_left: 0.02,
+                margin_top: 0.02,
+                margin_right: 0.02,
+                margin_bottom: 0.02,
+            },
+            SplitPreset::Grid4 => Self {
+                preset: SplitPreset::Grid4,
+                rotation: 270,
+                overlap: 0.06,
+                margin_left: 0.02,
+                margin_top: 0.02,
+                margin_right: 0.02,
+                margin_bottom: 0.02,
+            },
+        }
+    }
+
+    pub fn is_landscape(&self) -> bool {
+        self.rotation == 90 || self.rotation == 270
+    }
+
+    pub fn sub_box_count(&self) -> usize {
+        match self.preset {
+            SplitPreset::FitPage => 1,
+            SplitPreset::Horizontal2 => 2,
+            SplitPreset::Horizontal3 => 3,
+            SplitPreset::Vertical2 => 2,
+            SplitPreset::Grid4 => 4,
+        }
+    }
+
+    /// Generates the list of sub-boxes in reading order (normalized 0.0..1.0 coordinates).
+    pub fn sub_boxes(&self) -> Vec<RectF> {
+        let x0 = self.margin_left.clamp(0.0, 0.45);
+        let y0 = self.margin_top.clamp(0.0, 0.45);
+        let x1 = (1.0 - self.margin_right).clamp(x0 + 0.1, 1.0);
+        let y1 = (1.0 - self.margin_bottom).clamp(y0 + 0.1, 1.0);
+
+        let w = x1 - x0;
+        let h = y1 - y0;
+
+        match self.preset {
+            SplitPreset::FitPage => vec![RectF::new(x0, y0, x1, y1)],
+
+            SplitPreset::Horizontal2 => {
+                // N = 2 horizontal slices: equal box height & uniform overlap
+                let ov = self.overlap.clamp(0.0, 0.40);
+                let box_h = h * (1.0 + ov) / 2.0;
+                let step_y = h * (1.0 - ov) / 2.0;
+                vec![
+                    // Box 0: Top half
+                    RectF::new(x0, y0, x1, y0 + box_h),
+                    // Box 1: Bottom half
+                    RectF::new(x0, y0 + step_y, x1, y1),
+                ]
+            }
+
+            SplitPreset::Horizontal3 => {
+                // N = 3 horizontal slices: identical box height, equal step size, and exact uniform overlap
+                let ov = self.overlap.clamp(0.0, 0.35);
+                let box_h = h * (1.0 + 2.0 * ov) / 3.0;
+                let step_y = h * (1.0 - ov) / 3.0;
+                vec![
+                    // Box 0: Top slice
+                    RectF::new(x0, y0, x1, y0 + box_h),
+                    // Box 1: Middle slice
+                    RectF::new(x0, y0 + step_y, x1, y0 + step_y + box_h),
+                    // Box 2: Bottom slice
+                    RectF::new(x0, y0 + 2.0 * step_y, x1, y1),
+                ]
+            }
+
+            SplitPreset::Vertical2 => {
+                // N = 2 vertical columns: equal box width & uniform overlap
+                let ov = self.overlap.clamp(0.0, 0.40);
+                let box_w = w * (1.0 + ov) / 2.0;
+                let step_x = w * (1.0 - ov) / 2.0;
+                vec![
+                    // Box 0: Left column
+                    RectF::new(x0, y0, x0 + box_w, y1),
+                    // Box 1: Right column
+                    RectF::new(x0 + step_x, y0, x1, y1),
+                ]
+            }
+
+            SplitPreset::Grid4 => {
+                // 2x2 grid: equal box width & height, uniform step sizes
+                let ov = self.overlap.clamp(0.0, 0.35);
+                let box_w = w * (1.0 + ov) / 2.0;
+                let step_x = w * (1.0 - ov) / 2.0;
+                let box_h = h * (1.0 + ov) / 2.0;
+                let step_y = h * (1.0 - ov) / 2.0;
+
+                // Reading order: Column 1 (Top -> Bottom), then Column 2 (Top -> Bottom)
+                vec![
+                    // 1. Top-Left
+                    RectF::new(x0, y0, x0 + box_w, y0 + box_h),
+                    // 2. Bottom-Left
+                    RectF::new(x0, y0 + step_y, x0 + box_w, y1),
+                    // 3. Top-Right
+                    RectF::new(x0 + step_x, y0, x1, y0 + box_h),
+                    // 4. Bottom-Right
+                    RectF::new(x0 + step_x, y0 + step_y, x1, y1),
+                ]
+            }
+        }
+    }
+
+
+    /// Total number of reading steps across the entire book.
+    pub fn total_steps(&self, page_count: usize) -> usize {
+        page_count.max(1) * self.sub_box_count()
+    }
+
+    /// Maps a global linear step index (0..total_steps-1) to (page_index, sub_index).
+    pub fn step_to_page_sub(&self, step: usize) -> (usize, usize) {
+        let count = self.sub_box_count();
+        (step / count, step % count)
+    }
+
+    /// Maps (page_index, sub_index) to a global linear step index.
+    pub fn page_sub_to_step(&self, page: usize, sub: usize) -> usize {
+        let count = self.sub_box_count();
+        page * count + sub.min(count.saturating_sub(1))
+    }
+}
+
+/// Comprehensive Reader Settings (persisted per book or global defaults).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReaderSettings {
+    pub split: SplitConfig,
+    /// Reflow font size in points (e.g. 8.0, 9.5, 11.0, 13.0, 15.0, 18.0)
+    pub font_size: f32,
+    /// Reflow margin padding in pixels (e.g. 36 = compact, 72 = normal, 108 = wide)
+    pub margin_pad: u32,
+    /// Contrast & text darkness curve
+    pub contrast: ContrastMode,
+    /// Background white snap cutoff (e.g. 0 = off, 240, 230)
+    pub white_cutoff: u8,
+    /// Night mode (inverted grayscale)
+    pub invert: bool,
+    /// Full e-ink refresh interval in page turns (0 = manual only, 5, 10, 20)
+    pub refresh_interval: usize,
+    /// Show top status header (Clock + Battery + Book title)
+    pub show_header: bool,
+}
+
+impl Default for ReaderSettings {
+    fn default() -> Self {
+        Self {
+            split: SplitConfig::default(),
+            font_size: 11.0,
+            margin_pad: 72,
+            contrast: ContrastMode::Normal,
+            white_cutoff: 0,
+            invert: false,
+            refresh_interval: 10,
+            show_header: true,
+        }
+    }
+}
+
+impl ReaderSettings {
+    /// Precomputes a 256-byte Lookup Table (LUT) for instant O(1) contrast & inversion.
+    pub fn build_lut(&self) -> [u8; 256] {
+        let mut lut = [0u8; 256];
+        for i in 0..256 {
+            let mut val = i as f32;
+
+            // Apply contrast mode
+            match self.contrast {
+                ContrastMode::Normal => {}
+                ContrastMode::BoldText => {
+                    // Darken antialiased edges (0..180) by ~25%
+                    if val < 180.0 {
+                        val *= 0.75;
+                    }
+                }
+                ContrastMode::HighContrast => {
+                    // Steep S-curve: deep blacks, crisp whites
+                    if val < 140.0 {
+                        val = (val / 140.0).powf(1.4) * 90.0;
+                    } else if val > 200.0 {
+                        val = 200.0 + (val - 200.0) * 1.5;
+                    }
+                }
+                ContrastMode::ScanClean => {
+                    // Aggressive thresholding for scans
+                    if val < 190.0 {
+                        val = val * 0.6;
+                    } else {
+                        val = 255.0;
+                    }
+                }
+            }
+
+            // Apply white cutoff
+            if self.white_cutoff > 0 && val >= self.white_cutoff as f32 {
+                val = 255.0;
+            }
+
+            let mut out = val.clamp(0.0, 255.0).round() as u8;
+
+            // Invert (Night mode)
+            if self.invert {
+                out = 255 - out;
+            }
+
+            lut[i] = out;
+        }
+        lut
+    }
+
+    /// Apply contrast LUT in-place over grayscale buffer (blazing fast: < 1ms on 2MB buffer).
+    pub fn apply_lut(&self, buf: &mut [u8]) {
+        if self.contrast == ContrastMode::Normal
+            && self.white_cutoff == 0
+            && !self.invert
+        {
+            return;
+        }
+        let lut = self.build_lut();
+        for b in buf.iter_mut() {
+            *b = lut[*b as usize];
+        }
+    }
+}
+
+/// Auto-detect white margin bounding box in a grayscale pixmap.
+/// Returns (margin_left, margin_top, margin_right, margin_bottom) as fractions (0.0..0.45).
+pub fn detect_margins(
+    samples: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    white_threshold: u8,
+) -> (f32, f32, f32, f32) {
+    if width == 0 || height == 0 || samples.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+
+    let mut min_x = width;
+    let mut max_x = 0;
+    let mut min_y = height;
+    let mut max_y = 0;
+
+    let step = 4;
+    for y in (0..height).step_by(step) {
+        let row_start = y * stride;
+        for x in (0..width).step_by(step) {
+            if row_start + x < samples.len() && samples[row_start + x] < white_threshold {
+                if x < min_x {
+                    min_x = x;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
+            }
+        }
+    }
+
+    if min_x > max_x || min_y > max_y {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+
+    let pad_x = (width as f32 * 0.01) as usize;
+    let pad_y = (height as f32 * 0.01) as usize;
+
+    let crop_x0 = min_x.saturating_sub(pad_x);
+    let crop_y0 = min_y.saturating_sub(pad_y);
+    let crop_x1 = (max_x + pad_x).min(width);
+    let crop_y1 = (max_y + pad_y).min(height);
+
+    let m_left = (crop_x0 as f32 / width as f32).clamp(0.0, 0.40);
+    let m_top = (crop_y0 as f32 / height as f32).clamp(0.0, 0.40);
+    let m_right = ((width - crop_x1) as f32 / width as f32).clamp(0.0, 0.40);
+    let m_bottom = ((height - crop_y1) as f32 / height as f32).clamp(0.0, 0.40);
+
+    (m_left, m_top, m_right, m_bottom)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_presets() {
+        let h2 = SplitConfig::for_preset(SplitPreset::Horizontal2);
+        assert_eq!(h2.sub_box_count(), 2);
+        assert!(h2.is_landscape());
+        let boxes = h2.sub_boxes();
+        assert_eq!(boxes.len(), 2);
+        assert!(boxes[0].y0 < boxes[1].y0);
+        assert!(boxes[0].y1 > boxes[1].y0);
+
+        let v2 = SplitConfig::for_preset(SplitPreset::Vertical2);
+        assert_eq!(v2.sub_box_count(), 2);
+        assert!(!v2.is_landscape());
+        let boxes_v = v2.sub_boxes();
+        assert_eq!(boxes_v.len(), 2);
+        assert!(boxes_v[0].x1 > boxes_v[1].x0);
+
+        let g4 = SplitConfig::for_preset(SplitPreset::Grid4);
+        assert_eq!(g4.sub_box_count(), 4);
+        assert_eq!(g4.total_steps(10), 40);
+        assert_eq!(g4.step_to_page_sub(7), (1, 3));
+        assert_eq!(g4.page_sub_to_step(1, 3), 7);
+    }
+
+    #[test]
+    fn test_margin_detector() {
+        let w = 100;
+        let h = 100;
+        let mut buf = vec![255u8; w * h];
+        for y in 30..70 {
+            for x in 20..80 {
+                buf[y * w + x] = 0;
+            }
+        }
+        let (ml, mt, mr, mb) = detect_margins(&buf, w, h, w, 240);
+        assert!(ml >= 0.15 && ml <= 0.25);
+        assert!(mt >= 0.25 && mt <= 0.35);
+        assert!(mr >= 0.15 && mr <= 0.25);
+        assert!(mb >= 0.25 && mb <= 0.35);
+    }
+
+    #[test]
+    fn test_contrast_lut() {
+        let mut s = ReaderSettings::default();
+        s.contrast = ContrastMode::BoldText;
+        let lut = s.build_lut();
+        // Midtone should be darkened
+        assert!(lut[100] < 100);
+        // Pure black stays black
+        assert_eq!(lut[0], 0);
+
+        // Test invert
+        s.invert = true;
+        let lut_inv = s.build_lut();
+        assert_eq!(lut_inv[0], 255);
+    }
+}

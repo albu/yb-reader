@@ -78,6 +78,16 @@ impl App {
     /// screen's own handler. Taps never match the edge patterns, so tap
     /// zones keep their precedence for free.
     fn dispatch(&mut self, g: Gesture) -> Action {
+        if matches!(g, Gesture::PowerButton) {
+            let is_sleep = self.stack.last().map(|s| s.is_sleep()).unwrap_or(false);
+            if is_sleep {
+                return Action::Pop;
+            } else {
+                return Action::Push(Box::new(crate::widgets::SleepScreen::new()));
+            }
+        }
+
+
         let edges = self.stack.last().map(|s| s.default_edges()).unwrap_or(false);
         if edges {
             if g.top_edge_swipe() || matches!(g, Gesture::TwoFingerTap) {
@@ -97,6 +107,11 @@ impl App {
             None => Action::Quit,
         }
     }
+
+
+
+
+
 
     fn apply(&mut self, a: Action) -> bool {
         let (cont, redraw_full) = transition(&mut self.stack, a);

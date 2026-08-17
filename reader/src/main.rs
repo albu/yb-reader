@@ -3,13 +3,19 @@
 //! edge gestures live in yui::App.
 
 mod books;
+mod cache;
 mod curtain;
+
 mod fetch;
 mod home;
 mod mirror;
 mod positions;
 mod protocol;
+mod settings_dialog;
+mod split;
 mod wifi;
+
+
 
 use ybdev::input::{self, Input};
 use ybdev::log;

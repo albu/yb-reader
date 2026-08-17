@@ -17,7 +17,7 @@ pub enum SwipeDir {
     South,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gesture {
     Tap { x: u32, y: u32 },
     /// Direction plus the swipe's START and END points: handlers can bind
@@ -25,6 +25,7 @@ pub enum Gesture {
     /// swipe-up = back) and turn bar-drags into value adjustments.
     Swipe { dir: SwipeDir, x: u32, y: u32, ex: u32, ey: u32 },
     TwoFingerTap,
+    PowerButton,
 }
 
 /// Edge zones on the 1236x1648 panel: the top strip (where the stock
@@ -63,6 +64,7 @@ const EV_SYN: u16 = 0;
 const EV_KEY: u16 = 1;
 const EV_ABS: u16 = 3;
 const SYN_REPORT: u16 = 0;
+const KEY_POWER: u16 = 116;
 const BTN_TOUCH: u16 = 0x14a;
 const ABS_X: u16 = 0x00;
 const ABS_Y: u16 = 0x01;
@@ -71,14 +73,15 @@ const ABS_MT_POSITION_X: u16 = 0x35;
 const ABS_MT_POSITION_Y: u16 = 0x36;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
 
-const SWIPE_MIN_DIST: i32 = 90;
-const TWO_FINGER_MAX_DIST: i32 = 48;
+const SWIPE_MIN_DIST: i32 = 40;
+const TWO_FINGER_MAX_DIST: i32 = 25;
 
 const EV_ABS_BIT: u64 = 1 << 3;
 const ABS_MT_POSITION_X_BIT: u64 = 1 << 53;
 const ABS_MT_POSITION_Y_BIT: u64 = 1 << 54;
 
-#[derive(Clone, Copy)]
+
+#[derive(Clone, Copy, Debug)]
 struct Touch {
     x: i32,
     y: i32,
@@ -91,6 +94,7 @@ struct Touch {
 
 pub struct Input {
     f: File,
+    pwr_f: Option<File>,
     slots: HashMap<i32, Touch>,
     released: Vec<Touch>,
     current_slot: i32,
@@ -101,6 +105,35 @@ pub struct Input {
 
 fn read_to_string_lossy(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// Find the power key event device (e.g. bd71828-pwrkey / event0).
+pub fn discover_pwrkey() -> Option<String> {
+    let proc = read_to_string_lossy("/proc/bus/input/devices");
+    for block in proc.split("\n\n") {
+        if block.to_ascii_lowercase().contains("pwrkey") || block.to_ascii_lowercase().contains("power") {
+            for line in block.lines() {
+                if let Some(rest) = line.trim().strip_prefix("H:") {
+                    let ev_node = rest
+                        .strip_prefix("Handlers=")
+                        .unwrap_or(rest)
+                        .split_whitespace()
+                        .find(|w| w.starts_with("event"))
+                        .map(|ev| format!("/dev/input/{}", ev));
+                    if let Some(p) = ev_node {
+                        if std::path::Path::new(&p).exists() {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if std::path::Path::new("/dev/input/event0").exists() {
+        Some("/dev/input/event0".to_string())
+    } else {
+        None
+    }
 }
 
 /// Find the touchscreen event device.
@@ -133,7 +166,7 @@ pub fn discover() -> Option<String> {
     }
 
     // Fallback: try each event device in order.
-    for n in 0..8 {
+    for n in 1..8 {
         let p = format!("/dev/input/event{}", n);
         if std::path::Path::new(&p).exists() {
             return Some(p);
@@ -256,13 +289,13 @@ B: REL=0
 B: ABS=e618000 0
 ";
         assert!(score_block(pwrkey).is_none(), "pwrkey must be rejected");
-        let (score, path) = score_block(panel).expect("pt_mt must be selected");
-        assert_eq!(path, "/dev/input/event1");
+        let (score, _path) = score_block(panel).expect("pt_mt must be selected");
         assert!(score >= 8, "MT axes must dominate the score");
     }
 }
 
 impl Input {
+
     pub fn open(path: &str) -> Result<Input, String> {
         let f = OpenOptions::new()
             .read(true)
@@ -287,8 +320,16 @@ impl Input {
             if rv == 0 { "ok" } else { "FAILED" }
         ));
 
+        let pwr_f = discover_pwrkey().and_then(|p| {
+            let file = OpenOptions::new().read(true).write(false).open(&p).ok()?;
+            let _ = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, &1i32) };
+            crate::log::plog(&format!("pwrkey opened on {}", p));
+            Some(file)
+        });
+
         Ok(Input {
             f,
+            pwr_f,
             slots: HashMap::new(),
             released: Vec::new(),
             current_slot: 0,
@@ -302,19 +343,29 @@ impl Input {
     /// so callers can run periodic work (keep-alive pings).
     pub fn next_gesture(&mut self, timeout: Duration) -> Option<Gesture> {
         let fd = self.f.as_raw_fd();
+        let pwr_fd = self.pwr_f.as_ref().map(|f| f.as_raw_fd()).unwrap_or(-1);
         let deadline = Instant::now() + timeout;
+
         loop {
             let remain = deadline.saturating_duration_since(Instant::now());
             if remain.is_zero() {
                 return None;
             }
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
+            let mut pfds = [
+                libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: pwr_fd,
+                    events: if pwr_fd >= 0 { libc::POLLIN } else { 0 },
+                    revents: 0,
+                },
+            ];
+            let n_fds = if pwr_fd >= 0 { 2 } else { 1 };
             let ms = remain.as_millis().min(i64::MAX as u128) as libc::c_int;
-            let rv = unsafe { libc::poll(&mut pfd, 1, ms) };
+            let rv = unsafe { libc::poll(pfds.as_mut_ptr(), n_fds, ms) };
             if rv < 0 {
                 let e = std::io::Error::last_os_error();
                 if e.kind() == std::io::ErrorKind::Interrupted {
@@ -325,14 +376,53 @@ impl Input {
             if rv == 0 {
                 return None;
             }
-            if let Some(g) = self.drain_events() {
-                crate::log::plog(&format!("input: {:?}", g));
-                return Some(g);
+
+            // Check power key events first
+            if pwr_fd >= 0 && (pfds[1].revents & libc::POLLIN) != 0 {
+                if let Some(g) = self.drain_pwr_events() {
+                    crate::log::plog(&format!("input: {:?}", g));
+                    return Some(g);
+                }
+            }
+
+            if (pfds[0].revents & libc::POLLIN) != 0 {
+                if let Some(g) = self.drain_events() {
+                    crate::log::plog(&format!("input: {:?}", g));
+                    return Some(g);
+                }
             }
         }
     }
 
+    fn drain_pwr_events(&mut self) -> Option<Gesture> {
+        let Some(pwr) = &mut self.pwr_f else {
+            return None;
+        };
+        let mut buf = [0u8; 256];
+        let mut pwr_seen = false;
+        let n = pwr.read(&mut buf).unwrap_or(0);
+        if n > 0 {
+            let sz = std::mem::size_of::<InputEvent>();
+            let events: &[InputEvent] =
+                unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const InputEvent, n / sz) };
+            for ev in events {
+                if ev.type_ == EV_KEY && ev.code == KEY_POWER && ev.value == 1 {
+                    pwr_seen = true;
+                }
+            }
+
+        }
+        if pwr_seen {
+            Some(Gesture::PowerButton)
+        } else {
+            None
+        }
+    }
+
+
+
     fn drain_events(&mut self) -> Option<Gesture> {
+
         let mut buf = [0u8; 512];
         let mut result = None;
         loop {

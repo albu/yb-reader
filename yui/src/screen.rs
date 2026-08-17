@@ -57,7 +57,13 @@ pub trait Screen {
     fn default_edges(&self) -> bool {
         true
     }
+
+    /// Is this screen a sleep/standby overlay?
+    fn is_sleep(&self) -> bool {
+        false
+    }
 }
+
 
 // Manual Debug: the Push variant carries a Box<dyn Screen> that can't
 // derive — the variant name is all logs ever need.

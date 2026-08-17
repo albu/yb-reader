@@ -67,6 +67,95 @@ pub fn decode_png_gray(data: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     Some(gray)
 }
 
+/// Decode a PNG file of any size and aspect-fit / center it into a (dst_w, dst_h)
+/// 8-bit grayscale framebuffer with white (255) background.
+pub fn load_png_fitted(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
+    use png::ColorType;
+    let cursor = std::io::Cursor::new(data);
+    let mut decoder = png::Decoder::new(cursor);
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder.read_info().ok()?;
+    let info = reader.info();
+    let (src_w, src_h) = (info.width as usize, info.height as usize);
+    if src_w == 0 || src_h == 0 {
+        return None;
+    }
+    let mut raw = vec![0u8; reader.output_buffer_size()];
+    let info_out = reader.next_frame(&mut raw).ok()?;
+    let out = &raw[..info_out.buffer_size()];
+    let ct = info_out.color_type;
+    let bd = info_out.bit_depth as usize;
+
+    let mut src_gray = vec![0u8; src_w * src_h];
+    match ct {
+        ColorType::Grayscale => {
+            let max = (1u16 << bd) - 1;
+            for (i, g) in src_gray.iter_mut().enumerate().take(out.len()) {
+                *g = scale_pixel(out[i], max);
+            }
+        }
+        ColorType::GrayscaleAlpha => {
+            let max = (1u16 << bd) - 1;
+            for i in 0..src_gray.len() {
+                if i * 2 + 1 < out.len() {
+                    let g = out[i * 2];
+                    let a = out[i * 2 + 1];
+                    let gv = scale_pixel(g, max) as u32;
+                    let av = scale_pixel(a, max) as u32;
+                    src_gray[i] = ((gv * av + 255 * (255 - av)) / 255) as u8;
+                }
+            }
+        }
+        ColorType::Rgb => {
+            for i in 0..src_gray.len() {
+                if i * 3 + 2 < out.len() {
+                    let (r, g, b) = (out[i * 3], out[i * 3 + 1], out[i * 3 + 2]);
+                    src_gray[i] = luma(r, g, b);
+                }
+            }
+        }
+        ColorType::Rgba => {
+            for i in 0..src_gray.len() {
+                if i * 4 + 3 < out.len() {
+                    let (r, g, b, a) = (out[i * 4], out[i * 4 + 1], out[i * 4 + 2], out[i * 4 + 3]);
+                    let l = luma(r, g, b) as u32;
+                    src_gray[i] = ((l * a as u32 + 255 * (255 - a as u32)) / 255) as u8;
+                }
+            }
+        }
+        ColorType::Indexed => {
+            return None;
+        }
+    }
+
+    if src_w == dst_w as usize && src_h == dst_h as usize {
+        return Some(src_gray);
+    }
+
+    let mut dst = vec![255u8; (dst_w * dst_h) as usize];
+    let scale_x = dst_w as f32 / src_w as f32;
+    let scale_y = dst_h as f32 / src_h as f32;
+    let scale = scale_x.min(scale_y);
+
+    let fit_w = ((src_w as f32 * scale).round() as usize).min(dst_w as usize);
+    let fit_h = ((src_h as f32 * scale).round() as usize).min(dst_h as usize);
+    let off_x = (dst_w as usize).saturating_sub(fit_w) / 2;
+    let off_y = (dst_h as usize).saturating_sub(fit_h) / 2;
+
+    for dy in 0..fit_h {
+        let sy = ((dy as f32 / scale).floor() as usize).min(src_h.saturating_sub(1));
+        let dst_row = (off_y + dy) * dst_w as usize + off_x;
+        let src_row = sy * src_w;
+        for dx in 0..fit_w {
+            let sx = ((dx as f32 / scale).floor() as usize).min(src_w.saturating_sub(1));
+            dst[dst_row + dx] = src_gray[src_row + sx];
+        }
+    }
+
+    Some(dst)
+}
+
+
 fn scale_pixel(v: u8, max: u16) -> u8 {
     if max == 255 {
         v

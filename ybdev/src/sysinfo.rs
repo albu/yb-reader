@@ -52,11 +52,12 @@ pub fn wifi_ip() -> Option<String> {
     if rv != 0 {
         return None;
     }
-    // sin_addr is stored in network byte order; to_be_bytes on a
-    // little-endian arm recovers [a, b, c, d].
-    let oct = ifr.addr.sin_addr.s_addr.to_be_bytes();
+    // ifr.addr.sin_addr is stored in network byte order; memory order (ne_bytes)
+    // gives the octets [192, 168, 1, 72] in natural left-to-right IPv4 order.
+    let oct = ifr.addr.sin_addr.s_addr.to_ne_bytes();
     Some(format!("{}.{}.{}.{}", oct[0], oct[1], oct[2], oct[3]))
 }
+
 
 /// Free space on the user partition, GB.
 pub fn storage_free_gb() -> Option<f64> {

@@ -35,8 +35,8 @@ pub struct Frontlight {
 // The warm channel on the PW5 (FW 5.19): the /dev/frontlight amber ioctls
 // report max 0, but the FP9966 driver exposes both LED channels as standard
 // backlight devices. Per KOReader's device table the mapping is
-// fp9966-bl1 = white, fp9966-bl0 = amber/tone (bl0-first reads natural,
-// which is how the channels got swapped here once already).
+const BL1_BRIGHTNESS: &str = "/sys/class/backlight/fp9966-bl1/brightness";
+const BL1_MAX: &str = "/sys/class/backlight/fp9966-bl1/max_brightness";
 const BL0_BRIGHTNESS: &str = "/sys/class/backlight/fp9966-bl0/brightness";
 const BL0_MAX: &str = "/sys/class/backlight/fp9966-bl0/max_brightness";
 
@@ -74,14 +74,19 @@ impl Frontlight {
     }
 
     pub fn max(&self) -> i32 {
-        self.ioctl_val(FL_IOCTL_GET_RANGE_MAX).unwrap_or(24)
+        read_i32(BL1_MAX).unwrap_or_else(|| self.ioctl_val(FL_IOCTL_GET_RANGE_MAX).unwrap_or(24))
     }
     pub fn get(&self) -> i32 {
-        self.ioctl_val(FL_IOCTL_GET_INTENSITY).unwrap_or(0)
+        read_i32(BL1_BRIGHTNESS).unwrap_or_else(|| self.ioctl_val(FL_IOCTL_GET_INTENSITY).unwrap_or(0))
     }
     pub fn set(&self, v: i32) {
-        let _ = self.ioctl_set(FL_IOCTL_SET_INTENSITY, v);
+        if std::path::Path::new(BL1_BRIGHTNESS).exists() {
+            let _ = std::fs::write(BL1_BRIGHTNESS, format!("{}\n", v));
+        } else {
+            let _ = self.ioctl_set(FL_IOCTL_SET_INTENSITY, v);
+        }
     }
+
 
     pub fn amber1_max(&self) -> i32 {
         self.ioctl_val(FL_IOCTL_GET_RANGE_MAX_AMBER_1).unwrap_or(0)

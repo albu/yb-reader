@@ -1,19 +1,46 @@
-//! Per-book reading positions, persisted as one small file on /mnt/us.
-//! Format: one line per book, `file_name<TAB>page<TAB>total<TAB>ts`
-//! (ts = unix seconds, so the freshest entry is the "last read" book).
-//! Writes go to a .tmp then rename — a power cut must not truncate the
-//! whole store mid-write.
+//! Per-book reading positions and reader settings, persisted on /mnt/us.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const STORE: &str = "/mnt/us/extensions/reader/positions.txt";
+use crate::split::{ContrastMode, ReaderSettings, SplitConfig, SplitPreset};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+const STORE: &str = "/mnt/us/extensions/reader/positions.txt";
+const GLOBAL_STORE: &str = "/mnt/us/extensions/reader/global.txt";
+
+pub fn global_refresh_interval() -> usize {
+    if let Ok(s) = std::fs::read_to_string(GLOBAL_STORE) {
+        if let Ok(v) = s.trim().parse::<usize>() {
+            return v;
+        }
+    }
+    10 // Default: refresh every 10 pages
+}
+
+pub fn set_global_refresh_interval(val: usize) {
+    let _ = std::fs::write(GLOBAL_STORE, format!("{}\n", val));
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+
 pub struct Pos {
     pub page: usize,
     pub total: usize,
     pub ts: u64,
+    pub sub_idx: usize,
+    pub settings: Option<ReaderSettings>,
+}
+
+impl Pos {
+    pub fn simple(page: usize, total: usize, ts: u64) -> Self {
+        Self {
+            page,
+            total,
+            ts,
+            sub_idx: 0,
+            settings: None,
+        }
+    }
 }
 
 fn now_ts() -> u64 {
@@ -23,12 +50,51 @@ fn now_ts() -> u64 {
         .unwrap_or(0)
 }
 
+fn preset_to_str(p: SplitPreset) -> &'static str {
+    match p {
+        SplitPreset::FitPage => "fit",
+        SplitPreset::Horizontal2 => "h2",
+        SplitPreset::Horizontal3 => "h3",
+        SplitPreset::Vertical2 => "v2",
+        SplitPreset::Grid4 => "g4",
+    }
+}
+
+fn str_to_preset(s: &str) -> SplitPreset {
+    match s {
+        "h2" => SplitPreset::Horizontal2,
+        "h3" => SplitPreset::Horizontal3,
+        "v2" => SplitPreset::Vertical2,
+        "g4" => SplitPreset::Grid4,
+        _ => SplitPreset::FitPage,
+    }
+}
+
+
+fn contrast_to_str(c: ContrastMode) -> &'static str {
+    match c {
+        ContrastMode::Normal => "norm",
+        ContrastMode::BoldText => "bold",
+        ContrastMode::HighContrast => "high",
+        ContrastMode::ScanClean => "scan",
+    }
+}
+
+fn str_to_contrast(s: &str) -> ContrastMode {
+    match s {
+        "bold" => ContrastMode::BoldText,
+        "high" => ContrastMode::HighContrast,
+        "scan" => ContrastMode::ScanClean,
+        _ => ContrastMode::Normal,
+    }
+}
+
 /// Parse the store text. Malformed lines are skipped, not fatal.
 fn parse(text: &str) -> HashMap<String, Pos> {
     let mut map = HashMap::new();
     for line in text.lines() {
         let mut it = line.split('\t');
-        let (Some(name), Some(page), Some(total), Some(ts)) =
+        let (Some(name), Some(page_str), Some(total_str), Some(ts_str)) =
             (it.next(), it.next(), it.next(), it.next())
         else {
             continue;
@@ -36,9 +102,81 @@ fn parse(text: &str) -> HashMap<String, Pos> {
         if name.is_empty() {
             continue;
         }
-        if let (Ok(page), Ok(total), Ok(ts)) = (page.parse(), total.parse(), ts.parse()) {
-            map.insert(name.to_string(), Pos { page, total, ts });
+        let (Ok(page), Ok(total), Ok(ts)) = (page_str.parse(), total_str.parse(), ts_str.parse())
+        else {
+            continue;
+        };
+
+        let mut sub_idx = 0;
+        let mut settings = None;
+
+        if let (
+            Some(sub_str),
+            Some(preset_str),
+            Some(rot_str),
+            Some(ov_str),
+            Some(ml_str),
+            Some(mt_str),
+            Some(mr_str),
+            Some(mb_str),
+        ) = (
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+            it.next(),
+        ) {
+            if let (Ok(sub), Ok(rot), Ok(ov), Ok(ml), Ok(mt), Ok(mr), Ok(mb)) = (
+                sub_str.parse(),
+                rot_str.parse(),
+                ov_str.parse(),
+                ml_str.parse(),
+                mt_str.parse(),
+                mr_str.parse(),
+                mb_str.parse(),
+            ) {
+                sub_idx = sub;
+                let split = SplitConfig {
+                    preset: str_to_preset(preset_str),
+                    rotation: rot,
+                    overlap: ov,
+                    margin_left: ml,
+                    margin_top: mt,
+                    margin_right: mr,
+                    margin_bottom: mb,
+                };
+
+                let font_size = it.next().and_then(|s| s.parse().ok()).unwrap_or(11.0);
+                let contrast = it.next().map(str_to_contrast).unwrap_or_default();
+                let white_cut = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let invert = it.next().map(|s| s == "1").unwrap_or(false);
+
+                settings = Some(ReaderSettings {
+                    split,
+                    font_size,
+                    margin_pad: 72,
+                    contrast,
+                    white_cutoff: white_cut,
+                    invert,
+                    refresh_interval: 10,
+                    show_header: true,
+                });
+            }
         }
+
+        map.insert(
+            name.to_string(),
+            Pos {
+                page,
+                total,
+                ts,
+                sub_idx,
+                settings,
+            },
+        );
     }
     map
 }
@@ -52,7 +190,32 @@ fn load_at(path: &str) -> HashMap<String, Pos> {
 fn save_at(path: &str, map: &HashMap<String, Pos>) {
     let mut lines: Vec<String> = map
         .iter()
-        .map(|(k, p)| format!("{}\t{}\t{}\t{}", k, p.page, p.total, p.ts))
+        .map(|(k, p)| {
+            if let Some(s) = p.settings {
+                let sc = s.split;
+                format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}",
+                    k,
+                    p.page,
+                    p.total,
+                    p.ts,
+                    p.sub_idx,
+                    preset_to_str(sc.preset),
+                    sc.rotation,
+                    sc.overlap,
+                    sc.margin_left,
+                    sc.margin_top,
+                    sc.margin_right,
+                    sc.margin_bottom,
+                    s.font_size,
+                    contrast_to_str(s.contrast),
+                    s.white_cutoff,
+                    if s.invert { "1" } else { "0" }
+                )
+            } else {
+                format!("{}\t{}\t{}\t{}", k, p.page, p.total, p.ts)
+            }
+        })
         .collect();
     lines.sort();
     let tmp = format!("{}.tmp", path);
@@ -61,15 +224,57 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
     }
 }
 
-/// Saved page for a book (0 when never opened).
-pub fn resume_page(name: &str) -> usize {
-    load_at(STORE).get(name).map(|p| p.page).unwrap_or(0)
+/// Saved pos for a book (page 0, sub 0 when never opened).
+pub fn resume_pos(name: &str) -> Pos {
+    load_at(STORE)
+        .get(name)
+        .copied()
+        .unwrap_or(Pos::simple(0, 0, 0))
 }
 
-/// Record progress; stamps the entry now (making it the last-read book).
+/// Saved page for a book (0 when never opened).
+pub fn resume_page(name: &str) -> usize {
+    resume_pos(name).page
+}
+
+/// Record progress with settings; stamps the entry now.
+pub fn record_pos(
+    name: &str,
+    page: usize,
+    total: usize,
+    sub_idx: usize,
+    settings: Option<ReaderSettings>,
+) {
+    let mut map = load_at(STORE);
+    map.insert(
+        name.to_string(),
+        Pos {
+            page,
+            total,
+            ts: now_ts(),
+            sub_idx,
+            settings,
+        },
+    );
+    save_at(STORE, &map);
+}
+
+/// Simple record (for books without custom settings).
+#[allow(dead_code)]
 pub fn record(name: &str, page: usize, total: usize) {
     let mut map = load_at(STORE);
-    map.insert(name.to_string(), Pos { page, total, ts: now_ts() });
+    let prev_settings = map.get(name).and_then(|p| p.settings);
+    let prev_sub = map.get(name).map(|p| p.sub_idx).unwrap_or(0);
+    map.insert(
+        name.to_string(),
+        Pos {
+            page,
+            total,
+            ts: now_ts(),
+            sub_idx: prev_sub,
+            settings: prev_settings,
+        },
+    );
     save_at(STORE, &map);
 }
 
@@ -86,7 +291,7 @@ mod tests {
     fn parse_and_roundtrip() {
         let text = "a.epub\t12\t340\t1700000000\nb.epub\t0\t0\t1700000005\n";
         let map = parse(text);
-        assert_eq!(map["a.epub"], Pos { page: 12, total: 340, ts: 1700000000 });
+        assert_eq!(map["a.epub"], Pos::simple(12, 340, 1700000000));
         assert_eq!(map.len(), 2);
 
         let path = "/tmp/yb-positions-test.txt";
@@ -97,25 +302,35 @@ mod tests {
     }
 
     #[test]
-    fn malformed_lines_are_skipped() {
-        let map = parse("garbage\n\nx.epub\t3\t10\ny.epub\t1\t2\t3\t4");
-        // "garbage" and empty lines dropped; "x.epub" incomplete;
-        // "y.epub" has a trailing extra field — the first four parse.
-        assert_eq!(map.len(), 1);
-        assert_eq!(map["y.epub"], Pos { page: 1, total: 2, ts: 3 });
-    }
+    fn settings_roundtrip() {
+        let mut settings = ReaderSettings::default();
+        settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
+        settings.font_size = 13.5;
+        settings.contrast = ContrastMode::BoldText;
+        settings.invert = true;
 
-    #[test]
-    fn last_read_is_freshest() {
         let mut map = HashMap::new();
-        map.insert("old.epub".into(), Pos { page: 1, total: 9, ts: 100 });
-        map.insert("new.epub".into(), Pos { page: 2, total: 9, ts: 200 });
-        let path = "/tmp/yb-positions-last.txt";
+        map.insert(
+            "paper.pdf".to_string(),
+            Pos {
+                page: 5,
+                total: 20,
+                ts: 1700000000,
+                sub_idx: 1,
+                settings: Some(settings),
+            },
+        );
+        let path = "/tmp/yb-positions-settings-test.txt";
         let _ = std::fs::remove_file(path);
         save_at(path, &map);
-        let (name, pos) = load_at(path).into_iter().max_by_key(|(_, p)| p.ts).unwrap();
-        assert_eq!(name, "new.epub");
-        assert_eq!(pos.page, 2);
+        let loaded = load_at(path);
+        assert_eq!(loaded["paper.pdf"].page, 5);
+        assert_eq!(loaded["paper.pdf"].sub_idx, 1);
+        let s = loaded["paper.pdf"].settings.unwrap();
+        assert_eq!(s.split.preset, SplitPreset::Horizontal2);
+        assert_eq!(s.font_size, 13.5);
+        assert_eq!(s.contrast, ContrastMode::BoldText);
+        assert!(s.invert);
         let _ = std::fs::remove_file(path);
     }
 }

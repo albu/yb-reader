@@ -233,8 +233,10 @@ impl Screen for FrontlightScreen {
                 },
             },
             Gesture::TwoFingerTap => Action::Pop,
+            _ => Action::Keep,
         }
     }
+
 
     // The App-level edge gestures would push a *new* frontlight on top of
     // this one and steal its close gestures — opt out.

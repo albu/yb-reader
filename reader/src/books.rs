@@ -1,16 +1,14 @@
 //! Local library + EPUB/PDF reader screens via MuPDF (the same engine
 //! family KOReader uses). EPUB is reflowed to the panel width; pages
 //! render in grayscale and are CACHED as pixels — re-presenting a page
-//! after an overlay (frontlight) is a blit, never a MuPDF re-render.
+//! after an overlay (frontlight/curtain) is a blit, never a MuPDF re-render.
 //!
-//! Opening is ASYNC: mupdf reflows the WHOLE book up front (measured:
-//! 7s for a 1691-page EPUB, vs 75ms open and 79ms per-page render), so
-//! open+layout run on a worker thread behind an "Opening…" screen — the
-//! UI stays responsive and corner-back works mid-load. The last closed
-//! book is kept warm (laid-out) in a process-global cache, so resuming
-//! via the Continue row is instant.
+//! Includes Onyx Boox–style Article Mode & Multi-Split reading for PDFs,
+//! instant 8-bit LUT Contrast Curves / Text Boldness, Paper Whitening,
+//! Invert (Night Mode), Reflowable Font Size scaling, and Header Clock/Battery.
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -20,14 +18,20 @@ use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
 use ybdev::sysinfo;
 
+use crate::curtain::CurtainScreen;
 use crate::positions;
+use crate::settings_dialog::ReaderSettingsDialog;
+use crate::split::{RectF, ReaderSettings};
+
 use crate::wifi;
+
 use yui::painter::{pt, Painter};
 use yui::screen::{Action, Screen};
 
 const LIB_DIR: &str = "/mnt/us/documents";
-const MARGIN: u32 = 72; // px
-const FOOTER_H: u32 = 88; // px
+const HEADER_H: u32 = 48; // px
+const FOOTER_H: u32 = 72; // px
+
 
 /// Files in documents that carry a book-ish extension but belong to the
 /// framework (clippings ledger) or the jailbreak — not library entries.
@@ -73,25 +77,46 @@ struct BookReady {
 struct SendDoc(Document);
 unsafe impl Send for SendDoc {}
 
-/// The most recently closed book, already laid out. One entry — a laid
-/// out 1700-page EPUB costs tens of MB, and the Continue flow only ever
-/// needs the last one.
-///
-/// RAM audit (2026-08-17, device has 474 MB total / ~96 MB available):
-/// at most ONE entry by construction — taken on open (a *different*
-/// book is dropped before the new layout spawns, so two laid-out docs
-/// never coexist), replaced on close, and nothing pushes a reader on
-/// top of a reader. Measured: the warm 1691-page epub costs ~55 MB,
-/// 41 page turns moved RSS by +1 MB total (mupdf's 256 MB store cap
-/// is never approached on text content), warm reopen is free, and a
-/// book swap drops the old doc first (73→66 MB observed). The rss=
-/// log lines below keep watching it.
-static WARM: Mutex<Option<(PathBuf, SendDoc, usize)>> = Mutex::new(None);
+static WARM: Mutex<Option<(PathBuf, SendDoc, usize, f32)>> = Mutex::new(None);
+
+fn reflow_async(
+    mut send_doc: SendDoc,
+    w: u32,
+    h: u32,
+    font_size: f32,
+    margin_pad: u32,
+) -> Receiver<Result<BookReady, String>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        let avail_w = (w - 2 * margin_pad) as f32 * 72.0 / 300.0;
+        let avail_h = (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32 * 72.0 / 300.0;
+        let _ = send_doc.0.layout(avail_w, avail_h, font_size);
+        let total = send_doc.0.page_count().unwrap_or(1).max(1) as usize;
+        plog(&format!(
+            "book in-memory reflow in {}ms ({} pages, font={:.1}pt) rss={} avail={}",
+            t0.elapsed().as_millis(),
+            total,
+            font_size,
+            rss_mib(),
+            avail_mib()
+        ));
+        let _ = tx.send(Ok(BookReady {
+            doc: send_doc,
+            total,
+        }));
+    });
+    rx
+}
+
+
 
 fn open_async(
     path: PathBuf,
     w: u32,
     h: u32,
+    font_size: f32,
+    margin_pad: u32,
 ) -> Receiver<Result<BookReady, String>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -100,26 +125,29 @@ fn open_async(
             let mut doc = Document::open(path.as_os_str()).map_err(|e| e.to_string())?;
             let open_ms = t0.elapsed().as_millis();
             // Reflow to the reading area (no-op for fixed-layout docs).
-            // mupdf.layout() works in POINTS: raw pixels laid books out
-            // ~4x too wide and body text rendered ~4x too small.
-            let avail_w = (w - 2 * MARGIN) as f32 * 72.0 / 300.0;
-            let avail_h = (h - 2 * MARGIN - FOOTER_H) as f32 * 72.0 / 300.0;
-            let _ = doc.layout(avail_w, avail_h, 11.0);
+            let avail_w = (w - 2 * margin_pad) as f32 * 72.0 / 300.0;
+            let avail_h = (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32 * 72.0 / 300.0;
+            let _ = doc.layout(avail_w, avail_h, font_size);
             let total = doc.page_count().unwrap_or(1).max(1) as usize;
             plog(&format!(
-                "book open {}ms + layout {}ms ({} pages) rss={} avail={}",
+                "book open {}ms + layout {}ms ({} pages, font={:.1}pt) rss={} avail={}",
                 open_ms,
                 t0.elapsed().as_millis() - open_ms,
                 total,
+                font_size,
                 rss_mib(),
                 avail_mib()
             ));
-            Ok(BookReady { doc: SendDoc(doc), total })
+            Ok(BookReady {
+                doc: SendDoc(doc),
+                total,
+            })
         })();
-        let _ = tx.send(r); // receiver gone = user backed out; doc drops here
+        let _ = tx.send(r);
     });
     rx
 }
+
 
 // ---- ReaderScreen -------------------------------------------------------
 
@@ -127,22 +155,36 @@ pub struct ReaderScreen {
     path: PathBuf,
     w: u32,
     h: u32,
-    /// Pending worker result while the "Opening…" screen shows.
     loading: Option<Receiver<Result<BookReady, String>>>,
     doc: Option<Document>,
     err: Option<String>,
     total: usize,
     page_no: usize,
-    /// Rendered page pixels (stride == width). Presenting the same page
-    /// again — overlay pop, screen-clean tap — is a blit from this cache.
+    sub_idx: usize,
+    settings: ReaderSettings,
     page_gray: Option<Vec<u8>>,
-    /// Tap-zone math (px); draw runs before gestures, cache dims there.
     dims: (i32, i32),
+    turns_since_full: usize,
+    pending_turns: i32,
+    time_str: String,
 }
 
 impl ReaderScreen {
-    /// `resume` is the page to open on (from the positions store).
     pub fn new(path: PathBuf, resume: usize, w: u32, h: u32) -> ReaderScreen {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let pos = positions::resume_pos(&name);
+        let settings = pos.settings.unwrap_or_default();
+        let sub_idx = if pos.page == resume { pos.sub_idx } else { 0 };
+
+        // Attempt instant frame 0 snapshot load from disk cache
+        let cached_snap = crate::cache::load_snapshot(&name, resume, sub_idx, &settings, w, h);
+        if cached_snap.is_some() {
+            plog(&format!("loaded instant page snapshot for {}", name));
+        }
+
         ReaderScreen {
             path,
             w,
@@ -150,10 +192,15 @@ impl ReaderScreen {
             loading: None,
             doc: None,
             err: None,
-            total: 1,
+            total: pos.total.max(1),
             page_no: resume,
-            page_gray: None,
-            dims: (1236, 1648),
+            sub_idx,
+            settings,
+            page_gray: cached_snap,
+            dims: (w as i32, h as i32),
+            turns_since_full: 0,
+            pending_turns: 0,
+            time_str: current_time_str(),
         }
     }
 
@@ -164,54 +211,246 @@ impl ReaderScreen {
             .unwrap_or_default()
     }
 
+    fn is_pdf(&self) -> bool {
+        self.path
+            .extension()
+            .map(|e| e.to_string_lossy().eq_ignore_ascii_case("pdf"))
+            .unwrap_or(false)
+    }
+
+    fn save_progress(&self) {
+        positions::record_pos(
+            &self.book_name(),
+            self.page_no,
+            self.total,
+            self.sub_idx,
+            Some(self.settings),
+        );
+    }
+
     fn turn(&mut self, forward: bool) -> Action {
-        let target = if forward {
-            (self.page_no + 1).min(self.total.saturating_sub(1))
+        let total_steps = self.settings.split.total_steps(self.total);
+        let cur_step = self
+            .settings
+            .split
+            .page_sub_to_step(self.page_no, self.sub_idx);
+
+        let next_step = if forward {
+            (cur_step + 1).min(total_steps.saturating_sub(1))
         } else {
-            self.page_no.saturating_sub(1)
+            cur_step.saturating_sub(1)
         };
-        if target == self.page_no {
-            // No-op at either end: no re-render, no refresh.
+
+        if next_step == cur_step {
             return Action::Keep;
         }
-        self.page_no = target;
+
+        let (new_page, new_sub) = self.settings.split.step_to_page_sub(next_step);
+
+        if self.doc.is_none() {
+            // If background-loading, check if the neighbor page is already in snapshot cache!
+            if let Some(snap) = crate::cache::load_snapshot(
+                &self.book_name(),
+                new_page,
+                new_sub,
+                &self.settings,
+                self.w,
+                self.h,
+            ) {
+                self.page_no = new_page;
+                self.sub_idx = new_sub;
+                self.page_gray = Some(snap);
+                self.pending_turns = 0;
+                self.save_progress();
+                return Action::Redraw;
+            }
+
+            // Not yet cached: queue the turn for when background layout finishes
+            if forward {
+                self.pending_turns += 1;
+            } else {
+                self.pending_turns = (self.pending_turns - 1).max(-(self.page_no as i32));
+            }
+            return Action::Redraw;
+        }
+
+        self.page_no = new_page;
+        self.sub_idx = new_sub;
         self.page_gray = None;
-        // Persist progress on every turn — cheap (one small file) and
-        // crash-safe (a kill never loses the position).
-        positions::record(&self.book_name(), self.page_no, self.total);
-        Action::Redraw
+        self.save_progress();
+
+        self.turns_since_full += 1;
+        let global_interval = positions::global_refresh_interval();
+        if global_interval > 0 && self.turns_since_full >= global_interval {
+            self.turns_since_full = 0;
+            Action::RedrawFull
+        } else {
+            Action::Redraw
+        }
+    }
+
+
+
+
+    fn open_settings_dialog(&mut self) -> Action {
+        let settings = self.settings;
+        let is_pdf = self.is_pdf();
+        let samples = self.doc.as_ref().and_then(|doc| {
+            let page = doc.load_page(self.page_no as i32).ok()?;
+            let m = Matrix::new_scale(1.0, 1.0);
+            let pm = page.to_pixmap(&m, &Colorspace::device_gray(), false, true).ok()?;
+            Some((
+                pm.samples().to_vec(),
+                pm.width() as usize,
+                pm.height() as usize,
+                pm.stride() as usize,
+            ))
+        });
+
+        let path_name = self.book_name();
+        let page_no = self.page_no;
+        let total = self.total;
+
+        Action::Push(Box::new(ReaderSettingsDialog::new(
+            settings,
+            is_pdf,
+            samples,
+            move |new_settings| {
+                positions::record_pos(&path_name, page_no, total, 0, Some(new_settings));
+                Action::Pop
+            },
+        )))
+    }
+
+    fn open_curtain(&mut self) -> Action {
+        Action::Push(Box::new(CurtainScreen::new()))
+    }
+
+    /// Map physical touch/swipe event to visual orientation coordinates.
+    /// Returns (visual_x, visual_y, visual_swipe_dir).
+    fn map_gesture(&self, g: Gesture) -> (i32, i32, Option<SwipeDir>) {
+        let (w, h) = self.dims; // w=1236, h=1648
+        match g {
+            Gesture::Tap { x, y } => {
+                let (px, py) = (x as i32, y as i32);
+                match self.settings.split.rotation {
+                    270 => {
+                        let vx = (h - 1).saturating_sub(py);
+                        let vy = px;
+                        (vx, vy, None)
+                    }
+                    90 => {
+                        let vx = py;
+                        let vy = (w - 1).saturating_sub(px);
+                        (vx, vy, None)
+                    }
+                    _ => (px, py, None),
+                }
+            }
+            Gesture::Swipe { dir, x, y, .. } => {
+                let (vx, vy, _) = self.map_gesture(Gesture::Tap { x, y });
+                let v_dir = match self.settings.split.rotation {
+                    270 => match dir {
+                        SwipeDir::North => SwipeDir::West,
+                        SwipeDir::South => SwipeDir::East,
+                        SwipeDir::East => SwipeDir::South,
+                        SwipeDir::West => SwipeDir::North,
+                    },
+                    90 => match dir {
+                        SwipeDir::North => SwipeDir::East,
+                        SwipeDir::South => SwipeDir::West,
+                        SwipeDir::East => SwipeDir::North,
+                        SwipeDir::West => SwipeDir::South,
+                    },
+                    _ => dir,
+                };
+                (vx, vy, Some(v_dir))
+            }
+            _ => (0, 0, None),
+        }
+    }
+
+    fn pre_cache_neighbors(&mut self, w: u32, h: u32) {
+        let total_steps = self.settings.split.total_steps(self.total);
+        let cur_step = self.settings.split.page_sub_to_step(self.page_no, self.sub_idx);
+        let book_name = self.book_name();
+        let settings = self.settings;
+        let Some(doc) = &mut self.doc else { return };
+
+        // Next page
+        if cur_step + 1 < total_steps {
+            let (next_p, next_s) = settings.split.step_to_page_sub(cur_step + 1);
+            if crate::cache::load_snapshot(&book_name, next_p, next_s, &settings, w, h).is_none() {
+                if let Some(gray) = render_page(doc, next_p, next_s, &settings, w, h) {
+                    crate::cache::save_snapshot(&book_name, next_p, next_s, &settings, w, h, &gray);
+                }
+            }
+        }
+
+        // Previous page
+        if cur_step > 0 {
+            let (prev_p, prev_s) = settings.split.step_to_page_sub(cur_step - 1);
+            if crate::cache::load_snapshot(&book_name, prev_p, prev_s, &settings, w, h).is_none() {
+                if let Some(gray) = render_page(doc, prev_p, prev_s, &settings, w, h) {
+                    crate::cache::save_snapshot(&book_name, prev_p, prev_s, &settings, w, h, &gray);
+                }
+            }
+        }
     }
 }
 
 impl Screen for ReaderScreen {
+    fn default_edges(&self) -> bool {
+        // Handle edges internally to seamlessly support landscape + custom bottom-left settings
+        false
+    }
+
     fn on_enter(&mut self) -> Action {
         wifi::keep_awake(true);
-        // Opening marks the book as last-read immediately; the real total
-        // follows when the layout completes.
-        positions::record(&self.book_name(), self.page_no, 0);
+        self.time_str = current_time_str();
+        self.save_progress();
 
-        // Warm cache: same book reopened → skip open+layout entirely.
+        let pos = positions::resume_pos(&self.book_name());
+        if let Some(s) = pos.settings {
+            if s != self.settings {
+                self.settings = s;
+                self.sub_idx = 0;
+                self.page_gray = None;
+            }
+        }
+
+        // Warm cache check
         if let Ok(mut warm) = WARM.lock() {
-            if let Some((p, SendDoc(doc), total)) = warm.take() {
-                if p == self.path {
+            if let Some((p, SendDoc(doc), total, font_sz)) = warm.take() {
+                if p == self.path && (font_sz - self.settings.font_size).abs() < 0.01 {
                     plog(&format!("book warm: instant open (rss={})", rss_mib()));
                     self.doc = Some(doc);
                     self.total = total;
-                    positions::record(&self.book_name(), self.page_no, self.total);
-                    return Action::RedrawFull;
+                    self.save_progress();
+                    return Action::Redraw;
                 }
-                // Different book: the cache holds one; drop the old doc.
             }
         }
-        self.loading = Some(open_async(self.path.clone(), self.w, self.h));
-        Action::RedrawFull
+        self.loading = Some(open_async(
+            self.path.clone(),
+            self.w,
+            self.h,
+            self.settings.font_size,
+            self.settings.margin_pad,
+        ));
+        Action::Redraw
     }
 
     fn on_leave(&mut self) {
         wifi::keep_awake(false);
         if let Some(doc) = self.doc.take() {
             if let Ok(mut warm) = WARM.lock() {
-                *warm = Some((self.path.clone(), SendDoc(doc), self.total));
+                *warm = Some((
+                    self.path.clone(),
+                    SendDoc(doc),
+                    self.total,
+                    self.settings.font_size,
+                ));
             }
         }
         plog(&format!(
@@ -221,15 +460,53 @@ impl Screen for ReaderScreen {
         ));
     }
 
+    fn on_resume(&mut self) -> Action {
+        self.time_str = current_time_str();
+        let pos = positions::resume_pos(&self.book_name());
+        if let Some(s) = pos.settings {
+            let font_changed = (s.font_size - self.settings.font_size).abs() > 0.01
+                || s.margin_pad != self.settings.margin_pad;
+            self.settings = s;
+            self.sub_idx = 0;
+            self.page_gray = None;
+
+            if font_changed && !self.is_pdf() {
+                // In-memory instant reflow without re-reading/re-parsing ZIP archive from disk
+                if let Some(doc) = self.doc.take() {
+                    self.loading = Some(reflow_async(
+                        SendDoc(doc),
+                        self.w,
+                        self.h,
+                        self.settings.font_size,
+                        self.settings.margin_pad,
+                    ));
+                } else {
+                    self.loading = Some(open_async(
+                        self.path.clone(),
+                        self.w,
+                        self.h,
+                        self.settings.font_size,
+                        self.settings.margin_pad,
+                    ));
+                }
+                return Action::Redraw;
+            }
+            return Action::Redraw;
+        }
+        Action::Redraw
+    }
+
+
     fn tick_interval(&self) -> std::time::Duration {
         if self.loading.is_some() {
             std::time::Duration::from_millis(150)
         } else {
-            std::time::Duration::from_secs(1)
+            std::time::Duration::from_secs(10)
         }
     }
 
     fn on_tick(&mut self) -> Action {
+        self.time_str = current_time_str();
         let Some(rx) = &self.loading else {
             return Action::Keep;
         };
@@ -239,101 +516,269 @@ impl Screen for ReaderScreen {
                 self.total = ready.total;
                 let SendDoc(doc) = ready.doc;
                 self.doc = Some(doc);
-                positions::record(&self.book_name(), self.page_no, self.total);
-                Action::RedrawFull
+
+                // Drain any pending fast turns queued during background loading
+                if self.pending_turns != 0 {
+                    let total_steps = self.settings.split.total_steps(self.total);
+                    let cur_step = self
+                        .settings
+                        .split
+                        .page_sub_to_step(self.page_no, self.sub_idx);
+                    let target_step = (cur_step as i32 + self.pending_turns)
+                        .clamp(0, (total_steps as i32).saturating_sub(1)) as usize;
+                    let (new_page, new_sub) = self.settings.split.step_to_page_sub(target_step);
+                    self.page_no = new_page;
+                    self.sub_idx = new_sub;
+                    self.page_gray = None;
+                    self.pending_turns = 0;
+                }
+
+                self.save_progress();
+                Action::Redraw
             }
             Ok(Err(e)) => {
                 plog(&format!("open {}: {}", self.path.display(), e));
                 self.loading = None;
                 self.err = Some("Could not open book".to_string());
-                Action::RedrawFull
+                Action::Redraw
             }
             Err(TryRecvError::Empty) => Action::Keep,
             Err(TryRecvError::Disconnected) => {
                 self.loading = None;
                 self.err = Some("Could not open book".to_string());
-                Action::RedrawFull
+                Action::Redraw
             }
         }
     }
 
+
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
         self.dims = (w, h);
-        p.clear(255);
+        let is_night = self.settings.invert;
+        let bg_color = if is_night { 0 } else { 255 };
+        let fg_color = if is_night { 200 } else { 90 };
+        p.clear(bg_color);
 
         if let Some(err) = &self.err {
-            p.text_center(h / 2, 10.0, 0, err);
+            p.text_center(h / 2, 10.0, fg_color, err);
             return;
         }
-        if self.doc.is_none() {
-            p.text_center(h / 2, 10.0, 0, "Opening…");
-            let name = p.truncate(8.0, &self.book_name(), p.width_pt() - 24.0);
-            p.text_center(h / 2 + pt(16.0), 8.0, 130, &name);
-            return;
-        }
-        let Some(doc) = &mut self.doc else {
-            return;
-        };
 
-        if self.page_gray.is_none() {
-            let t0 = Instant::now();
-            let page = render_page(doc, self.page_no, w as u32, h as u32);
-            plog(&format!(
-                "render page {}: {}ms rss={}",
-                self.page_no,
-                t0.elapsed().as_millis(),
-                rss_mib()
-            ));
-            match page {
-                Some(gray) => self.page_gray = Some(gray),
-                None => {
-                    self.err = Some("Render failed".to_string());
-                    p.text_center(h / 2, 10.0, 0, "Render failed");
-                    return;
+        // If no cached snapshot exists AND doc is still loading:
+        if self.page_gray.is_none() && self.doc.is_none() {
+            p.text_center(h / 2, 10.0, fg_color, "Opening…");
+            let name = p.truncate(8.0, &self.book_name(), p.width_pt() - 24.0);
+            p.text_center(h / 2 + pt(16.0), 8.0, fg_color, &name);
+            return;
+        }
+
+        if let Some(doc) = &mut self.doc {
+            if self.page_gray.is_none() {
+                let t0 = Instant::now();
+                let page = render_page(
+                    doc,
+                    self.page_no,
+                    self.sub_idx,
+                    &self.settings,
+                    w as u32,
+                    h as u32,
+                );
+                plog(&format!(
+                    "render page {}.{}: {}ms rss={}",
+                    self.page_no,
+                    self.sub_idx,
+                    t0.elapsed().as_millis(),
+                    rss_mib()
+                ));
+                match page {
+                    Some(gray) => {
+                        // Persist snapshot to disk cache for instant resume
+                        crate::cache::save_snapshot(
+                            &self.book_name(),
+                            self.page_no,
+                            self.sub_idx,
+                            &self.settings,
+                            w as u32,
+                            h as u32,
+                            &gray,
+                        );
+                        self.page_gray = Some(gray);
+                    }
+                    None => {
+                        self.err = Some("Render failed".to_string());
+                        p.text_center(h / 2, 10.0, fg_color, "Render failed");
+                        return;
+                    }
                 }
             }
         }
-        let gray = self.page_gray.as_ref().unwrap();
-        p.blit_gray(0, 0, w, h, gray, w as usize);
-        let footer = format!("{} / {}", self.page_no + 1, self.total);
-        p.text_center(h - pt(10.0), 7.0, 110, &footer);
+
+        if let Some(gray) = &self.page_gray {
+            p.blit_gray(0, 0, w, h, gray, w as usize);
+        }
+
+        // Trigger neighbor pre-caching once doc is available
+        if self.doc.is_some() {
+            self.pre_cache_neighbors(w as u32, h as u32);
+        }
+
+
+        // Header Status Line (Clock + Battery + Title)
+        if self.settings.show_header {
+            let (bat_cap, _) = sysinfo::battery();
+            let bat_str = format!("{}%", bat_cap);
+            let title_trunc = p.truncate(7.0, &self.book_name(), p.width_pt() - 70.0);
+
+            if self.settings.split.is_landscape() {
+                // Header in landscape orientation
+                let rot = self.settings.split.rotation;
+                let header_text = format!("{} · {} · {}", self.time_str, title_trunc, bat_str);
+                let cx = if rot == 270 { pt(10.0) } else { w - pt(10.0) };
+                p.text_center_rotated(cx, h / 2, 6.5, fg_color, &header_text, rot);
+            } else {
+                // Header in portrait
+                p.text(pt(16.0), pt(14.0), 7.0, fg_color, &self.time_str);
+                p.text_center(pt(14.0), 7.0, fg_color, &title_trunc);
+                p.text_right(w - pt(16.0), pt(14.0), 7.0, fg_color, &bat_str);
+                p.hline_t(pt(20.0), pt(16.0), w - pt(16.0), 1, if is_night { 60 } else { 225 });
+            }
+        }
+
+        // Footer info
+        let footer = if self.doc.is_none() {
+            if self.pending_turns != 0 {
+                "Loading target page…".to_string()
+            } else {
+                format!("page {} · Loading book…", self.page_no + 1)
+            }
+        } else if self.settings.split.sub_box_count() > 1 {
+            format!(
+                "{} [{}.{}/{}]",
+                self.settings.split.preset.short_name(),
+                self.page_no + 1,
+                self.sub_idx + 1,
+                self.total
+            )
+        } else {
+            format!("{} / {}", self.page_no + 1, self.total)
+        };
+
+
+        match self.settings.split.rotation {
+            270 => {
+                p.text_center_rotated(w - pt(10.0), h / 2, 7.0, fg_color, &footer, 270);
+            }
+            90 => {
+                p.text_center_rotated(pt(10.0), h / 2, 7.0, fg_color, &footer, 90);
+            }
+            _ => {
+                p.text_center(h - pt(10.0), 7.0, fg_color, &footer);
+            }
+        }
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
         if self.err.is_some() {
             return Action::Pop;
         }
-        if self.doc.is_none() {
-            // Still laying out: corner-back (edge gesture) still pops; the
-            // rest waits.
-            return Action::Keep;
+
+        let is_landscape = self.settings.split.is_landscape();
+
+        let (vis_w, vis_h) = if is_landscape {
+            (self.dims.1, self.dims.0) // 1648 x 1236
+        } else {
+            (self.dims.0, self.dims.1) // 1236 x 1648
+        };
+
+        let (vx, vy, v_dir) = self.map_gesture(g);
+
+        if let Some(dir) = v_dir {
+            // Visual Swipes
+            return match dir {
+                SwipeDir::West => self.turn(true),  // swipe left -> forward
+                SwipeDir::East => self.turn(false), // swipe right -> back
+                SwipeDir::South => {
+                    // Top swipe down -> Curtain (brightness/control center)
+                    if vy < vis_h * 20 / 100 {
+                        self.open_curtain()
+                    } else {
+                        self.open_settings_dialog()
+                    }
+                }
+                SwipeDir::North => {
+                    // Bottom-left swipe up -> Reader Settings!
+                    if vx < vis_w * 40 / 100 && vy > vis_h * 75 / 100 {
+                        self.open_settings_dialog()
+                    } else if vx > vis_w * 60 / 100 && vy > vis_h * 75 / 100 {
+                        // Bottom-right swipe up -> Back to Library
+                        Action::Pop
+                    } else {
+                        Action::Keep
+                    }
+                }
+            };
         }
-        let (w, h) = self.dims;
+
         match g {
-            Gesture::Tap { x, y } => {
-                if (x as i32) > w * 85 / 100 && (y as i32) < h * 12 / 100 {
-                    // Screen-clean corner: re-present the cached page with
-                    // a full flash (the old code re-rendered it — same
-                    // pixels, just slower).
+            Gesture::Tap { .. } => {
+                // 1. Visual Top-Left corner -> Back to Library
+                if vx < 240 && vy < 160 {
+                    return Action::Pop;
+                }
+
+                // 2. Visual Bottom-Left corner -> Reader Settings Dialog
+                if vx < 240 && vy > vis_h - 160 {
+                    return self.open_settings_dialog();
+                }
+
+                // 3. Visual Bottom-Right corner -> Back to Library
+                if vx > vis_w - 240 && vy > vis_h - 160 {
+                    return Action::Pop;
+                }
+
+                // 4. Visual Top-Right corner -> Full Screen Refresh (clean flash)
+                if vx > vis_w - 240 && vy < 160 {
                     return Action::RedrawFull;
                 }
-                if (x as i32) < w / 3 {
+
+                // 5. Visual Top strip or Center -> Reader Settings Dialog
+                let is_top_strip = vy < vis_h * 16 / 100 && vx > vis_w * 25 / 100 && vx < vis_w * 75 / 100;
+                let is_center = vx > vis_w * 35 / 100
+                    && vx < vis_w * 65 / 100
+                    && vy > vis_h * 35 / 100
+                    && vy < vis_h * 65 / 100;
+
+                if is_top_strip || is_center {
+                    return self.open_settings_dialog();
+                }
+
+                // 6. Page turns
+                if vx < vis_w / 3 {
                     self.turn(false)
                 } else {
                     self.turn(true)
                 }
             }
-            Gesture::Swipe { dir: SwipeDir::East, .. } => self.turn(false),
-            Gesture::Swipe { dir: SwipeDir::West, .. } => self.turn(true),
-            Gesture::Swipe { .. } => Action::Keep,
-            Gesture::TwoFingerTap => Action::Keep,
+            Gesture::TwoFingerTap => {
+                // Two-finger tap anywhere -> Quick Curtain / Brightness
+                self.open_curtain()
+            }
+            _ => Action::Keep,
         }
     }
 }
 
-// /proc snapshots for the memory log lines (RAM audit, 2026-08-17).
-// "?" rather than a wrong number if /proc misbehaves.
+fn current_time_str() -> String {
+    Command::new("date")
+        .arg("+%H:%M")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "--:--".to_string())
+}
+
 fn rss_mib() -> String {
     sysinfo::rss_kib().map_or_else(|| "?".into(), |k| format!("{}m", k / 1024))
 }
@@ -343,7 +788,14 @@ fn avail_mib() -> String {
         .map_or_else(|| "?".into(), |k| format!("{}m", k / 1024))
 }
 
-fn render_page(doc: &Document, page_no: usize, w: u32, h: u32) -> Option<Vec<u8>> {
+fn render_page(
+    doc: &Document,
+    page_no: usize,
+    sub_idx: usize,
+    settings: &ReaderSettings,
+    w: u32,
+    h: u32,
+) -> Option<Vec<u8>> {
     let page = doc.load_page(page_no as i32).ok()?;
     let bounds = page.bounds().ok()?;
     let pw = bounds.x1 - bounds.x0;
@@ -351,28 +803,243 @@ fn render_page(doc: &Document, page_no: usize, w: u32, h: u32) -> Option<Vec<u8>
     if pw <= 0.0 || ph <= 0.0 {
         return None;
     }
-    let target_w = (w - 2 * MARGIN) as f32;
-    // No upscale cap: since layout() sizes the page in points, rendering
-    // to pixels needs the full ~4.17x scale-up (mupdf is vectorial, so it
-    // stays crisp). The old min(1.0) cap is what shrank book text.
-    let zoom = target_w / pw;
-    let m = Matrix::new_scale(zoom, zoom);
+
+    let config = &settings.split;
+    let boxes = config.sub_boxes();
+    let sub_box = boxes
+        .get(sub_idx)
+        .copied()
+        .unwrap_or(RectF::new(0.0, 0.0, 1.0, 1.0));
+
+    let bw = sub_box.width() * pw;
+    let bh = sub_box.height() * ph;
+
+    let margin_pad = settings.margin_pad;
+    let mut out = vec![255u8; (w as usize) * (h as usize)];
+
+    let is_landscape = config.is_landscape();
+    let (vis_w, vis_h) = if is_landscape {
+        (
+            (h - 2 * margin_pad) as f32,
+            (w - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
+        )
+    } else {
+        (
+            (w - 2 * margin_pad) as f32,
+            (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
+        )
+    };
+
+    let zoom = (vis_w / bw).min(vis_h / bh);
+
+    let mut m = Matrix::IDENTITY;
+    m.scale(zoom, zoom);
     let pm = page
         .to_pixmap(&m, &Colorspace::device_gray(), false, true)
         .ok()?;
-    let pw = pm.width() as usize;
-    let ph = pm.height() as usize;
+
+    let pm_w = pm.width() as usize;
+    let pm_h = pm.height() as usize;
     let stride = pm.stride() as usize;
     let samples = pm.samples();
-    let mut out = vec![255u8; (w as usize) * (h as usize)];
-    let ox = (w as usize - pw) / 2;
-    let oy = MARGIN as usize;
-    let copy_w = pw.min(w as usize - ox);
-    let max_rows = (h as usize - oy - FOOTER_H as usize).min(ph);
-    for row in 0..max_rows {
-        let src = row * stride;
-        let dst = (oy + row) * w as usize + ox;
-        out[dst..dst + copy_w].copy_from_slice(&samples[src..src + copy_w]);
+
+    let src_x = (sub_box.x0 * pw * zoom).round() as usize;
+    let src_y = (sub_box.y0 * ph * zoom).round() as usize;
+    let rw = ((bw * zoom).round() as usize).min(pm_w.saturating_sub(src_x));
+    let rh = ((bh * zoom).round() as usize).min(pm_h.saturating_sub(src_y));
+
+    if rw == 0 || rh == 0 {
+        settings.apply_lut(&mut out);
+        return Some(out);
     }
+
+    let vis_ox = ((vis_w as usize).saturating_sub(rw)) / 2 + margin_pad as usize;
+    let vis_oy = ((vis_h as usize).saturating_sub(rh)) / 2 + (HEADER_H + margin_pad) as usize;
+
+    // Calculate dashed reading boundary line position (where previous sub-page ended)
+    let dash_y = if sub_idx > 0 && config.sub_box_count() > 1 {
+        let n = config.sub_box_count() as f32;
+        let ov = config.overlap.clamp(0.0, 0.35);
+        let overlap_frac = (n * ov) / (1.0 + (n - 1.0) * ov);
+        let dy = (overlap_frac * rh as f32).round() as usize;
+        if dy > 2 && dy < rh.saturating_sub(2) {
+            Some(dy)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match config.rotation {
+        270 => {
+            // 270° CW (USB bezel on left):
+            // Visual X (0..rw) maps to physical Y: (h - 1 - (vis_ox + vx))
+            // Visual Y (0..rh) maps to physical X: (vis_oy + vy)
+            let w_u = w as usize;
+            let h_u = h as usize;
+
+            for vy in 0..rh {
+                let px = vis_oy + vy;
+                if px >= w_u {
+                    continue;
+                }
+                let src_row_start = (src_y + vy) * stride + src_x;
+                let is_dash_row = dash_y == Some(vy);
+
+                for vx in 0..rw {
+                    let py = (h_u - 1).saturating_sub(vis_ox + vx);
+                    if py < h_u && src_row_start + vx < samples.len() {
+                        let mut pixel = samples[src_row_start + vx];
+                        if is_dash_row && (vx / 8) % 2 == 0 && pixel > 140 {
+                            pixel = 140; // Subtle dotted guide line
+                        }
+                        out[py * w_u + px] = pixel;
+                    }
+                }
+            }
+        }
+
+        90 => {
+            // 90° CCW (USB bezel on right):
+            // Visual X (0..rw) maps to physical Y: (vis_ox + vx)
+            // Visual Y (0..rh) maps to physical X: (w - 1 - (vis_oy + vy))
+            let w_u = w as usize;
+            let h_u = h as usize;
+
+            for vy in 0..rh {
+                let px = (w_u - 1).saturating_sub(vis_oy + vy);
+                if px >= w_u {
+                    continue;
+                }
+                let src_row_start = (src_y + vy) * stride + src_x;
+                let is_dash_row = dash_y == Some(vy);
+
+                for vx in 0..rw {
+                    let py = vis_ox + vx;
+                    if py < h_u && src_row_start + vx < samples.len() {
+                        let mut pixel = samples[src_row_start + vx];
+                        if is_dash_row && (vx / 8) % 2 == 0 && pixel > 140 {
+                            pixel = 140;
+                        }
+                        out[py * w_u + px] = pixel;
+                    }
+                }
+            }
+        }
+
+        _ => {
+            // 0° Portrait:
+            let w_u = w as usize;
+            let h_u = h as usize;
+
+            for vy in 0..rh {
+                let dst_y = vis_oy + vy;
+                if dst_y >= h_u {
+                    break;
+                }
+                let src_start = (src_y + vy) * stride + src_x;
+                let dst_start = dst_y * w_u + vis_ox;
+                let len = rw.min(w_u.saturating_sub(vis_ox));
+                if src_start + len <= samples.len() && dst_start + len <= out.len() {
+                    out[dst_start..dst_start + len]
+                        .copy_from_slice(&samples[src_start..src_start + len]);
+
+                    if dash_y == Some(vy) {
+                        for vx in 0..len {
+                            if (vx / 8) % 2 == 0 {
+                                let p = &mut out[dst_start + vx];
+                                if *p > 140 {
+                                    *p = 140;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+    // Apply Contrast / Whitening / Invert LUT
+    settings.apply_lut(&mut out);
+
     Some(out)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::split::{SplitConfig, SplitPreset};
+
+
+    #[test]
+    fn test_render_subbox_portrait() {
+        let pdf_path = "/tmp/sample_book.pdf";
+        if !std::path::Path::new(pdf_path).exists() {
+            return;
+        }
+        let doc = Document::open(pdf_path).expect("open doc");
+        let settings = ReaderSettings::default();
+        let rendered = render_page(&doc, 20, 0, &settings, 1236, 1648);
+        assert!(rendered.is_some());
+        assert_eq!(rendered.unwrap().len(), 1236 * 1648);
+    }
+
+    #[test]
+    fn test_render_subbox_horizontal2_landscape() {
+        let pdf_path = "/tmp/sample_book.pdf";
+        if !std::path::Path::new(pdf_path).exists() {
+            return;
+        }
+        let doc = Document::open(pdf_path).expect("open doc");
+        let mut settings = ReaderSettings::default();
+        settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
+        let r0 = render_page(&doc, 20, 0, &settings, 1236, 1648);
+        assert!(r0.is_some());
+        let r1 = render_page(&doc, 20, 1, &settings, 1236, 1648);
+        assert!(r1.is_some());
+    }
+
+    #[test]
+    fn test_render_subbox_horizontal3_landscape() {
+        let pdf_path = "/tmp/sample_book.pdf";
+        if !std::path::Path::new(pdf_path).exists() {
+            return;
+        }
+        let doc = Document::open(pdf_path).expect("open doc");
+        let mut settings = ReaderSettings::default();
+        settings.split = SplitConfig::for_preset(SplitPreset::Horizontal3);
+        for sub in 0..3 {
+            let r = render_page(&doc, 20, sub, &settings, 1236, 1648);
+            assert!(r.is_some());
+        }
+    }
+
+    #[test]
+    fn test_diagnostic_subboxes() {
+        let pdf_path = "/tmp/sample_book.pdf";
+        if !std::path::Path::new(pdf_path).exists() {
+            return;
+        }
+        let doc = Document::open(pdf_path).expect("open doc");
+
+        for page_no in [0, 1, 5, 20, 21, 50] {
+            let page = doc.load_page(page_no).unwrap();
+            let bounds = page.bounds().unwrap();
+            println!("\n=== Page {} bounds: x0={} y0={} x1={} y1={} ===", page_no, bounds.x0, bounds.y0, bounds.x1, bounds.y1);
+            let mut settings = ReaderSettings::default();
+            settings.split = SplitConfig::for_preset(SplitPreset::Horizontal3);
+
+            let boxes = settings.split.sub_boxes();
+            for (sub_idx, b) in boxes.iter().enumerate() {
+                let rendered = render_page(&doc, page_no as usize, sub_idx, &settings, 1236, 1648);
+                assert!(rendered.is_some());
+                println!("  Sub {}: box=[{:.4}, {:.4}, {:.4}, {:.4}] len={}", sub_idx, b.x0, b.y0, b.x1, b.y1, rendered.unwrap().len());
+            }
+        }
+    }
+}
+
+

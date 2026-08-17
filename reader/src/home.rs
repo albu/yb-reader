@@ -7,7 +7,6 @@
 use std::path::PathBuf;
 
 use ybdev::input::{Gesture, SwipeDir};
-use ybdev::log::plog;
 
 use crate::books::{list_books, ReaderScreen};
 use crate::fetch;
@@ -60,16 +59,8 @@ const LIB_ITEM_BASE_PT: f32 = 15.0;
 const LIB_FOOT_PT: f32 = 7.0;
 const LIB_FOOT_OFF_PT: f32 = 14.0;
 
-const ROW_LABELS: [&str; 4] = ["Mirror to Mac", "Fetch book from Mac", "ssh", "Exit"];
+const ROW_LABELS: [&str; 3] = ["Mirror to Mac", "Fetch book from Mac", "Exit"];
 
-/// The ssh row's label reflects the live state (scanned in draw).
-fn ssh_label() -> &'static str {
-    if ybdev::ssh::running() {
-        "ssh on · :2222"
-    } else {
-        "ssh off"
-    }
-}
 
 pub struct HomeScreen {
     w: u32,
@@ -141,7 +132,7 @@ impl HomeScreen {
         })
     }
 
-    /// Tab switch from a horizontal swipe; RedrawFull only on a change.
+    /// Tab switch from a horizontal swipe; Redraw on a change.
     fn switch(&mut self, delta: i32) -> Action {
         let next = (self.tab as i32 + delta).clamp(0, TABS.len() as i32 - 1) as usize;
         if next == self.tab {
@@ -151,15 +142,22 @@ impl HomeScreen {
         if next == 1 {
             self.scan();
         }
-        Action::RedrawFull
+        Action::Redraw
     }
 }
 
 impl Screen for HomeScreen {
     fn on_enter(&mut self) -> Action {
         self.scan();
-        Action::RedrawFull
+        Action::Redraw
     }
+
+    fn on_resume(&mut self) -> Action {
+        self.scan();
+        Action::Redraw
+    }
+
+
 
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
@@ -173,7 +171,6 @@ impl Screen for HomeScreen {
                 p.hline_t(pt(HEADER_RULE_PT), pad, w - pad, 3, 140);
                 for (i, label) in ROW_LABELS.iter().enumerate() {
                     let top = pt(ROWS_TOP_PT) + i as i32 * pt(ROW_H_PT);
-                    let label = if *label == "ssh" { ssh_label() } else { label };
                     draw_row_icon(p, i, pad, top + (pt(ROW_H_PT) - pt(ICON_BOX_PT)) / 2);
                     p.text(
                         pad + pt(ICON_BOX_PT) + pt(ICON_GAP_PT),
@@ -287,8 +284,9 @@ impl Screen for HomeScreen {
                     if t == 1 {
                         self.scan();
                     }
-                    return Action::RedrawFull;
+                    return Action::Redraw;
                 }
+
                 match self.tab {
                     0 => match HomeScreen::hit_home_row(y) {
                         Some(0) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
@@ -300,22 +298,10 @@ impl Screen for HomeScreen {
                             };
                             Action::Push(Box::new(MessageScreen::from_strings(lines)))
                         }
-                        Some(2) => {
-                            // Toggle. Note: turning ssh off from the app
-                            // while deployed-in over ssh severs that
-                            // session — that's the point of a switch.
-                            let on = ybdev::ssh::running();
-                            if on {
-                                ybdev::ssh::disable();
-                            } else {
-                                ybdev::ssh::enable();
-                            }
-                            plog(&format!("ssh {}", if on { "off" } else { "on" }));
-                            Action::RedrawFull
-                        }
                         Some(_) => Action::Quit,
                         None => Action::Keep,
                     },
+
                     _ => {
                         // Continue row: open the last-read book where it
                         // was left.
@@ -362,54 +348,87 @@ impl Screen for HomeScreen {
             Gesture::Swipe { dir: SwipeDir::East, .. } => self.switch(-1),
             Gesture::Swipe { dir: SwipeDir::West, .. } => self.switch(1),
             Gesture::TwoFingerTap => Action::Keep,
+            _ => Action::Keep,
         }
     }
+
 }
 
 /// Small open-book glyph for the Continue row.
 fn draw_book_icon(p: &mut Painter, x: i32, y: i32) {
     let w = pt(CONT_ICON_PT);
-    let h = pt(CONT_ICON_PT) - pt(2.0);
-    let spine = x + w / 2;
-    const T: i32 = 2;
-    p.line_w(spine, y + 2, spine, y + h - 2, T, 0);
-    p.rect_outline_t(Rect::new(x + 1, y + 2, w / 2 - 2, h - 5), T, 0);
-    p.rect_outline_t(Rect::new(spine + 1, y + 2, w / 2 - 2, h - 5), T, 0);
+    let h = pt(CONT_ICON_PT) - pt(1.0);
+    let mid = x + w / 2;
+    let pad_y = pt(1.5);
+    let book_h = h - 2 * pad_y;
+
+    // Central spine
+    p.line_w(mid, y + pad_y, mid, y + pad_y + book_h, 3, 0);
+
+    // Left page outline
+    p.line_w(mid, y + pad_y, x + pt(1.5), y + pad_y + pt(2.0), 2, 0);
+    p.line_w(x + pt(1.5), y + pad_y + pt(2.0), x + pt(1.5), y + pad_y + book_h - pt(1.0), 2, 0);
+    p.line_w(x + pt(1.5), y + pad_y + book_h - pt(1.0), mid, y + pad_y + book_h, 2, 0);
+
+    // Right page outline
+    p.line_w(mid, y + pad_y, x + w - pt(1.5), y + pad_y + pt(2.0), 2, 0);
+    p.line_w(x + w - pt(1.5), y + pad_y + pt(2.0), x + w - pt(1.5), y + pad_y + book_h - pt(1.0), 2, 0);
+    p.line_w(x + w - pt(1.5), y + pad_y + book_h - pt(1.0), mid, y + pad_y + book_h, 2, 0);
+
+    // Subtle page text lines
+    p.hline_t(y + pad_y + pt(4.5), x + pt(4.0), mid - pt(3.0), 1, 100);
+    p.hline_t(y + pad_y + pt(7.5), x + pt(4.0), mid - pt(3.0), 1, 100);
+    p.hline_t(y + pad_y + pt(4.5), mid + pt(3.0), x + w - pt(4.0), 1, 100);
+    p.hline_t(y + pad_y + pt(7.5), mid + pt(3.0), x + w - pt(4.0), 1, 100);
 }
 
-/// Row icons in a 13pt box: 0 screen+arrow (mirror), 1 down-into-tray
-/// (fetch), 2 terminal prompt (ssh), 3 X (exit).
+/// Row icons in a 13pt box:
+/// 0: Display Monitor + Cast (Mirror)
+/// 1: Download Tray + Arrow (Fetch)
+/// 2: Power / Exit button (Exit)
 fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
     let s = pt(ICON_BOX_PT);
-    let mid = x + s / 2;
+    let mid_x = x + s / 2;
+    let mid_y = y + s / 2;
     const T: i32 = 2;
+
     match row {
         0 => {
-            p.rect_outline_t(Rect::new(x, y, s, s - 2), T, 0);
-            p.line_w(mid - 3, y + s / 2, mid + 4, y + s / 2 - 1, T, 0);
-            p.line_w(mid + 1, y + s / 2 - 4, mid + 4, y + s / 2 - 1, T, 0);
-            p.line_w(mid + 1, y + s / 2 + 2, mid + 4, y + s / 2 - 1, T, 0);
+            // Monitor screen
+            let mon_h = s - pt(4.0);
+            p.rect_outline_t(Rect::new(x, y, s, mon_h), T, 0);
+            // Monitor stand
+            p.rect(Rect::new(mid_x - 1, y + mon_h, 2, pt(3.0)), 0);
+            p.hline_t(y + s - 1, mid_x - pt(3.0), mid_x + pt(3.0), T, 0);
+            // Cast beam arrow inside screen
+            p.line_w(x + pt(3.0), mid_y - pt(2.0), x + s - pt(3.0), mid_y - pt(2.0), T, 0);
+            p.line_w(x + s - pt(5.0), mid_y - pt(4.0), x + s - pt(3.0), mid_y - pt(2.0), T, 0);
+            p.line_w(x + s - pt(5.0), mid_y, x + s - pt(3.0), mid_y - pt(2.0), T, 0);
         }
         1 => {
-            p.line_w(mid, y + 1, mid, y + s - 5, T, 0);
-            p.line_w(mid - 3, y + s - 8, mid, y + s - 5, T, 0);
-            p.line_w(mid + 3, y + s - 8, mid, y + s - 5, T, 0);
-            p.rect_outline_t(Rect::new(x + 1, y + s - 3, s - 2, 2), T, 0);
-        }
-        2 => {
-            // A little terminal: window frame with a ">_" prompt.
-            p.rect_outline_t(Rect::new(x, y + 1, s, s - 4), T, 0);
-            p.hline_t(y + 5, x + 2, x + s - 3, 1, 0);
-            p.line_w(mid - 4, y + 8, mid - 1, y + s / 2 + 1, T, 0);
-            p.line_w(mid - 4, y + s - 7, mid - 1, y + s / 2 + 1, T, 0);
-            p.line_w(mid + 1, y + s - 6, mid + 5, y + s - 6, T, 0);
+            // Download arrow
+            let arrow_bot = y + s - pt(4.5);
+            p.line_w(mid_x, y + pt(1.0), mid_x, arrow_bot, T, 0);
+            p.line_w(mid_x - pt(3.0), arrow_bot - pt(3.0), mid_x, arrow_bot, T, 0);
+            p.line_w(mid_x + pt(3.0), arrow_bot - pt(3.0), mid_x, arrow_bot, T, 0);
+            // Receiving Tray
+            let tray_y = y + s - pt(3.0);
+            p.line_w(x + pt(1.0), tray_y - pt(2.5), x + pt(1.0), tray_y, T, 0);
+            p.line_w(x + pt(1.0), tray_y, x + s - pt(1.0), tray_y, T, 0);
+            p.line_w(x + s - pt(1.0), tray_y, x + s - pt(1.0), tray_y - pt(2.5), T, 0);
         }
         _ => {
-            p.line_w(x + 2, y + 2, x + s - 3, y + s - 3, T, 0);
-            p.line_w(x + s - 3, y + 2, x + 2, y + s - 3, T, 0);
+            // Power / Exit glyph: circle with vertical top line
+            let r = (s - pt(2.0)) / 2;
+            p.circle_outline_t(mid_x, mid_y, r, T, 0);
+            // White mask for top slot
+            p.rect(Rect::new(mid_x - pt(2.0), y, pt(4.0), pt(4.0)), 255);
+            // Vertical power bar
+            p.rect(Rect::new(mid_x - 1, y, 2, pt(6.0)), 0);
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -423,11 +442,11 @@ mod tests {
         assert_eq!(HomeScreen::hit_home_row(top + row_h - 1), Some(0));
         assert_eq!(HomeScreen::hit_home_row(top + row_h + 4), Some(1));
         assert_eq!(HomeScreen::hit_home_row(top + 2 * row_h + 4), Some(2));
-        assert_eq!(HomeScreen::hit_home_row(top + 3 * row_h + 4), Some(3));
         // Header and below the last row are not rows.
         assert_eq!(HomeScreen::hit_home_row(top - 1), None);
-        assert_eq!(HomeScreen::hit_home_row(top + 4 * row_h), None);
+        assert_eq!(HomeScreen::hit_home_row(top + 3 * row_h), None);
     }
+
 
     #[test]
     fn continue_row_bounds_and_list_top() {
