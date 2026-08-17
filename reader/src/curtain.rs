@@ -427,10 +427,23 @@ impl Screen for CurtainScreen {
             Gesture::Tap { x, y } => {
                 let (x, y) = (x as i32, y as i32);
 
-                // 0. Hardware Status Card Taps: SSH Remote Toggle
+                // 0. Hardware Status Card Taps: SSH Remote Toggle & Network Wi-Fi Toggle
                 let card_w = (w - 2 * pad - pt(CARD_GAP_PT)) / 2;
                 let card_h = pt(CARD_H_PT);
                 let row2_y = pt(CARD_TOP_PT) + card_h + pt(CARD_GAP_PT);
+
+                let r_net = Rect::new(pad + card_w + pt(CARD_GAP_PT), pt(CARD_TOP_PT), card_w, card_h);
+                if r_net.contains(x, y) {
+                    if crate::wifi::is_wifi_on() {
+                        let _ = std::process::Command::new("/sbin/ifconfig").args(&["wlan0", "down"]).output();
+                        let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.cmd", "wirelessEnable", "0"]).status();
+                        let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.wifid", "enable", "0"]).status();
+                    } else {
+                        crate::wifi::turn_on_wifi();
+                    }
+                    return Action::Redraw;
+                }
+
                 let r_ssh = Rect::new(pad, row2_y, card_w, card_h);
                 if r_ssh.contains(x, y) {
                     let on = ybdev::ssh::running();
@@ -441,6 +454,7 @@ impl Screen for CurtainScreen {
                     }
                     return Action::Redraw;
                 }
+
 
                 // 1. Brightness Bar Controls
                 if y >= bright_y - 12 && y < bright_y + bar_h + 12 {

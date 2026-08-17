@@ -20,6 +20,7 @@ pub enum SwipeDir {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gesture {
     Tap { x: u32, y: u32 },
+    LongPress { x: u32, y: u32 },
     /// Direction plus the swipe's START and END points: handlers can bind
     /// edge gestures (top-edge swipe-down = brightness, bottom-right
     /// swipe-up = back) and turn bar-drags into value adjustments.
@@ -27,6 +28,7 @@ pub enum Gesture {
     TwoFingerTap,
     PowerButton,
 }
+
 
 /// Edge zones on the 1236x1648 panel: the top strip (where the stock
 /// framework's status banner used to live) and the Boox-style back corner.
@@ -565,11 +567,18 @@ impl Input {
                     ey: t.y.max(0) as u32,
                 });
             }
+            if t._down.elapsed() >= Duration::from_millis(450) {
+                return Some(Gesture::LongPress {
+                    x: t.x.max(0) as u32,
+                    y: t.y.max(0) as u32,
+                });
+            }
             return Some(Gesture::Tap {
                 x: t.x.max(0) as u32,
                 y: t.y.max(0) as u32,
             });
         }
+
 
         // Legacy single-touch protocol (BTN_TOUCH + ABS_X/Y): on release.
         if !self.legacy_down {

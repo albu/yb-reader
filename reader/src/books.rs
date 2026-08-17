@@ -260,7 +260,8 @@ impl ReaderScreen {
         let (new_page, new_sub) = self.settings.split.step_to_page_sub(next_step);
 
         if self.doc.is_none() {
-            // If background-loading, check if the neighbor page is already in snapshot cache!
+            // If background-loading, check if the neighbor page is already in snapshot
+            // Cache hit: instant page swap!
             if let Some(snap) = crate::cache::load_snapshot(
                 &self.book_name(),
                 new_page,
@@ -272,6 +273,8 @@ impl ReaderScreen {
                 self.page_no = new_page;
                 self.sub_idx = new_sub;
                 self.page_gray = Some(snap);
+                self.page_words.clear();
+                self.page_annotations.clear();
                 self.pending_turns = 0;
                 self.save_progress();
                 return Action::Redraw;
@@ -289,6 +292,8 @@ impl ReaderScreen {
         self.page_no = new_page;
         self.sub_idx = new_sub;
         self.page_gray = None;
+        self.page_words.clear();
+        self.page_annotations.clear();
         self.save_progress();
 
         self.turns_since_full += 1;
@@ -329,9 +334,10 @@ impl ReaderScreen {
             samples,
             move |new_settings| {
                 positions::record_pos(&path_name, page_no, total, 0, Some(new_settings));
-                Action::Pop
+                Action::Redraw
             },
         )))
+
     }
 
     fn open_curtain(&mut self) -> Action {
@@ -343,7 +349,7 @@ impl ReaderScreen {
     fn map_gesture(&self, g: Gesture) -> (i32, i32, Option<SwipeDir>) {
         let (w, h) = self.dims; // w=1236, h=1648
         match g {
-            Gesture::Tap { x, y } => {
+            Gesture::Tap { x, y } | Gesture::LongPress { x, y } => {
                 let (px, py) = (x as i32, y as i32);
                 match self.settings.split.rotation {
                     270 => {
@@ -419,9 +425,44 @@ impl ReaderScreen {
         let Ok(tp) = page.to_text_page(mupdf::TextPageFlags::empty()) else { return };
 
         let bounds = page.bounds().unwrap_or_default();
-        let scale_x = self.w as f32 / bounds.width().max(1.0);
-        let scale_y = self.h as f32 / bounds.height().max(1.0);
+        let pw = bounds.x1 - bounds.x0;
+        let ph = bounds.y1 - bounds.y0;
+        if pw <= 0.0 || ph <= 0.0 {
+            return;
+        }
 
+        let config = &self.settings.split;
+        let boxes = config.sub_boxes();
+        let sub_box = boxes
+            .get(self.sub_idx)
+            .copied()
+            .unwrap_or(RectF::new(0.0, 0.0, 1.0, 1.0));
+
+        let bw = sub_box.width() * pw;
+        let bh = sub_box.height() * ph;
+        let margin_pad = self.settings.margin_pad;
+
+        let is_landscape = config.is_landscape();
+        let (vis_w, vis_h) = if is_landscape {
+            (
+                (self.h - 2 * margin_pad) as f32,
+                (self.w - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
+            )
+        } else {
+            (
+                (self.w - 2 * margin_pad) as f32,
+                (self.h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
+            )
+        };
+
+        let zoom = (vis_w / bw).min(vis_h / bh);
+        let rw = (bw * zoom).round() as usize;
+        let rh = (bh * zoom).round() as usize;
+
+        let vis_ox = ((vis_w as usize).saturating_sub(rw)) / 2 + margin_pad as usize;
+        let vis_oy = ((vis_h as usize).saturating_sub(rh)) / 2 + (HEADER_H + margin_pad) as usize;
+
+        let rot = config.rotation;
         let mut candidate_entries: Vec<(RectF, crate::vocab::WordEntry)> = Vec::new();
 
         for block in tp.blocks() {
@@ -436,12 +477,28 @@ impl ReaderScreen {
                     if let Some(c) = ch.char() {
                         if c.is_whitespace() {
                             if !cur_word.is_empty() {
-                                let r = RectF::new(
-                                    min_x * scale_x,
-                                    min_y * scale_y,
-                                    max_x * scale_x,
-                                    max_y * scale_y,
-                                );
+                                let sx0 = vis_ox as f32 + (min_x - sub_box.x0 * pw) * zoom;
+                                let sy0 = vis_oy as f32 + (min_y - sub_box.y0 * ph) * zoom;
+                                let sx1 = vis_ox as f32 + (max_x - sub_box.x0 * pw) * zoom;
+                                let sy1 = vis_oy as f32 + (max_y - sub_box.y0 * ph) * zoom;
+
+                                let (px0, py0, px1, py1) = match rot {
+                                    270 => (
+                                        (self.h - 1) as f32 - sy1,
+                                        sx0,
+                                        (self.h - 1) as f32 - sy0,
+                                        sx1,
+                                    ),
+                                    90 => (
+                                        sy0,
+                                        (self.w - 1) as f32 - sx1,
+                                        sy1,
+                                        (self.w - 1) as f32 - sx0,
+                                    ),
+                                    _ => (sx0, sy0, sx1, sy1),
+                                };
+
+                                let r = RectF::new(px0, py0, px1, py1);
                                 self.page_words.push((cur_word.clone(), r));
                                 if let Some(db) = &self.vocab_db {
                                     if let Some(entry) = db.lookup(&cur_word) {
@@ -467,12 +524,28 @@ impl ReaderScreen {
                     }
                 }
                 if !cur_word.is_empty() {
-                    let r = RectF::new(
-                        min_x * scale_x,
-                        min_y * scale_y,
-                        max_x * scale_x,
-                        max_y * scale_y,
-                    );
+                    let sx0 = vis_ox as f32 + (min_x - sub_box.x0 * pw) * zoom;
+                    let sy0 = vis_oy as f32 + (min_y - sub_box.y0 * ph) * zoom;
+                    let sx1 = vis_ox as f32 + (max_x - sub_box.x0 * pw) * zoom;
+                    let sy1 = vis_oy as f32 + (max_y - sub_box.y0 * ph) * zoom;
+
+                    let (px0, py0, px1, py1) = match rot {
+                        270 => (
+                            (self.h - 1) as f32 - sy1,
+                            sx0,
+                            (self.h - 1) as f32 - sy0,
+                            sx1,
+                        ),
+                        90 => (
+                            sy0,
+                            (self.w - 1) as f32 - sx1,
+                            sy1,
+                            (self.w - 1) as f32 - sx0,
+                        ),
+                        _ => (sx0, sy0, sx1, sy1),
+                    };
+
+                    let r = RectF::new(px0, py0, px1, py1);
                     self.page_words.push((cur_word.clone(), r));
                     if let Some(db) = &self.vocab_db {
                         if let Some(entry) = db.lookup(&cur_word) {
@@ -496,12 +569,13 @@ impl ReaderScreen {
     fn find_word_at_pos(&self, vx: f32, vy: f32) -> Option<(String, RectF)> {
         for (w, r) in &self.page_words {
             // Hit test with generous touch padding
-            if vx >= r.x0 - 8.0 && vx <= r.x1 + 8.0 && vy >= r.y0 - 8.0 && vy <= r.y1 + 8.0 {
+            if vx >= r.x0 - 12.0 && vx <= r.x1 + 12.0 && vy >= r.y0 - 12.0 && vy <= r.y1 + 12.0 {
                 return Some((w.clone(), *r));
             }
         }
         None
     }
+
 
 
     fn open_word_dialog(&mut self, entry: crate::vocab::WordEntry) -> Action {
@@ -868,39 +942,8 @@ impl Screen for ReaderScreen {
         }
 
         match g {
-            Gesture::Tap { .. } => {
-                // 1. Visual Top-Left corner -> Back to Library
-                if vx < 240 && vy < 160 {
-                    return Action::Pop;
-                }
-
-                // 2. Visual Bottom-Left corner -> Reader Settings Dialog
-                if vx < 240 && vy > vis_h - 160 {
-                    return self.open_settings_dialog();
-                }
-
-                // 3. Visual Bottom-Right corner -> Back to Library
-                if vx > vis_w - 240 && vy > vis_h - 160 {
-                    return Action::Pop;
-                }
-
-                // 4. Visual Top-Right corner -> Full Screen Refresh (clean flash)
-                if vx > vis_w - 240 && vy < 160 {
-                    return Action::RedrawFull;
-                }
-
-                // 5. Visual Top strip or Center -> Reader Settings Dialog
-                let is_top_strip = vy < vis_h * 16 / 100 && vx > vis_w * 25 / 100 && vx < vis_w * 75 / 100;
-                let is_center = vx > vis_w * 35 / 100
-                    && vx < vis_w * 65 / 100
-                    && vy > vis_h * 35 / 100
-                    && vy < vis_h * 65 / 100;
-
-                if is_top_strip || is_center {
-                    return self.open_settings_dialog();
-                }
-
-                // 6. Word Tap: Check if user tapped a word on the page for definition / translation
+            Gesture::LongPress { .. } => {
+                // Word Long Press: Check if user held on a word on the page for definition / translation
                 if let Some((word_text, _rect)) = self.find_word_at_pos(vx as f32, vy as f32) {
                     if let Some(db) = &self.vocab_db {
                         if let Some(entry) = db.lookup(&word_text) {
@@ -908,8 +951,30 @@ impl Screen for ReaderScreen {
                         }
                     }
                 }
+                Action::Keep
+            }
+            Gesture::Tap { .. } => {
+                // 1. Visual Top-Left corner -> Back to Library
+                if vx < 240 && vy < 160 {
+                    return Action::Pop;
+                }
 
-                // 7. Page turns
+                // 2. Visual Top-Right corner -> Full Screen Refresh (clean flash)
+                if vx > vis_w - 240 && vy < 160 {
+                    return Action::RedrawFull;
+                }
+
+                // 3. Visual Bottom-Right corner -> Back to Library
+                if vx > vis_w - 240 && vy > vis_h - 160 {
+                    return Action::Pop;
+                }
+
+                // 4. Visual Top strip (middle) -> Curtain (Brightness / Network / Controls)
+                if vy < 140 && vx > 240 && vx < vis_w - 240 {
+                    return self.open_curtain();
+                }
+
+                // 5. Page turns (Left third = Back, Right two-thirds = Forward)
                 if vx < vis_w / 3 {
                     self.turn(false)
                 } else {
@@ -923,6 +988,7 @@ impl Screen for ReaderScreen {
             _ => Action::Keep,
         }
     }
+
 }
 
 fn current_time_str() -> String {
