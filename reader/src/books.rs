@@ -346,12 +346,13 @@ impl ReaderScreen {
     }
 
     fn open_toc_dialog(&mut self) -> Action {
+
         let Some(doc) = &self.doc else { return Action::Keep };
         let Ok(outlines) = doc.outlines() else { return Action::Keep };
         let cur_page = self.page_no;
-        let path = self.path.clone();
-        let w = self.w;
-        let h = self.h;
+        let path_name = self.book_name();
+        let total = self.total;
+        let settings = self.settings;
 
         Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
             &outlines,
@@ -359,7 +360,8 @@ impl ReaderScreen {
             move |act| {
                 match act {
                     crate::toc_dialog::TocAction::JumpTo(target) => {
-                        Action::Push(Box::new(ReaderScreen::new(path.clone(), target, w, h)))
+                        positions::record_pos(&path_name, target, total, 0, Some(settings));
+                        Action::Pop
                     }
                     crate::toc_dialog::TocAction::Close => Action::Pop,
                 }
@@ -371,9 +373,8 @@ impl ReaderScreen {
         let cur_page = self.page_no;
         let total = self.total;
         let bg = self.page_gray.clone();
-        let path = self.path.clone();
-        let w = self.w;
-        let h = self.h;
+        let path_name = self.book_name();
+        let settings = self.settings;
 
         Action::Push(Box::new(crate::scrubber_dialog::ScrubberDialog::new(
             cur_page,
@@ -382,7 +383,8 @@ impl ReaderScreen {
             move |act| {
                 match act {
                     crate::scrubber_dialog::ScrubberAction::JumpTo(target) => {
-                        Action::Push(Box::new(ReaderScreen::new(path.clone(), target, w, h)))
+                        positions::record_pos(&path_name, target, total, 0, Some(settings));
+                        Action::Pop
                     }
                     crate::scrubber_dialog::ScrubberAction::Close => Action::Pop,
                 }
@@ -430,9 +432,9 @@ impl ReaderScreen {
         }
 
         let bg = self.page_gray.clone();
-        let path = self.path.clone();
-        let w = self.w;
-        let h = self.h;
+        let path_name = self.book_name();
+        let total = self.total;
+        let settings = self.settings;
 
         Action::Push(Box::new(crate::footnote_dialog::FootnoteDialog::new(
             "📖 Footnote / Note",
@@ -442,14 +444,14 @@ impl ReaderScreen {
             move |act| {
                 match act {
                     crate::footnote_dialog::FootnoteAction::JumpTo(target) => {
-                        Action::Push(Box::new(ReaderScreen::new(path.clone(), target, w, h)))
+                        positions::record_pos(&path_name, target, total, 0, Some(settings));
+                        Action::Pop
                     }
                     crate::footnote_dialog::FootnoteAction::Close => Action::Pop,
                 }
             },
         )))
     }
-
 
     fn open_settings_dialog(&mut self) -> Action {
         let settings = self.settings;
@@ -469,9 +471,6 @@ impl ReaderScreen {
         let path_name = self.book_name();
         let page_no = self.page_no;
         let total = self.total;
-        let path = self.path.clone();
-        let w = self.w;
-        let h = self.h;
         let bg = self.page_gray.clone();
         let outlines = self.doc.as_ref().and_then(|d| d.outlines().ok());
 
@@ -487,14 +486,15 @@ impl ReaderScreen {
                     }
                     crate::settings_dialog::SettingsDialogAction::OpenToc => {
                         if let Some(ol) = &outlines {
-                            let path_cl = path.clone();
+                            let path_cl = path_name.clone();
                             Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
                                 ol,
                                 page_no,
                                 move |act| {
                                     match act {
                                         crate::toc_dialog::TocAction::JumpTo(target) => {
-                                            Action::Push(Box::new(ReaderScreen::new(path_cl.clone(), target, w, h)))
+                                            positions::record_pos(&path_cl, target, total, 0, Some(settings));
+                                            Action::Pop
                                         }
                                         crate::toc_dialog::TocAction::Close => Action::Pop,
                                     }
@@ -505,7 +505,7 @@ impl ReaderScreen {
                         }
                     }
                     crate::settings_dialog::SettingsDialogAction::OpenScrubber => {
-                        let path_cl = path.clone();
+                        let path_cl = path_name.clone();
                         Action::Push(Box::new(crate::scrubber_dialog::ScrubberDialog::new(
                             page_no,
                             total,
@@ -513,7 +513,8 @@ impl ReaderScreen {
                             move |act| {
                                 match act {
                                     crate::scrubber_dialog::ScrubberAction::JumpTo(target) => {
-                                        Action::Push(Box::new(ReaderScreen::new(path_cl.clone(), target, w, h)))
+                                        positions::record_pos(&path_cl, target, total, 0, Some(settings));
+                                        Action::Pop
                                     }
                                     crate::scrubber_dialog::ScrubberAction::Close => Action::Pop,
                                 }
@@ -524,6 +525,7 @@ impl ReaderScreen {
             },
         )))
     }
+
 
 
 
@@ -903,6 +905,16 @@ plog(&format!(
         self.vocab_prof = crate::vocab::VocabProfile::load();
 
         let pos = positions::resume_pos(&self.book_name());
+        let page_changed = pos.page != self.page_no || pos.sub_idx != self.sub_idx;
+        if page_changed {
+            self.page_no = pos.page;
+            self.sub_idx = pos.sub_idx;
+            self.page_gray = None;
+            self.page_words.clear();
+            self.page_annotations.clear();
+            self.page_start_time = Instant::now();
+        }
+
         if let Some(s) = pos.settings {
             let font_changed = (s.font_size - self.settings.font_size).abs() > 0.01
                 || s.margin_pad != self.settings.margin_pad;
@@ -911,11 +923,10 @@ plog(&format!(
                 self.page_annotations.clear();
             }
             self.settings = s;
-            self.sub_idx = 0;
-            self.page_gray = None;
-
 
             if font_changed && !self.is_pdf() {
+                self.sub_idx = 0;
+                self.page_gray = None;
                 // In-memory instant reflow without re-reading/re-parsing ZIP archive from disk
                 if let Some(doc) = self.doc.take() {
                     self.loading = Some(reflow_async(
@@ -936,10 +947,14 @@ plog(&format!(
                 }
                 return Action::Redraw;
             }
-            return Action::Redraw;
         }
-        Action::Redraw
+        if page_changed {
+            Action::RedrawFull
+        } else {
+            Action::Redraw
+        }
     }
+
 
 
     fn tick_interval(&self) -> std::time::Duration {
