@@ -13,7 +13,9 @@ mod positions;
 mod protocol;
 mod settings_dialog;
 mod split;
+mod vocab;
 mod wifi;
+mod word_dialog;
 
 
 

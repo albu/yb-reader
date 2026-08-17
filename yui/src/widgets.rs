@@ -256,10 +256,15 @@ impl Screen for SleepScreen {
         let _ = std::process::Command::new("/sbin/ifconfig")
             .args(&["wlan0", "up"])
             .output();
-            fl.tone_set(self.prev_tone);
-        }
+        let _ = std::process::Command::new("lipc-set-prop")
+            .args(&["-i", "com.lab126.cmd", "wirelessEnable", "1"])
+            .status();
+        let _ = std::process::Command::new("lipc-set-prop")
+            .args(&["-i", "com.lab126.wifid", "enable", "1"])
+            .status();
     }
 }
+
 
 
 
