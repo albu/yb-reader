@@ -1,0 +1,5 @@
+/target/
+**/*.rs.bk
+.DS_Store
+
+packages/yb-reader/bin/reader

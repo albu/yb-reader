@@ -1,0 +1,3 @@
+[target.arm-unknown-linux-musleabihf]
+linker = "zig"
+rustflags = ["-C", "target-feature=+crt-static"]

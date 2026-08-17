@@ -1,0 +1,8 @@
+[package]
+name = "yui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ybdev = { path = "../ybdev" }
+fontdue = "0.9"

@@ -1,0 +1,10 @@
+[package]
+name = "yb-reader"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ybdev = { path = "../ybdev" }
+yui = { path = "../yui" }
+libc = "0.2"
+mupdf = { version = "0.7", default-features = false, features = ["epub", "cbz", "img"] }

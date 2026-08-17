@@ -1,0 +1,69 @@
+//! Kindle WiFi control, matching KOReader's kindleEnableWifi: lipc props.
+
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+pub fn is_wifi_on() -> bool {
+    if let Ok(out) = Command::new("lipc-get-prop")
+        .args(["-i", "com.lab126.wifid", "enable"])
+        .output()
+    {
+        if out.status.success() {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                return s.trim() == "1";
+            }
+        }
+    }
+    // Fallback: assume on (the app will discover/retry anyway).
+    true
+}
+
+pub fn turn_on_wifi() {
+    let _ = Command::new("lipc-set-prop")
+        .args(["-i", "com.lab126.cmd", "wirelessEnable", "1"])
+        .status();
+    let _ = Command::new("lipc-set-prop")
+        .args(["-i", "com.lab126.wifid", "enable", "1"])
+        .status();
+}
+
+pub fn ensure_wifi() {
+    if !is_wifi_on() {
+        ybdev::log::plog("wifi down — turning it back on");
+        turn_on_wifi();
+        wait_for_wifi(Duration::from_secs(20));
+    }
+}
+
+/// Poll `com.lab126.wifid cmState` until CONNECTED (KOReader's
+/// kindleGetScanList uses the same property). Association takes seconds
+/// after `enable`; without this wait a cold radio would produce spurious
+/// "Mac not found" on the very first tap.
+pub fn wait_for_wifi(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(out) = Command::new("lipc-get-prop")
+            .args(["com.lab126.wifid", "cmState"])
+            .output()
+        {
+            if out.status.success() {
+                if let Ok(s) = String::from_utf8(out.stdout) {
+                    if s.trim() == "CONNECTED" {
+                        return true;
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+/// Keep the stock screensaver/suspend from interrupting a reading or
+/// mirroring session (KOReader's KeepAlive plugin uses exactly this).
+pub fn keep_awake(on: bool) {
+    let v = if on { "1" } else { "0" };
+    let _ = Command::new("lipc-set-prop")
+        .args(["com.lab126.powerd", "preventScreenSaver", v])
+        .status();
+}

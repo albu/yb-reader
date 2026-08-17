@@ -1,0 +1,118 @@
+//! mirror.conf handling, ported 1:1 from mirror.koplugin's readServerConf /
+//! writeServerConf / parseServer / sanitizeFetchName / urldecode.
+
+#[derive(Debug, Clone, Default)]
+pub struct ServerConf {
+    pub server: Option<String>,
+    pub refresh_every: Option<u32>,
+}
+
+pub fn read(path: &str) -> ServerConf {
+    let mut conf = ServerConf::default();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return conf;
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("SERVER=") {
+            let v = rest.trim();
+            if !v.is_empty() {
+                conf.server = Some(v.to_string());
+            }
+        } else if let Some(rest) = t.strip_prefix("REFRESH_EVERY=") {
+            if let Ok(n) = rest.trim().parse::<u32>() {
+                conf.refresh_every = Some(n);
+            }
+        }
+    }
+    conf
+}
+
+/// Rewrite the conf file, preserving every non-SERVER line and appending
+/// `SERVER=...` (matches writeServerConf).
+pub fn write_server(path: &str, server: &str) {
+    let mut lines: Vec<String> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(path) {
+        for line in text.lines() {
+            if !line.trim_start().starts_with("SERVER=") {
+                lines.push(line.to_string());
+            }
+        }
+    }
+    lines.push(format!("SERVER={}", server));
+    let _ = std::fs::write(path, lines.join("\n") + "\n");
+}
+
+/// "http://192.0.2.1:8765" / "192.0.2.1:8765" / "192.0.2.1" /
+/// "mybook.local:8765" -> (host, port). Port defaults to 8765.
+pub fn parse_server(s: &str) -> (Option<String>, u16) {
+    let mut s = s.trim();
+    if let Some(rest) = s.strip_prefix("http://") {
+        s = rest;
+    }
+    let (host, port) = match s.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            (h.to_string(), p.parse::<u16>().unwrap_or(8765))
+        }
+        _ => (s.to_string(), 8765),
+    };
+    if host.is_empty() {
+        (None, 8765)
+    } else {
+        (Some(host), port)
+    }
+}
+
+/// %XX -> byte, '+' -> space; byte-transparent for UTF-8 names.
+pub fn urldecode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() + 0 && i + 2 < bytes.len() => {
+                let hi = hex_val(bytes[i + 1]);
+                let lo = hex_val(bytes[i + 2]);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push((h << 4) | l);
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Basename only, no control bytes, nothing hidden/dot-like left.
+pub fn sanitize_fetch_name(name: &str) -> Option<String> {
+    let name = name.replace('\\', "/");
+    let name = name.rsplit('/').next().unwrap_or("");
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim_start_matches('.');
+    if name.is_empty() || name == "." || name == ".." {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+

@@ -1,0 +1,10 @@
+{
+  "items": [
+    {
+      "name": "Run probe",
+      "priority": 0,
+      "action": "bin/start.sh"
+    }
+  ]
+}
+

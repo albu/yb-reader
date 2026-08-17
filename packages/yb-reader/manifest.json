@@ -1,0 +1,17 @@
+{
+  "manifest_version": 2,
+  "id": "yb-reader",
+  "name": "YB Reader",
+  "author": "yb",
+  "description": "Minimal reader for a jailbroken PW5: Mac screen mirror, fetch book, EPUB/PDF library, frontlight.",
+  "version": [
+    0,
+    1,
+    0
+  ],
+  "dependencies": [],
+  "supported_platforms": [
+    "kindlehf"
+  ]
+}
+

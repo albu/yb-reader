@@ -1,0 +1,294 @@
+//! App: owns the panel, the input and the screen stack. Runs the event
+//! loop, routes the edge gestures, applies screen actions, and enforces
+//! the e-ink refresh discipline (an update only ever follows a `Redraw*`
+//! action or a stack transition — never a bare tick).
+
+use ybdev::input::{Gesture, Input};
+use ybdev::panel::Panel;
+
+use crate::font::Font;
+use crate::frontlight::FrontlightScreen;
+use crate::painter::Painter;
+use crate::screen::{Action, Screen};
+
+pub struct App {
+    panel: Panel,
+    input: Input,
+    font: Font,
+    stack: Vec<Box<dyn Screen>>,
+    /// Custom screen for the top-edge/two-finger overlay (the default is
+    /// yui's FrontlightScreen; apps with a richer control center — clock,
+    /// battery, wifi — install their own factory here).
+    overlay: Option<Box<dyn Fn() -> Box<dyn Screen>>>,
+}
+
+impl App {
+    /// Loads the shared font; panel and input are handed over for good.
+    pub fn new(panel: Panel, input: Input) -> Result<App, String> {
+        let font = Font::load()?;
+        Ok(App {
+            panel,
+            input,
+            font,
+            stack: Vec::new(),
+            overlay: None,
+        })
+    }
+
+    /// Replace the edge-gesture overlay with a custom screen factory.
+    pub fn with_edge_overlay(mut self, make: Box<dyn Fn() -> Box<dyn Screen>>) -> App {
+        self.overlay = Some(make);
+        self
+    }
+
+    pub fn dims(&self) -> (u32, u32) {
+        (self.panel.width, self.panel.height)
+    }
+
+    /// Run until the stack empties or a screen quits. Ends with one final
+    /// full refresh (the launcher redraws over whatever we left).
+    pub fn run(&mut self, root: Box<dyn Screen>) {
+        self.stack.clear();
+        if !self.apply(Action::Push(root)) {
+            return;
+        }
+        while !self.stack.is_empty() {
+            let interval = self
+                .stack
+                .last()
+                .map(|s| s.tick_interval())
+                .unwrap_or_else(|| std::time::Duration::from_secs(1));
+            let gesture = self.input.next_gesture(interval);
+            let action = match gesture {
+                Some(g) => self.dispatch(g),
+                None => self
+                    .stack
+                    .last_mut()
+                    .map(|s| s.on_tick())
+                    .unwrap_or(Action::Quit),
+            };
+            if !self.apply(action) {
+                break;
+            }
+        }
+        self.panel.refresh_full();
+    }
+
+    /// Edge-gesture policy first (for screens that accept it), then the
+    /// screen's own handler. Taps never match the edge patterns, so tap
+    /// zones keep their precedence for free.
+    fn dispatch(&mut self, g: Gesture) -> Action {
+        let edges = self.stack.last().map(|s| s.default_edges()).unwrap_or(false);
+        if edges {
+            if g.top_edge_swipe() || matches!(g, Gesture::TwoFingerTap) {
+                let overlay = self
+                    .overlay
+                    .as_ref()
+                    .map(|make| make())
+                    .unwrap_or_else(|| Box::new(FrontlightScreen::new()));
+                return Action::Push(overlay);
+            }
+            if g.corner_back() {
+                return Action::Pop;
+            }
+        }
+        match self.stack.last_mut() {
+            Some(s) => s.on_gesture(g),
+            None => Action::Quit,
+        }
+    }
+
+    fn apply(&mut self, a: Action) -> bool {
+        let (cont, redraw_full) = transition(&mut self.stack, a);
+        if let Some(full) = redraw_full {
+            self.draw_top(full);
+        }
+        cont
+    }
+
+    fn draw_top(&mut self, full: bool) {
+        let App {
+            panel, font, stack, ..
+        } = self;
+        let w = panel.width;
+        let h = panel.height;
+        let stride = panel.stride as usize;
+        {
+            let mut p = Painter::new(panel.buf_mut(), w, h, stride, font);
+            if let Some(s) = stack.last_mut() {
+                s.draw(&mut p);
+            }
+        }
+        if full {
+            panel.refresh_full();
+        } else {
+            panel.refresh_partial(0, 0, w, h);
+        }
+    }
+}
+
+/// Pure stack machine behind Action — separately testable with fake
+/// screens. Returns (continue?, redraw mode: Some(full?) means draw the
+/// new top now).
+fn transition(stack: &mut Vec<Box<dyn Screen>>, a: Action) -> (bool, Option<bool>) {
+    match a {
+        Action::Keep => (true, None),
+        Action::Redraw => (true, Some(false)),
+        Action::RedrawFull => (true, Some(true)),
+        Action::Push(s) => {
+            stack.push(s);
+            let a = stack.last_mut().unwrap().on_enter();
+            transition(stack, a)
+        }
+        Action::Pop => {
+            if stack.len() <= 1 {
+                // Popping the root quits — but still release its resources.
+                if let Some(mut popped) = stack.pop() {
+                    popped.on_leave();
+                }
+                return (false, None);
+            }
+            if let Some(mut popped) = stack.pop() {
+                popped.on_leave();
+            }
+            let a = stack.last_mut().unwrap().on_resume();
+            transition(stack, a)
+        }
+        Action::Quit => (false, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::painter::Rect;
+
+    /// Screen that records its lifecycle calls into a shared log and never
+    /// draws (there is no buffer here — draw is exercised by the Painter
+    /// tests and on-device).
+    struct Fake {
+        name: &'static str,
+        log: Rc<RefCell<Vec<String>>>,
+        resume: Action,
+    }
+
+    impl Screen for Fake {
+        fn draw(&mut self, _p: &mut Painter) {}
+        fn on_enter(&mut self) -> Action {
+            self.log.borrow_mut().push(format!("{}:enter", self.name));
+            Action::RedrawFull
+        }
+        fn on_leave(&mut self) {
+            self.log.borrow_mut().push(format!("{}:leave", self.name));
+        }
+        fn on_resume(&mut self) -> Action {
+            self.log.borrow_mut().push(format!("{}:resume", self.name));
+            std::mem::replace(&mut self.resume, Action::Keep)
+        }
+    }
+
+    fn fake(name: &'static str, log: &Rc<RefCell<Vec<String>>>) -> Box<dyn Screen> {
+        Box::new(Fake {
+            name,
+            log: log.clone(),
+            resume: Action::RedrawFull,
+        })
+    }
+
+    #[test]
+    fn push_runs_on_enter_and_requests_full_draw() {
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut stack = vec![];
+        let (cont, redraw) = transition(&mut stack, Action::Push(fake("a", &log)));
+        assert!(cont);
+        assert_eq!(redraw, Some(true));
+        assert_eq!(*log.borrow(), vec!["a:enter"]);
+    }
+
+    #[test]
+    fn pop_runs_leave_then_resume_and_applies_resume_action() {
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut stack = vec![fake("base", &log), fake("over", &log)];
+        log.borrow_mut().clear();
+
+        let (cont, redraw) = transition(&mut stack, Action::Pop);
+        assert!(cont);
+        // base's default-impl resume: RedrawFull.
+        assert_eq!(redraw, Some(true));
+        assert_eq!(*log.borrow(), vec!["over:leave", "base:resume"]);
+        assert_eq!(stack.len(), 1);
+    }
+
+    #[test]
+    fn resume_redraw_partial_is_honored() {
+        let log = Rc::new(RefCell::new(vec![]));
+        // A screen holding a pixel cache re-presents it with Redraw:
+        let base: Box<dyn Screen> = Box::new(Fake {
+            name: "base",
+            log: log.clone(),
+            resume: Action::Redraw,
+        });
+        let mut stack: Vec<Box<dyn Screen>> = vec![base, fake("over", &log)];
+        let (_, redraw) = transition(&mut stack, Action::Pop);
+        assert_eq!(redraw, Some(false));
+    }
+
+    #[test]
+    fn keep_never_draws() {
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut stack = vec![fake("a", &log)];
+        let (cont, redraw) = transition(&mut stack, Action::Keep);
+        assert!(cont);
+        assert_eq!(redraw, None);
+        assert!(log.borrow().is_empty());
+    }
+
+    #[test]
+    fn popping_the_root_quits() {
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut stack = vec![fake("root", &log)];
+        let (cont, _) = transition(&mut stack, Action::Pop);
+        assert!(!cont);
+        // Root leave still fires (release resources on exit).
+        assert_eq!(*log.borrow(), vec!["root:leave"]);
+    }
+
+    #[test]
+    fn push_enter_can_push_an_overlay_itself() {
+        // A screen whose setup fails pushes a message on entry.
+        struct Failing {
+            log: Rc<RefCell<Vec<String>>>,
+        }
+        impl Screen for Failing {
+            fn draw(&mut self, _p: &mut Painter) {}
+            fn on_enter(&mut self) -> Action {
+                self.log.borrow_mut().push("fail:enter".into());
+                Action::Push(Box::new(Fake {
+                    name: "msg",
+                    log: self.log.clone(),
+                    resume: Action::RedrawFull,
+                }))
+            }
+        }
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut stack: Vec<Box<dyn Screen>> = vec![];
+        let (cont, redraw) = transition(
+            &mut stack,
+            Action::Push(Box::new(Failing { log: log.clone() })),
+        );
+        assert!(cont);
+        assert_eq!(redraw, Some(true)); // msg's default on_enter
+        assert_eq!(*log.borrow(), vec!["fail:enter", "msg:enter"]);
+        assert_eq!(stack.len(), 2);
+    }
+
+    #[test]
+    fn rect_only_used_for_compile_guard() {
+        // Rect is exercised here so the import stays honest if tests change.
+        let r = Rect::new(0, 0, 1, 1);
+        assert!(r.contains(0, 0));
+    }
+}

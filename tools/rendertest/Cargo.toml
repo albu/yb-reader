@@ -1,0 +1,8 @@
+[package]
+name = "rendertest"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+yui = { path = "../../yui" }
+png = "0.17"

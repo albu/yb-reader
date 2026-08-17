@@ -1,0 +1,8 @@
+[package]
+name = "ybdev"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc = "0.2"
+png = "0.17"

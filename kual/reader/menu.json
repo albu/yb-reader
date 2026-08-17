@@ -1,0 +1,10 @@
+{
+  "items": [
+    {
+      "name": "YB Reader",
+      "priority": 0,
+      "action": "bin/start.sh"
+    }
+  ]
+}
+
