@@ -171,6 +171,10 @@ pub struct ReaderScreen {
     vocab_prof: crate::vocab::VocabProfile,
     page_words: Vec<(String, RectF)>,
     page_annotations: Vec<(RectF, crate::vocab::WordEntry)>,
+    page_links: Vec<(RectF, String)>,
+    page_start_time: Instant,
+    avg_secs_per_page: f32,
+    toc_chapters: Vec<usize>,
 }
 
 impl ReaderScreen {
@@ -212,8 +216,13 @@ impl ReaderScreen {
             vocab_prof,
             page_words: Vec::new(),
             page_annotations: Vec::new(),
+            page_links: Vec::new(),
+            page_start_time: Instant::now(),
+            avg_secs_per_page: 45.0,
+            toc_chapters: Vec::new(),
         }
     }
+
 
 
     fn book_name(&self) -> String {
@@ -257,7 +266,14 @@ impl ReaderScreen {
             return Action::Keep;
         }
 
+        let elapsed = self.page_start_time.elapsed().as_secs_f32();
+        if elapsed >= 3.0 && elapsed <= 300.0 {
+            self.avg_secs_per_page = self.avg_secs_per_page * 0.7 + elapsed * 0.3;
+        }
+        self.page_start_time = Instant::now();
+
         let (new_page, new_sub) = self.settings.split.step_to_page_sub(next_step);
+
 
         if self.doc.is_none() {
             // If background-loading, check if the neighbor page is already in snapshot
@@ -306,6 +322,135 @@ impl ReaderScreen {
         }
     }
 
+    fn scan_toc_chapters(&mut self) {
+        if let Some(doc) = &self.doc {
+            if let Ok(outlines) = doc.outlines() {
+                let mut chapters = Vec::new();
+                Self::collect_outline_pages(&outlines, &mut chapters);
+                chapters.sort_unstable();
+                chapters.dedup();
+                self.toc_chapters = chapters;
+            }
+        }
+    }
+
+    fn collect_outline_pages(outlines: &[mupdf::Outline], out: &mut Vec<usize>) {
+        for o in outlines {
+            if let Some(dest) = &o.dest {
+                out.push(dest.loc.page_number as usize);
+            }
+            if !o.down.is_empty() {
+                Self::collect_outline_pages(&o.down, out);
+            }
+        }
+    }
+
+    fn open_toc_dialog(&mut self) -> Action {
+        let Some(doc) = &self.doc else { return Action::Keep };
+        let Ok(outlines) = doc.outlines() else { return Action::Keep };
+        let cur_page = self.page_no;
+        let path = self.path.clone();
+        let w = self.w;
+        let h = self.h;
+
+        Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
+            &outlines,
+            cur_page,
+            move |act| {
+                match act {
+                    crate::toc_dialog::TocAction::JumpTo(target) => {
+                        Action::Push(Box::new(ReaderScreen::new(path.clone(), target, w, h)))
+                    }
+                    crate::toc_dialog::TocAction::Close => Action::Pop,
+                }
+            },
+        )))
+    }
+
+    fn open_scrubber_dialog(&mut self) -> Action {
+        let cur_page = self.page_no;
+        let total = self.total;
+        let bg = self.page_gray.clone();
+        let path = self.path.clone();
+        let w = self.w;
+        let h = self.h;
+
+        Action::Push(Box::new(crate::scrubber_dialog::ScrubberDialog::new(
+            cur_page,
+            total,
+            bg,
+            move |act| {
+                match act {
+                    crate::scrubber_dialog::ScrubberAction::JumpTo(target) => {
+                        Action::Push(Box::new(ReaderScreen::new(path.clone(), target, w, h)))
+                    }
+                    crate::scrubber_dialog::ScrubberAction::Close => Action::Pop,
+                }
+            },
+        )))
+    }
+
+    fn open_footnote_or_link(&mut self, uri: &str) -> Action {
+        let Some(doc) = &self.doc else { return Action::Keep };
+        let dest = doc.resolve_link(uri).ok().flatten();
+        let target_page = dest.as_ref().map(|d| d.loc.page_number as usize);
+        
+        let mut snippet = String::new();
+        if let Some(target) = target_page {
+            if let Ok(p) = doc.load_page(target as i32) {
+                if let Ok(tp) = p.to_text_page(mupdf::TextPageFlags::empty()) {
+                    let mut lines = Vec::new();
+                    for block in tp.blocks() {
+                        for line in block.lines() {
+                            let mut line_str = String::new();
+                            for ch in line.chars() {
+                                if let Some(c) = ch.char() {
+                                    line_str.push(c);
+                                }
+                            }
+                            let text = line_str.trim().to_string();
+                            if !text.is_empty() {
+                                lines.push(text);
+                            }
+                            if lines.len() >= 6 {
+                                break;
+                            }
+                        }
+                        if lines.len() >= 6 {
+                            break;
+                        }
+                    }
+                    snippet = lines.join(" ");
+                }
+            }
+        }
+
+        if snippet.is_empty() {
+            snippet = format!("Link target: {}", uri);
+        }
+
+        let bg = self.page_gray.clone();
+        let path = self.path.clone();
+        let w = self.w;
+        let h = self.h;
+
+        Action::Push(Box::new(crate::footnote_dialog::FootnoteDialog::new(
+            "📖 Footnote / Note",
+            &snippet,
+            target_page,
+            bg,
+            move |act| {
+                match act {
+                    crate::footnote_dialog::FootnoteAction::JumpTo(target) => {
+                        Action::Push(Box::new(ReaderScreen::new(path.clone(), target, w, h)))
+                    }
+                    crate::footnote_dialog::FootnoteAction::Close => Action::Pop,
+                }
+            },
+        )))
+    }
+
+
     fn open_settings_dialog(&mut self) -> Action {
         let settings = self.settings;
         let is_pdf = self.is_pdf();
@@ -324,17 +469,62 @@ impl ReaderScreen {
         let path_name = self.book_name();
         let page_no = self.page_no;
         let total = self.total;
+        let path = self.path.clone();
+        let w = self.w;
+        let h = self.h;
+        let bg = self.page_gray.clone();
+        let outlines = self.doc.as_ref().and_then(|d| d.outlines().ok());
 
         Action::Push(Box::new(ReaderSettingsDialog::new(
             settings,
             is_pdf,
             samples,
-            move |new_settings| {
-                positions::record_pos(&path_name, page_no, total, 0, Some(new_settings));
-                Action::Pop
+            move |action| {
+                match action {
+                    crate::settings_dialog::SettingsDialogAction::Apply(new_settings) => {
+                        positions::record_pos(&path_name, page_no, total, 0, Some(new_settings));
+                        Action::Pop
+                    }
+                    crate::settings_dialog::SettingsDialogAction::OpenToc => {
+                        if let Some(ol) = &outlines {
+                            let path_cl = path.clone();
+                            Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
+                                ol,
+                                page_no,
+                                move |act| {
+                                    match act {
+                                        crate::toc_dialog::TocAction::JumpTo(target) => {
+                                            Action::Push(Box::new(ReaderScreen::new(path_cl.clone(), target, w, h)))
+                                        }
+                                        crate::toc_dialog::TocAction::Close => Action::Pop,
+                                    }
+                                },
+                            )))
+                        } else {
+                            Action::Pop
+                        }
+                    }
+                    crate::settings_dialog::SettingsDialogAction::OpenScrubber => {
+                        let path_cl = path.clone();
+                        Action::Push(Box::new(crate::scrubber_dialog::ScrubberDialog::new(
+                            page_no,
+                            total,
+                            bg.clone(),
+                            move |act| {
+                                match act {
+                                    crate::scrubber_dialog::ScrubberAction::JumpTo(target) => {
+                                        Action::Push(Box::new(ReaderScreen::new(path_cl.clone(), target, w, h)))
+                                    }
+                                    crate::scrubber_dialog::ScrubberAction::Close => Action::Pop,
+                                }
+                            },
+                        )))
+                    }
+                }
             },
         )))
     }
+
 
 
     fn open_curtain(&mut self) -> Action {
@@ -462,7 +652,38 @@ impl ReaderScreen {
         let rot = config.rotation;
         let mut candidate_entries: Vec<(RectF, crate::vocab::WordEntry)> = Vec::new();
 
+        // Extract interactive page links (e.g. footnotes, named destinations, URLs)
+        self.page_links.clear();
+        if let Ok(links) = page.links() {
+            for l in links {
+                let sx0 = vis_ox as f32 + (l.bounds.x0 - sub_box.x0 * pw) * zoom;
+                let sy0 = vis_oy as f32 + (l.bounds.y0 - sub_box.y0 * ph) * zoom;
+                let sx1 = vis_ox as f32 + (l.bounds.x1 - sub_box.x0 * pw) * zoom;
+                let sy1 = vis_oy as f32 + (l.bounds.y1 - sub_box.y0 * ph) * zoom;
+
+                let (px0, py0, px1, py1) = match rot {
+                    270 => (
+                        (self.h - 1) as f32 - sy1,
+                        sx0,
+                        (self.h - 1) as f32 - sy0,
+                        sx1,
+                    ),
+                    90 => (
+                        sy0,
+                        (self.w - 1) as f32 - sx1,
+                        sy1,
+                        (self.w - 1) as f32 - sx0,
+                    ),
+                    _ => (sx0, sy0, sx1, sy1),
+                };
+
+                let r = RectF::new(px0.min(px1), py0.min(py1), px0.max(px1), py0.max(py1));
+                self.page_links.push((r, l.uri));
+            }
+        }
+
         for block in tp.blocks() {
+
             for line in block.lines() {
                 let mut cur_word = String::new();
                 let mut min_x = f32::MAX;
@@ -573,6 +794,13 @@ impl ReaderScreen {
         None
     }
 
+    fn find_link_at_pos(&self, vx: f32, vy: f32) -> Option<&(RectF, String)> {
+        self.page_links.iter().find(|(r, _)| {
+            vx >= r.x0 - 15.0 && vx <= r.x1 + 15.0 && vy >= r.y0 - 15.0 && vy <= r.y1 + 15.0
+        })
+    }
+
+
 
 
     fn open_word_dialog(&mut self, entry: crate::vocab::WordEntry) -> Action {
@@ -635,6 +863,7 @@ impl Screen for ReaderScreen {
                     plog(&format!("book warm: instant open (rss={})", rss_mib()));
                     self.doc = Some(doc);
                     self.total = total;
+                    self.scan_toc_chapters();
                     self.save_progress();
                     return Action::Redraw;
                 }
@@ -730,7 +959,9 @@ plog(&format!(
             Ok(Ok(BookReady { doc, total })) => {
                 self.doc = Some(doc.0);
                 self.total = total;
+                self.scan_toc_chapters();
                 self.loading = None;
+
                 if self.pending_turns != 0 {
                     let steps = self.settings.split.total_steps(self.total);
                     let cur_step = self.settings.split.page_sub_to_step(self.page_no, self.sub_idx);
@@ -910,20 +1141,34 @@ plog(&format!(
             }
         }
 
-        // Bottom Footer Line (Reading Progress)
+        // Bottom Footer Line (Reading Progress & Time Left)
+        let pages_left_book = self.total.saturating_sub(self.page_no + 1);
+        let pages_left_chap = if let Some(next_chap_page) = self.toc_chapters.iter().find(|&&p| p > self.page_no) {
+            next_chap_page.saturating_sub(self.page_no)
+        } else {
+            pages_left_book
+        };
+
+        let mins_in_chap = ((pages_left_chap as f32 * self.avg_secs_per_page) / 60.0).round() as usize;
+        let mins_in_book = ((pages_left_book as f32 * self.avg_secs_per_page) / 60.0).round() as usize;
+        let time_left_str = if mins_in_book >= 60 {
+            format!("{}m in ch · {}h {}m left", mins_in_chap, mins_in_book / 60, mins_in_book % 60)
+        } else {
+            format!("{}m in ch · {}m left", mins_in_chap, mins_in_book)
+        };
+
         let footer = if self.loading.is_some() {
             format!("page {} · Loading book…", self.page_no + 1)
         } else if self.settings.split.total_steps(self.total) > self.total {
             format!(
-                "page {} ({}/{}) · {}/{}",
+                "page {} ({}/{}) · {}",
                 self.page_no + 1,
                 self.sub_idx + 1,
                 self.settings.split.sub_box_count(),
-                self.settings.split.page_sub_to_step(self.page_no, self.sub_idx) + 1,
-                self.settings.split.total_steps(self.total)
+                time_left_str
             )
         } else {
-            format!("page {} / {}", self.page_no + 1, self.total)
+            format!("page {} / {} · {}", self.page_no + 1, self.total, time_left_str)
         };
 
 
@@ -984,8 +1229,22 @@ plog(&format!(
 
         match g {
             Gesture::LongPress { .. } => {
-                // Word Long Press: Check if user held on a word on the page for definition / translation
+                // 1. Check if an interactive link or footnote was held
+                if let Some((_, uri)) = self.find_link_at_pos(vx as f32, vy as f32) {
+                    let uri_cl = uri.clone();
+                    return self.open_footnote_or_link(&uri_cl);
+                }
+
+                // 2. Word Long Press: Check if user held on a word on the page for definition / translation
                 if let Some((word_text, _rect)) = self.find_word_at_pos(vx as f32, vy as f32) {
+                    // Check if word is an asterisk or footnote marker
+                    if word_text.starts_with('*') || word_text.starts_with('[') {
+                        if let Some((_, uri)) = self.find_link_at_pos(vx as f32, vy as f32) {
+                            let uri_cl = uri.clone();
+                            return self.open_footnote_or_link(&uri_cl);
+                        }
+                    }
+
                     if let Some(db) = &self.vocab_db {
                         if let Some(entry) = db.lookup(&word_text) {
                             return self.open_word_dialog(entry);
@@ -1010,12 +1269,17 @@ plog(&format!(
                     return Action::Pop;
                 }
 
-                // 4. Visual Top strip (middle) -> Curtain (Brightness / Network / Controls)
+                // 4. Visual Bottom Footer Strip -> Open Interactive Page Scrubber & "Go to Page"
+                if vy > vis_h - 140 && vx > 240 && vx < vis_w - 240 {
+                    return self.open_scrubber_dialog();
+                }
+
+                // 5. Visual Top strip (middle) -> Curtain (Brightness / Network / Controls)
                 if vy < 140 && vx > 240 && vx < vis_w - 240 {
                     return self.open_curtain();
                 }
 
-                // 5. Page turns (Left third = Back, Right two-thirds = Forward)
+                // 6. Page turns (Left third = Back, Right two-thirds = Forward)
                 if vx < vis_w / 3 {
                     self.turn(false)
                 } else {
@@ -1029,6 +1293,7 @@ plog(&format!(
             _ => Action::Keep,
         }
     }
+
 
 }
 
@@ -1361,6 +1626,33 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_probe_mupdf() {
+        let pdf_path = "/tmp/sample_book.pdf";
+        if !std::path::Path::new(pdf_path).exists() {
+            return;
+        }
+        let doc = Document::open(pdf_path).expect("open doc");
+        let page = doc.load_page(8).unwrap();
+        if let Ok(links) = page.links() {
+            for l in links.take(5) {
+                let uri = &l.uri;
+                println!("URI: {}", uri);
+                if let Ok(dest) = doc.resolve_link(uri) {
+                    println!("  Resolved link to page: {:?}", dest);
+                }
+            }
+        }
+    }
 }
+
+
+
+
+
+
+
+
 
 

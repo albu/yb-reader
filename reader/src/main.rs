@@ -7,15 +7,19 @@ mod cache;
 mod curtain;
 mod fetch;
 mod flashcards;
+mod footnote_dialog;
 mod home;
 mod mirror;
 mod positions;
 mod protocol;
+mod scrubber_dialog;
 mod settings_dialog;
 mod split;
+mod toc_dialog;
 mod vocab;
 mod wifi;
 mod word_dialog;
+
 
 
 
