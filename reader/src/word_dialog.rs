@@ -158,12 +158,13 @@ impl Screen for WordDialog {
                     return self.dispatch(WordAction::StarLearning);
                 }
 
-                // Tapping anywhere else on screen dismisses the popup and marks as known/not-learning!
-                self.dispatch(WordAction::MarkKnown)
+                // Tapping anywhere else on screen closes the popup
+                self.dispatch(WordAction::Close)
             }
             Gesture::Swipe { .. } => self.dispatch(WordAction::Close),
             _ => Action::Keep,
         }
     }
+
 }
 

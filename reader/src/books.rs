@@ -669,16 +669,19 @@ plog(&format!(
     fn on_resume(&mut self) -> Action {
         self.time_str = current_time_str();
         self.vocab_prof = crate::vocab::VocabProfile::load();
-        self.page_words.clear();
-        self.page_annotations.clear();
 
         let pos = positions::resume_pos(&self.book_name());
         if let Some(s) = pos.settings {
             let font_changed = (s.font_size - self.settings.font_size).abs() > 0.01
                 || s.margin_pad != self.settings.margin_pad;
+            if font_changed {
+                self.page_words.clear();
+                self.page_annotations.clear();
+            }
             self.settings = s;
             self.sub_idx = 0;
             self.page_gray = None;
+
 
             if font_changed && !self.is_pdf() {
                 // In-memory instant reflow without re-reading/re-parsing ZIP archive from disk
