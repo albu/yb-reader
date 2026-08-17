@@ -142,8 +142,8 @@ impl<F: FnMut(ScrubberAction) -> Action> Screen for ScrubberDialog<F> {
                 // Slider track tap
                 let track_x = card_x + pt(24.0);
                 let track_w = card_w - pt(48.0);
-                let track_y = card_y + pt(38.0);
-                let track_rect = Rect::new(track_x - pt(10.0), track_y, track_w + pt(20.0), pt(26.0));
+                let track_y = card_y + pt(34.0);
+                let track_rect = Rect::new(track_x - pt(15.0), track_y, track_w + pt(30.0), pt(32.0));
 
                 if track_rect.contains(px, py) {
                     let rel_x = (px - track_x).clamp(0, track_w);
@@ -154,14 +154,14 @@ impl<F: FnMut(ScrubberAction) -> Action> Screen for ScrubberDialog<F> {
                 }
 
                 // 4 Jump Buttons: [-10] [-1] [+1] [+10]
-                let btn_y = card_y + pt(68.0);
-                let btn_h = pt(28.0);
+                let btn_y = card_y + pt(64.0);
+                let btn_h = pt(34.0);
                 let step_w = (card_w - pt(48.0) - pt(24.0)) / 4;
                 let steps = [("-10", -10), ("-1", -1), ("+1", 1), ("+10", 10)];
 
                 for (i, (_, delta)) in steps.iter().enumerate() {
                     let bx = card_x + pt(24.0) + i as i32 * (step_w + pt(8.0));
-                    let brect = Rect::new(bx, btn_y, step_w, btn_h);
+                    let brect = Rect::new(bx - pt(2.0), btn_y, step_w + pt(4.0), btn_h);
                     if brect.contains(px, py) {
                         let new_page = (self.target_page as i32 + delta)
                             .clamp(0, (self.total_pages as i32).saturating_sub(1)) as usize;
@@ -170,9 +170,9 @@ impl<F: FnMut(ScrubberAction) -> Action> Screen for ScrubberDialog<F> {
                     }
                 }
 
-                // Action Row
-                let act_y = card_y + pt(105.0);
-                let act_h = pt(30.0);
+                // Action Row: Cancel and Jump
+                let act_y = card_y + pt(102.0);
+                let act_h = pt(36.0);
                 let act_w = (card_w - pt(48.0) - pt(12.0)) / 2;
 
                 let cancel_x = card_x + pt(24.0);
@@ -193,4 +193,5 @@ impl<F: FnMut(ScrubberAction) -> Action> Screen for ScrubberDialog<F> {
             _ => Action::Keep,
         }
     }
+
 }

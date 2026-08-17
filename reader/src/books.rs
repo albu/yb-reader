@@ -471,60 +471,18 @@ impl ReaderScreen {
         let path_name = self.book_name();
         let page_no = self.page_no;
         let total = self.total;
-        let bg = self.page_gray.clone();
-        let outlines = self.doc.as_ref().and_then(|d| d.outlines().ok());
 
         Action::Push(Box::new(ReaderSettingsDialog::new(
             settings,
             is_pdf,
             samples,
-            move |action| {
-                match action {
-                    crate::settings_dialog::SettingsDialogAction::Apply(new_settings) => {
-                        positions::record_pos(&path_name, page_no, total, 0, Some(new_settings));
-                        Action::Pop
-                    }
-                    crate::settings_dialog::SettingsDialogAction::OpenToc => {
-                        if let Some(ol) = &outlines {
-                            let path_cl = path_name.clone();
-                            Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
-                                ol,
-                                page_no,
-                                move |act| {
-                                    match act {
-                                        crate::toc_dialog::TocAction::JumpTo(target) => {
-                                            positions::record_pos(&path_cl, target, total, 0, Some(settings));
-                                            Action::Pop
-                                        }
-                                        crate::toc_dialog::TocAction::Close => Action::Pop,
-                                    }
-                                },
-                            )))
-                        } else {
-                            Action::Pop
-                        }
-                    }
-                    crate::settings_dialog::SettingsDialogAction::OpenScrubber => {
-                        let path_cl = path_name.clone();
-                        Action::Push(Box::new(crate::scrubber_dialog::ScrubberDialog::new(
-                            page_no,
-                            total,
-                            bg.clone(),
-                            move |act| {
-                                match act {
-                                    crate::scrubber_dialog::ScrubberAction::JumpTo(target) => {
-                                        positions::record_pos(&path_cl, target, total, 0, Some(settings));
-                                        Action::Pop
-                                    }
-                                    crate::scrubber_dialog::ScrubberAction::Close => Action::Pop,
-                                }
-                            },
-                        )))
-                    }
-                }
+            move |new_settings| {
+                positions::record_pos(&path_name, page_no, total, 0, Some(new_settings));
+                Action::Pop
             },
         )))
     }
+
 
 
 
@@ -1229,11 +1187,15 @@ plog(&format!(
                     }
                 }
                 SwipeDir::North => {
-                    // Bottom-left swipe up -> Reader Settings!
-                    if vx < vis_w * 40 / 100 && vy > vis_h * 75 / 100 {
+                    // Bottom swipes:
+                    // 1. Bottom-left swipe up -> Reader Settings (font size, margin, contrast, vocab)
+                    if vx < vis_w * 35 / 100 && vy > vis_h * 70 / 100 {
                         self.open_settings_dialog()
-                    } else if vx > vis_w * 60 / 100 && vy > vis_h * 75 / 100 {
-                        // Bottom-right swipe up -> Back to Library
+                    } else if vx >= vis_w * 35 / 100 && vx <= vis_w * 65 / 100 && vy > vis_h * 70 / 100 {
+                        // 2. Bottom-center swipe up -> Table of Contents (Chapters)!
+                        self.open_toc_dialog()
+                    } else if vx > vis_w * 65 / 100 && vy > vis_h * 70 / 100 {
+                        // 3. Bottom-right swipe up -> Back to Library
                         Action::Pop
                     } else {
                         Action::Keep
@@ -1241,6 +1203,7 @@ plog(&format!(
                 }
             };
         }
+
 
         match g {
             Gesture::LongPress { .. } => {

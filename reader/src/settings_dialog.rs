@@ -7,19 +7,13 @@ use yui::screen::{Action, Screen};
 
 use crate::split::{detect_margins, ContrastMode, ReaderSettings, SplitConfig, SplitPreset};
 
-pub enum SettingsDialogAction {
-    Apply(ReaderSettings),
-    OpenToc,
-    OpenScrubber,
-}
-
 pub struct ReaderSettingsDialog {
     pub settings: ReaderSettings,
     pub tab: usize, // 0 = Typography, 1 = Split & Crop, 2 = Contrast & Display, 3 = Vocab
     #[allow(dead_code)]
     pub is_pdf: bool,
 
-    on_change: Box<dyn FnMut(SettingsDialogAction) -> Action>,
+    on_change: Box<dyn FnMut(ReaderSettings) -> Action>,
     page_samples: Option<(Vec<u8>, usize, usize, usize)>,
     dims: (i32, i32),
 }
@@ -29,7 +23,7 @@ impl ReaderSettingsDialog {
         settings: ReaderSettings,
         is_pdf: bool,
         page_samples: Option<(Vec<u8>, usize, usize, usize)>,
-        on_change: impl FnMut(SettingsDialogAction) -> Action + 'static,
+        on_change: impl FnMut(ReaderSettings) -> Action + 'static,
     ) -> Self {
         // Default to Split & Crop tab for PDFs, Typography tab for reflowable books
         let initial_tab = if is_pdf { 1 } else { 0 };
@@ -43,6 +37,7 @@ impl ReaderSettingsDialog {
         }
     }
 }
+
 
 
 const PAD_PT: f32 = 16.0;
@@ -350,23 +345,11 @@ impl Screen for ReaderSettingsDialog {
             _ => {}
         }
 
-        // Navigation Row: [ 📑 Contents ] and [ ⏩ Scrubber ]
-        let nav_y = dy + dh - pt(58.0);
-        let nav_w = (dw - pt(28.0)) / 2;
-        let toc_r = Rect::new(dx + pt(10.0), nav_y, nav_w, pt(22.0));
-        let scrub_r = Rect::new(dx + pt(18.0) + nav_w, nav_y, nav_w, pt(22.0));
-
-        p.rect_outline_t(toc_r, 1, 100);
-        p.text_center_in(toc_r.x, toc_r.x + toc_r.w, nav_y + pt(15.0), 8.0, 0, "📑 Contents");
-
-        p.rect_outline_t(scrub_r, 1, 100);
-        p.text_center_in(scrub_r.x, scrub_r.x + scrub_r.w, nav_y + pt(15.0), 8.0, 0, "⏩ Scrubber");
-
         // Apply & Read Button
-        let apply_y = dy + dh - pt(32.0);
-        let apply_r = Rect::new(dx + pt(10.0), apply_y, dw - pt(20.0), pt(24.0));
+        let apply_y = dy + dh - pt(36.0);
+        let apply_r = Rect::new(dx + pt(10.0), apply_y, dw - pt(20.0), pt(26.0));
         p.rect(apply_r, 0);
-        p.text_center_in(apply_r.x, apply_r.x + apply_r.w, apply_y + pt(16.0), 9.0, 255, "APPLY & READ");
+        p.text_center_in(apply_r.x, apply_r.x + apply_r.w, apply_y + pt(17.0), 9.5, 255, "APPLY & READ");
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
@@ -381,7 +364,7 @@ impl Screen for ReaderSettingsDialog {
                 let (tx, ty) = (x as i32, y as i32);
                 let dialog_rect = Rect::new(dx, dy, dw, dh);
                 if !dialog_rect.contains(tx, ty) {
-                    return (self.on_change)(SettingsDialogAction::Apply(self.settings));
+                    return (self.on_change)(self.settings);
                 }
 
                 // Check Tab Bar taps
@@ -393,25 +376,13 @@ impl Screen for ReaderSettingsDialog {
                     return Action::Redraw;
                 }
 
-                // TOC and Scrubber button taps
-                let nav_y = dy + dh - pt(58.0);
-                let nav_w = (dw - pt(28.0)) / 2;
-                let toc_r = Rect::new(dx + pt(10.0), nav_y, nav_w, pt(22.0));
-                let scrub_r = Rect::new(dx + pt(18.0) + nav_w, nav_y, nav_w, pt(22.0));
-
-                if toc_r.contains(tx, ty) {
-                    return (self.on_change)(SettingsDialogAction::OpenToc);
-                }
-                if scrub_r.contains(tx, ty) {
-                    return (self.on_change)(SettingsDialogAction::OpenScrubber);
-                }
-
                 // Apply button tap
-                let apply_y = dy + dh - pt(32.0);
-                let apply_r = Rect::new(dx + pt(10.0), apply_y, dw - pt(20.0), pt(24.0));
+                let apply_y = dy + dh - pt(36.0);
+                let apply_r = Rect::new(dx + pt(10.0), apply_y, dw - pt(20.0), pt(26.0));
                 if apply_r.contains(tx, ty) {
-                    return (self.on_change)(SettingsDialogAction::Apply(self.settings));
+                    return (self.on_change)(self.settings);
                 }
+
 
 
                 let mut py = dy + pt(44.0);
