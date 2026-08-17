@@ -5,7 +5,9 @@ use yui::screen::{Action, Screen};
 
 pub struct WordDialog {
     entry: WordEntry,
+    is_learning: bool,
     on_action: Option<Box<dyn FnOnce(WordAction) -> Action>>,
+    dims: (i32, i32),
 }
 
 pub enum WordAction {
@@ -15,13 +17,15 @@ pub enum WordAction {
 }
 
 impl WordDialog {
-    pub fn new<F>(entry: WordEntry, on_action: F) -> Self
+    pub fn new<F>(entry: WordEntry, is_learning: bool, on_action: F) -> Self
     where
         F: FnOnce(WordAction) -> Action + 'static,
     {
         WordDialog {
             entry,
+            is_learning,
             on_action: Some(Box::new(on_action)),
+            dims: (1236, 1648),
         }
     }
 
@@ -41,10 +45,11 @@ impl Screen for WordDialog {
 
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
+        self.dims = (w, h);
 
-        // Card dimensions (centered modal)
-        let card_w = pt(255.0).min(w - pt(24.0));
-        let card_x = (w - card_w) / 2;
+        // Bottom docked card
+        let card_w = w - pt(16.0);
+        let card_x = pt(8.0);
 
         // Wrap text to calculate required height
         let max_text_w = (card_w - pt(28.0)) as f32;
@@ -59,7 +64,7 @@ impl Screen for WordDialog {
                 } else {
                     format!("{} {}", cur_line, word)
                 };
-                if p.text_width(10.0, &test) > max_text_w {
+                if p.text_width(9.5, &test) > max_text_w {
                     if !cur_line.is_empty() {
                         lines.push(cur_line);
                     }
@@ -67,110 +72,84 @@ impl Screen for WordDialog {
                 } else {
                     cur_line = test;
                 }
-
             }
             if !cur_line.is_empty() {
                 lines.push(cur_line);
             }
         }
 
-        let body_h = pt(40.0) + (lines.len().max(1) as i32 * pt(15.0));
-        let card_h = (pt(75.0) + body_h).clamp(pt(150.0), pt(280.0));
-        let card_y = (h - card_h) / 2;
+        let body_h = (lines.len().clamp(1, 4) as i32) * pt(14.0);
+        let card_h = (pt(48.0) + body_h).clamp(pt(85.0), pt(140.0));
+        let card_y = h - card_h - pt(10.0);
         let card_rect = Rect::new(card_x, card_y, card_w, card_h);
 
         // Backdrop Card
         p.rect(card_rect, 255);
-        p.rect_outline_t(card_rect, 3, 0);
+        p.rect_outline_t(card_rect, 2, 0);
 
-        // Header: Word Title + CEFR Badge
-        let title_y = card_y + pt(24.0);
-        let title = p.truncate(14.0, &self.entry.word, (card_w - pt(85.0)) as f32);
-        p.text(card_x + pt(14.0), title_y, 14.0, 0, &title);
+        // Header Row: Word Title + CEFR badge + Learn Checkbox Pill
+        let title_y = card_y + pt(18.0);
+        let title = p.truncate(13.0, &self.entry.word, (card_w - pt(120.0)) as f32);
+        p.text(card_x + pt(12.0), title_y, 13.0, 0, &title);
 
-        let badge_text = format!("{} (lvl {})", self.entry.cefr_str(), self.entry.difficulty);
-        p.text_right(card_x + card_w - pt(14.0), title_y - pt(2.0), 8.0, 90, &badge_text);
+        let badge_text = format!("{} · lvl {}", self.entry.cefr_str(), self.entry.difficulty);
+        let badge_x = card_x + pt(18.0) + p.text_width(13.0, &title).round() as i32;
+        p.text(badge_x, title_y - pt(1.0), 8.0, 100, &badge_text);
 
-        p.hline_t(title_y + pt(8.0), card_x + pt(12.0), card_x + card_w - pt(12.0), 1, 200);
+        // Learn Toggle Checkbox Button on top-right
+        let chk_w = pt(72.0);
+        let chk_h = pt(22.0);
+        let chk_x = card_x + card_w - chk_w - pt(10.0);
+        let chk_y = card_y + pt(6.0);
+        let chk_rect = Rect::new(chk_x, chk_y, chk_w, chk_h);
 
-        // Body: English Gloss
-        let mut text_y = title_y + pt(26.0);
-        p.text(card_x + pt(14.0), text_y, 8.0, 110, "DEFINITION");
-        text_y += pt(15.0);
+        if self.is_learning {
+            p.rect(chk_rect, 0);
+            p.text_center_in(chk_x, chk_x + chk_w, chk_y + pt(15.0), 8.0, 255, "★ Learning");
+        } else {
+            p.rect_outline_t(chk_rect, 1, 100);
+            p.text_center_in(chk_x, chk_x + chk_w, chk_y + pt(15.0), 8.0, 50, "☆ Learn");
+        }
 
+        p.hline_t(title_y + pt(6.0), card_x + pt(10.0), card_x + card_w - pt(10.0), 1, 220);
+
+        // Body: Definition lines
+        let mut text_y = title_y + pt(20.0);
         for line in &lines {
-            p.text(card_x + pt(14.0), text_y, 10.0, 0, line);
-            text_y += pt(15.0);
-        }
-
-        if !self.entry.gloss_tr.is_empty() {
-            text_y += pt(4.0);
-            p.text(card_x + pt(14.0), text_y, 8.0, 110, "TRANSLATION");
+            p.text(card_x + pt(12.0), text_y, 9.5, 0, line);
             text_y += pt(14.0);
-            p.text(card_x + pt(14.0), text_y, 10.0, 0, &self.entry.gloss_tr);
         }
-
-        // Action Buttons Row at bottom
-        let btn_y = card_y + card_h - pt(36.0);
-        let btn_h = pt(26.0);
-        let btn_w = (card_w - pt(36.0)) / 2;
-
-        // Button 1: [ ★ Star / Learn ]
-        let btn1_x = card_x + pt(12.0);
-        let btn1_rect = Rect::new(btn1_x, btn_y, btn_w, btn_h);
-        p.rect(btn1_rect, 245);
-        p.rect_outline_t(btn1_rect, 1, 0);
-        p.text_center_in(btn1_x, btn1_x + btn_w, btn_y + pt(17.0), 8.5, 0, "★ Star / Learn");
-
-        // Button 2: [ ✓ Mark Known ]
-        let btn2_x = btn1_x + btn_w + pt(12.0);
-        let btn2_rect = Rect::new(btn2_x, btn_y, btn_w, btn_h);
-        p.rect(btn2_rect, 245);
-        p.rect_outline_t(btn2_rect, 1, 0);
-        p.text_center_in(btn2_x, btn2_x + btn_w, btn_y + pt(17.0), 8.5, 0, "✓ Mark Known");
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
+        let (w, h) = self.dims;
+        let card_w = w - pt(16.0);
+        let card_x = pt(8.0);
+        let card_h = pt(120.0);
+        let card_y = h - card_h - pt(10.0);
+
+        let chk_w = pt(72.0);
+        let chk_h = pt(22.0);
+        let chk_x = card_x + card_w - chk_w - pt(10.0);
+        let chk_y = card_y + pt(6.0);
+        let chk_rect = Rect::new(chk_x, chk_y, chk_w, chk_h);
+
         match g {
             Gesture::Tap { x, y } => {
-                let (w, h) = (1236, 1648); // Screen bounds
-                let card_w = pt(255.0).min(w - pt(24.0));
-                let card_h = pt(200.0);
-                let card_x = (w - card_w) / 2;
-                let card_y = (h - card_h) / 2;
-
-                let btn_y = card_y + card_h - pt(36.0);
-                let btn_h = pt(26.0);
-                let btn_w = (card_w - pt(36.0)) / 2;
-
-                let btn1_x = card_x + pt(12.0);
-                let btn1_rect = Rect::new(btn1_x, btn_y, btn_w, btn_h);
-
-                let btn2_x = btn1_x + btn_w + pt(12.0);
-                let btn2_rect = Rect::new(btn2_x, btn_y, btn_w, btn_h);
-
-                let card_rect = Rect::new(card_x, card_y, card_w, card_h);
-
                 let px = x as i32;
                 let py = y as i32;
 
-                if btn1_rect.contains(px, py) {
+                // Tapping the Learn checkbox toggles learning
+                if chk_rect.contains(px, py) {
                     return self.dispatch(WordAction::StarLearning);
                 }
-                if btn2_rect.contains(px, py) {
-                    return self.dispatch(WordAction::MarkKnown);
-                }
 
-                // Tapping outside card closes it
-                if !card_rect.contains(px, py) {
-                    return self.dispatch(WordAction::Close);
-                }
-
-                Action::Keep
+                // Tapping anywhere else on screen dismisses the popup and marks as known/not-learning!
+                self.dispatch(WordAction::MarkKnown)
             }
             Gesture::Swipe { .. } => self.dispatch(WordAction::Close),
             _ => Action::Keep,
         }
     }
-
 }
+

@@ -579,9 +579,11 @@ impl ReaderScreen {
         let mut prof = self.vocab_prof.clone();
         let word = entry.word.clone();
         let diff = entry.difficulty;
+        let is_learning = prof.learning_words.contains(&word);
 
         Action::Push(Box::new(crate::word_dialog::WordDialog::new(
             entry,
+            is_learning,
             move |action| {
                 match action {
                     crate::word_dialog::WordAction::StarLearning => {
@@ -596,6 +598,7 @@ impl ReaderScreen {
             },
         )))
     }
+
 }
 
 

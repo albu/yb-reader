@@ -21,7 +21,7 @@ pub enum AnnotationStyle {
 
 impl Default for AnnotationStyle {
     fn default() -> Self {
-        AnnotationStyle::Interlinear
+        AnnotationStyle::Margin
     }
 }
 
@@ -245,7 +245,7 @@ impl Default for VocabProfile {
             user_level: 65, // B2 Upper-Intermediate default
             known_words: HashSet::new(),
             learning_words: HashSet::new(),
-            style: AnnotationStyle::Interlinear,
+            style: AnnotationStyle::Margin,
             max_per_page: 2,
         }
     }
