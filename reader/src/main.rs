@@ -5,8 +5,8 @@
 mod books;
 mod cache;
 mod curtain;
-
 mod fetch;
+mod flashcards;
 mod home;
 mod mirror;
 mod positions;
@@ -16,6 +16,8 @@ mod split;
 mod vocab;
 mod wifi;
 mod word_dialog;
+
+
 
 
 

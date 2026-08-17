@@ -92,8 +92,9 @@ impl Screen for WordDialog {
             }
         }
 
-        let body_h = (lines.len().clamp(1, 4) as i32) * pt(14.0);
-        let card_h = (pt(48.0) + body_h).clamp(pt(85.0), pt(140.0));
+        let ru_h = if !self.entry.gloss_ru.is_empty() { pt(18.0) } else { 0 };
+        let body_h = (lines.len().clamp(1, 3) as i32) * pt(13.0);
+        let card_h = (pt(45.0) + ru_h + body_h).clamp(pt(85.0), pt(150.0));
         let card_y = h - card_h - pt(10.0);
         let card_rect = Rect::new(card_x, card_y, card_w, card_h);
 
@@ -127,13 +128,20 @@ impl Screen for WordDialog {
 
         p.hline_t(title_y + pt(6.0), card_x + pt(10.0), card_x + card_w - pt(10.0), 1, 220);
 
-        // Body: Definition lines
+        // Body: Russian translation + English Definition lines
         let mut text_y = title_y + pt(20.0);
+        if !self.entry.gloss_ru.is_empty() {
+            let ru_trunc = p.truncate(10.5, &self.entry.gloss_ru, max_text_w);
+            p.text(card_x + pt(12.0), text_y, 10.5, 0, &ru_trunc);
+            text_y += pt(15.0);
+        }
+
         for line in &lines {
-            p.text(card_x + pt(12.0), text_y, 9.5, 0, line);
-            text_y += pt(14.0);
+            p.text(card_x + pt(12.0), text_y, 9.0, 50, line);
+            text_y += pt(13.0);
         }
     }
+
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
         let (w, h) = self.dims;

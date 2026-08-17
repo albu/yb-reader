@@ -590,6 +590,8 @@ impl ReaderScreen {
                 match action {
                     crate::word_dialog::WordAction::StarLearning => {
                         prof.record_lookup(&word, diff);
+                        let mut deck = crate::flashcards::FlashcardDeck::load();
+                        deck.add_word(&word);
                     }
                     crate::word_dialog::WordAction::MarkKnown => {
                         prof.mark_known(&word, diff);
@@ -600,6 +602,7 @@ impl ReaderScreen {
             },
         )))
     }
+
 
 
 }

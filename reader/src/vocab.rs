@@ -32,7 +32,7 @@ pub struct WordEntry {
     pub difficulty: u8, // 0 (easiest) .. 100 (most advanced/rare)
     pub cefr: u8,       // 1=A1, 2=A2, 3=B1, 4=B2, 5=C1, 6=C2, 0=Unk
     pub gloss_en: String,
-    pub gloss_tr: String,
+    pub gloss_ru: String,
 }
 
 impl WordEntry {
@@ -48,6 +48,7 @@ impl WordEntry {
         }
     }
 }
+
 
 /// In-memory binary search database over vocab.bin.
 pub struct VocabDb {
@@ -146,8 +147,8 @@ impl VocabDb {
                         .unwrap_or_default()
                         .to_string();
 
-                    let tr_start = self.strings_offset + tr_off;
-                    let gloss_tr = self.data.get(tr_start..tr_start + tr_len)
+                    let ru_start = self.strings_offset + tr_off;
+                    let gloss_ru = self.data.get(ru_start..ru_start + tr_len)
                         .and_then(|b| std::str::from_utf8(b).ok())
                         .unwrap_or_default()
                         .to_string();
@@ -157,8 +158,9 @@ impl VocabDb {
                         difficulty: diff,
                         cefr,
                         gloss_en,
-                        gloss_tr,
+                        gloss_ru,
                     });
+
                 }
                 std::cmp::Ordering::Less => {
                     lo = mid + 1;
@@ -373,9 +375,10 @@ impl VocabProfile {
         if self.style == AnnotationStyle::Off {
             return false;
         }
-        if entry.gloss_en.is_empty() && entry.gloss_tr.is_empty() {
+        if entry.gloss_en.is_empty() && entry.gloss_ru.is_empty() {
             return false;
         }
+
         let clean = clean_word(&entry.word);
         if self.known_words.contains(&clean) {
             return false;

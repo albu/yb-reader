@@ -10,8 +10,10 @@ import sys
 import struct
 import urllib.request
 import zipfile
+import tarfile
 import io
 import re
+
 
 MAGIC = b"YBVOC01\0"
 
@@ -152,7 +154,38 @@ def build():
         else:
             return 88 + min(12, int((r - 32000) * 12 / 20000)), 6
 
-    # 3. Process candidate words
+    # 3. Download FreeDict English-Russian
+    tmp_ru = "/tmp/freedict-eng-rus.tar.xz"
+    if not os.path.exists(tmp_ru):
+        print("Downloading FreeDict English-Russian dictionary...")
+        urllib.request.urlretrieve("https://download.freedict.org/dictionaries/eng-rus/2025.11.23/freedict-eng-rus-2025.11.23.src.tar.xz", tmp_ru)
+
+    ru_dict = {}
+    with tarfile.open(tmp_ru, mode="r:xz") as tar:
+        f = tar.extractfile("eng-rus/eng-rus.tei")
+        text = f.read().decode("utf-8", "ignore")
+
+    for entry in re.finditer(r"<entry>(.*?)</entry>", text, re.DOTALL):
+        e = entry.group(1)
+        m_orth = re.search(r"<orth>(.*?)</orth>", e)
+        if not m_orth:
+            continue
+        word = clean_word(m_orth.group(1))
+        quotes = re.findall(r"<quote>(.*?)</quote>", e)
+        if quotes:
+            clean_quotes = []
+            seen = set()
+            for q in quotes:
+                clean_q = re.sub(r"[́̀]", "", q)
+                clean_q = re.sub(r"\[\[(?:[^|\]]*\|)?([^\]]+)\]\]", r"\1", clean_q).strip()
+                if clean_q and clean_q not in seen:
+                    seen.add(clean_q)
+                    clean_quotes.append(clean_q)
+            if clean_quotes:
+                ru_dict[word] = ", ".join(clean_quotes[:3])
+    print(f"Loaded {len(ru_dict)} Russian translations.")
+
+    # 4. Process candidate words
     vocab = {}
     
     # First pass: Ranked words with WordNet definitions
@@ -162,7 +195,8 @@ def build():
             continue
 
         gloss_en = all_defs.get(w_clean, "")
-        if not gloss_en and raw_rank > 25000:
+        gloss_ru = ru_dict.get(w_clean, "")
+        if not gloss_en and not gloss_ru and raw_rank > 25000:
             continue
 
         # Morphological root decomposition
@@ -178,12 +212,13 @@ def build():
         else:
             diff, cefr = rank_to_diff(raw_rank)
 
-        vocab[w_clean] = (diff, cefr, gloss_en, "")
+        vocab[w_clean] = (diff, cefr, gloss_en, gloss_ru)
 
     # Second pass: ensure rich literary/advanced WordNet words are included
     for w_clean, gloss_en in all_defs.items():
         if w_clean not in vocab and 3 <= len(w_clean) <= 24:
             root, root_rank = find_deep_root(w_clean)
+            gloss_ru = ru_dict.get(w_clean, "")
             if is_transparent(gloss_en) and root_rank < 30000:
                 diff, cefr = 10, 1
             elif root and root_rank < 12000:
@@ -193,7 +228,8 @@ def build():
             else:
                 diff = 92
                 cefr = 6
-            vocab[w_clean] = (diff, cefr, gloss_en, "")
+            vocab[w_clean] = (diff, cefr, gloss_en, gloss_ru)
+
 
 
 

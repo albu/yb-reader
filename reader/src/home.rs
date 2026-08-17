@@ -59,7 +59,7 @@ const LIB_ITEM_BASE_PT: f32 = 15.0;
 const LIB_FOOT_PT: f32 = 7.0;
 const LIB_FOOT_OFF_PT: f32 = 14.0;
 
-const ROW_LABELS: [&str; 3] = ["Mirror to Mac", "Fetch book from Mac", "Exit"];
+const ROW_LABELS: [&str; 4] = ["Flashcards Deck", "Mirror to Mac", "Fetch book from Mac", "Exit"];
 
 
 pub struct HomeScreen {
@@ -139,7 +139,7 @@ impl HomeScreen {
             return Action::Keep;
         }
         self.tab = next;
-        if next == 1 {
+        if self.tab == 1 {
             self.scan();
         }
         Action::Redraw
@@ -147,6 +147,10 @@ impl HomeScreen {
 }
 
 impl Screen for HomeScreen {
+    fn default_edges(&self) -> bool {
+        true
+    }
+
     fn on_enter(&mut self) -> Action {
         self.scan();
         Action::Redraw
@@ -169,15 +173,27 @@ impl Screen for HomeScreen {
             0 => {
                 p.text(pad, pt(KICKER_BASE_PT), KICKER_SIZE_PT, 130, "YB READER");
                 p.hline_t(pt(HEADER_RULE_PT), pad, w - pad, 3, 140);
-                for (i, label) in ROW_LABELS.iter().enumerate() {
+                for (i, default_label) in ROW_LABELS.iter().enumerate() {
                     let top = pt(ROWS_TOP_PT) + i as i32 * pt(ROW_H_PT);
                     draw_row_icon(p, i, pad, top + (pt(ROW_H_PT) - pt(ICON_BOX_PT)) / 2);
+                    
+                    let label = if i == 0 {
+                        let due = crate::flashcards::FlashcardDeck::load().due_count();
+                        if due > 0 {
+                            format!("Flashcards ({} due)", due)
+                        } else {
+                            "Flashcards Deck".to_string()
+                        }
+                    } else {
+                        default_label.to_string()
+                    };
+
                     p.text(
                         pad + pt(ICON_BOX_PT) + pt(ICON_GAP_PT),
                         top + pt(ROW_LABEL_BASE_PT),
                         ROW_LABEL_PT,
                         0,
-                        label,
+                        &label,
                     );
                     p.text_right(w - pad, top + pt(ROW_LABEL_BASE_PT), CHEV_PT, 160, ">");
                     if i + 1 < ROW_LABELS.len() {
@@ -196,6 +212,7 @@ impl Screen for HomeScreen {
                     &format!("{} books", self.names.len()),
                 );
                 p.hline_t(pt(HEADER_RULE_PT), pad, w - pad, 3, 140);
+
 
                 if has_cont {
                     let (path, pos) = self.cont.as_ref().unwrap();
@@ -289,8 +306,9 @@ impl Screen for HomeScreen {
 
                 match self.tab {
                     0 => match HomeScreen::hit_home_row(y) {
-                        Some(0) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
-                        Some(1) => {
+                        Some(0) => Action::Push(Box::new(crate::flashcards::FlashcardsScreen::new())),
+                        Some(1) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
+                        Some(2) => {
                             let msg = fetch::fetch_book();
                             let lines: Vec<String> = match msg {
                                 Ok(m) => m.lines().map(|l| l.to_string()).collect(),
@@ -383,9 +401,10 @@ fn draw_book_icon(p: &mut Painter, x: i32, y: i32) {
 }
 
 /// Row icons in a 13pt box:
-/// 0: Display Monitor + Cast (Mirror)
-/// 1: Download Tray + Arrow (Fetch)
-/// 2: Power / Exit button (Exit)
+/// 0: Flashcards Stack
+/// 1: Display Monitor + Cast (Mirror)
+/// 2: Download Tray + Arrow (Fetch)
+/// 3: Power / Exit button (Exit)
 fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
     let s = pt(ICON_BOX_PT);
     let mid_x = x + s / 2;
@@ -394,6 +413,14 @@ fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
 
     match row {
         0 => {
+            // Flashcards deck icon (overlapping cards)
+            p.rect_outline_t(Rect::new(x + pt(3.0), y, s - pt(3.0), s - pt(3.0)), 1, 130);
+            p.rect(Rect::new(x, y + pt(3.0), s - pt(3.0), s - pt(3.0)), 255);
+            p.rect_outline_t(Rect::new(x, y + pt(3.0), s - pt(3.0), s - pt(3.0)), T, 0);
+            // Text line inside front card
+            p.hline_t(y + pt(7.0), x + pt(2.0), x + s - pt(5.0), 1, 0);
+        }
+        1 => {
             // Monitor screen
             let mon_h = s - pt(4.0);
             p.rect_outline_t(Rect::new(x, y, s, mon_h), T, 0);
@@ -405,7 +432,7 @@ fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
             p.line_w(x + s - pt(5.0), mid_y - pt(4.0), x + s - pt(3.0), mid_y - pt(2.0), T, 0);
             p.line_w(x + s - pt(5.0), mid_y, x + s - pt(3.0), mid_y - pt(2.0), T, 0);
         }
-        1 => {
+        2 => {
             // Download arrow
             let arrow_bot = y + s - pt(4.5);
             p.line_w(mid_x, y + pt(1.0), mid_x, arrow_bot, T, 0);
@@ -442,10 +469,12 @@ mod tests {
         assert_eq!(HomeScreen::hit_home_row(top + row_h - 1), Some(0));
         assert_eq!(HomeScreen::hit_home_row(top + row_h + 4), Some(1));
         assert_eq!(HomeScreen::hit_home_row(top + 2 * row_h + 4), Some(2));
+        assert_eq!(HomeScreen::hit_home_row(top + 3 * row_h + 4), Some(3));
         // Header and below the last row are not rows.
         assert_eq!(HomeScreen::hit_home_row(top - 1), None);
-        assert_eq!(HomeScreen::hit_home_row(top + 3 * row_h), None);
+        assert_eq!(HomeScreen::hit_home_row(top + 4 * row_h), None);
     }
+
 
 
     #[test]
