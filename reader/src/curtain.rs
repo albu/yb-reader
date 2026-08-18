@@ -293,8 +293,8 @@ impl Screen for CurtainScreen {
             .map(|k| format!("{:.0}M", k as f64 / 1024.0))
             .unwrap_or_else(|| "—".to_string());
         let mem_sub = sysinfo::mem_total_kib()
-            .map(|k| format!("free of {:.0}M", k as f64 / 1024.0))
-            .unwrap_or_else(|| "free".to_string());
+            .map(|k| format!("usable of {:.0}M", k as f64 / 1024.0))
+            .unwrap_or_else(|| "usable".to_string());
         let r_mem = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
         CurtainScreen::draw_card(p, r_mem, "MEMORY", &mem_val, &mem_sub);
         draw_mem_icon(p, r_mem.x + r_mem.w - pt(20.0), r_mem.y + pt(7.0));
