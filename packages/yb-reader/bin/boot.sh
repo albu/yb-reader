@@ -12,7 +12,8 @@
 #      underneath: 3 restarts -> 2 reboots -> customer-service halt)
 #   3. freeze any GUI actors that came up anyway (start.sh semantics)
 #   4. run the reader; exit 42 means "user asked for stock, restart it"
-DIR=/mnt/us/extensions/reader/bin
+ROOT=/mnt/us/extensions/reader
+DIR=$ROOT/bin
 FLAG=/mnt/us/DONT_START_FRAMEWORK
 STATE=/var/local/yb-reader
 LOG=/var/local/yb-boot.log
@@ -23,18 +24,21 @@ mkdir -p "$STATE"
 echo "---- $(date) boot.sh start (pid $$) ----" >> "$LOG"
 
 # 1. ssh lifeline. Our only hard recovery rung short of a serial cable;
-#    nothing on the device reliably starts this in takeover mode. Runs
-#    the bundled copy (koreader's binary pinned by sha on this unit);
-#    the host key lives in $STATE so the identity survives launcher
-#    changes (koreader's build resolves keys relative to its cwd).
+#    nothing on the device reliably starts this in takeover mode. The
+#    patched dropbear resolves settings/SSH/ (authorized_keys AND host
+#    keys) relative to its CWD — koreader's plugin runs it the same way,
+#    from its own tree. Our tree mirrors the layout. NO -r pinning: a
+#    single RSA -r path kills the ed25519 handshake (banner, then death
+#    at first KEX — found on device 2026-08-19; koreader never ships an
+#    RSA host key at all).
 if ! grep -qx dropbear /proc/[0-9]*/comm 2>/dev/null; then
-    DB="$DIR/dropbear"
-    [ -x "$DB" ] || DB=/mnt/us/koreader/dropbear
-    KEY="$STATE/hostkey"
-    [ -f "$KEY" ] || \
-        cp /mnt/us/koreader/settings/SSH/dropbear_rsa_host_key "$KEY" 2>/dev/null
-    "$DB" -E -R -p 2222 -P /tmp/dropbear_koreader.pid -r "$KEY" \
-        >> "$LOG" 2>&1 &
+    if [ -x "$DIR/dropbear" ]; then
+        (cd "$ROOT" && "$DIR/dropbear" -E -R -s -p 2222 \
+            -P /tmp/dropbear_koreader.pid >> "$LOG" 2>&1 &)
+    else
+        (cd /mnt/us/koreader && ./dropbear -E -R -s -p 2222 \
+            -P /tmp/dropbear_koreader.pid >> "$LOG" 2>&1 &)
+    fi
 fi
 
 # 2. Crash counter. A replaced binary earns a fresh count (deploys must

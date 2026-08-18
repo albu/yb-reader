@@ -143,9 +143,16 @@ if [ "$1" = "usb" ]; then
     cp "$ROOT/kual/reader/config.sh" "$EXT/config.sh"
     cp "$ROOT/kual/reader/menu.json" "$EXT/menu.json"
     cp "$PKG/bin/start.sh" "$EXT/bin/start.sh"
+    cp "$PKG/bin/boot.sh" "$EXT/bin/boot.sh"
+    # The patched dropbear resolves settings/SSH/ relative to the tree
+    # root; authorized_keys ships, the host key does NOT (device-private;
+    # dropbear -R generates one on first connect if absent).
+    mkdir -p "$EXT/settings/SSH"
+    cp "$PKG/settings/SSH/authorized_keys" "$EXT/settings/SSH/"
     cp "$BIN" "$EXT/bin/reader"
-    chmod +x "$EXT/bin/reader" "$EXT/bin/start.sh"
+    chmod +x "$EXT/bin/reader" "$EXT/bin/start.sh" "$EXT/bin/boot.sh"
     verify_bin "$BIN" "$EXT/bin/reader"
+    find "$EXT" -name '._*' -delete
     cp "$PKG/scriptlets/YBReader.sh" /Volumes/Kindle/documents/YBReader.sh
     chmod +x /Volumes/Kindle/documents/YBReader.sh
     echo "Direct install -> extensions/reader + documents/YBReader.sh"

@@ -1,9 +1,11 @@
 //! ssh, owned by the app: the bundled dropbear on port 2222 (koreader's
 //! binary as fallback — no KOReader install required). boot.sh starts
-//! the same server at boot in takeover mode; both launchers pin the
-//! host key to /var/local so the identity doesn't depend on which one
-//! won. Recipe as koreader-ext.sh's start_ssh/stop_ssh: an iptables
-//! accept rule pair plus the dropbear invocation.
+//! the same server at boot in takeover mode. The binary is PATCHED to
+//! resolve settings/SSH/ (authorized_keys and host keys) relative to
+//! its CWD — so both launchers run it from the tree root that holds
+//! our settings/SSH/, with no -r at all (koreader's own plugin does
+//! exactly this). Recipe as koreader-ext.sh's start_ssh/stop_ssh: an
+//! iptables accept rule pair plus the dropbear invocation.
 
 use std::fs;
 use std::path::Path;
@@ -11,8 +13,9 @@ use std::process::{Command, Stdio};
 
 const PIDFILE: &str = "/tmp/dropbear_koreader.pid";
 const OURS: &str = "/mnt/us/extensions/reader/bin/dropbear";
+const OURS_TREE: &str = "/mnt/us/extensions/reader";
 const KOREADER: &str = "/mnt/us/koreader/dropbear";
-const KEY: &str = "/var/local/yb-reader/hostkey";
+const KOREADER_TREE: &str = "/mnt/us/koreader";
 const IPTABLES: &str = "/usr/sbin/iptables";
 
 /// Any live dropbear? A /proc comm scan — no forks, cheap enough to call
@@ -105,12 +108,18 @@ pub fn enable() -> bool {
         return true;
     }
     rules("A");
-    let bin = if Path::new(OURS).exists() { OURS } else { KOREADER };
-    // KEY's dir must exist before dropbear (lazily, via -R) writes the
-    // host key there; boot.sh normally makes it, don't depend on that.
-    let _ = fs::create_dir_all("/var/local/yb-reader");
+    // cwd = the tree whose settings/SSH/ the patched binary resolves.
+    // No -r: a single host-key path breaks ed25519 negotiation (banner,
+    // then connection death at first KEX — found on device 2026-08-19;
+    // koreader ships an ed25519 key only). -s: pubkey auth only.
+    let (bin, tree) = if Path::new(OURS).exists() {
+        (OURS, OURS_TREE)
+    } else {
+        (KOREADER, KOREADER_TREE)
+    };
     Command::new(bin)
-        .args(["-E", "-R", "-p", "2222", "-P", PIDFILE, "-r", KEY])
+        .args(["-E", "-R", "-s", "-p", "2222", "-P", PIDFILE])
+        .current_dir(tree)
         .spawn()
         .and_then(|mut c| c.wait())
         .is_ok()

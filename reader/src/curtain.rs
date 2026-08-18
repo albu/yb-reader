@@ -442,7 +442,10 @@ impl Screen for CurtainScreen {
 
                 let r_net = Rect::new(pad + card_w + pt(CARD_GAP_PT), pt(CARD_TOP_PT), card_w, card_h);
                 if r_net.contains(x, y) {
-                    if crate::wifi::is_wifi_on() {
+                    // Unknown state counts as off — an optimistic default
+                    // here turns the tile into a no-op exactly when the
+                    // network is already unreachable.
+                    if crate::wifi::wifi_state() == Some(true) {
                         let _ = std::process::Command::new("/sbin/ifconfig").args(&["wlan0", "down"]).output();
                         let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.cmd", "wirelessEnable", "0"]).status();
                         let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.wifid", "enable", "0"]).status();

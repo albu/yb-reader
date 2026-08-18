@@ -3,27 +3,38 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub fn is_wifi_on() -> bool {
-    if let Ok(out) = Command::new("lipc-get-prop")
+/// Wi-Fi state per wifid, or None when lipc can't answer. The curtain
+/// toggle must treat None as off: the old assume-on fallback routed the
+/// tap into the turn-OFF branch exactly when the radio was already
+/// unreachable — a "dead tile" in takeover mode (2026-08-19).
+pub fn wifi_state() -> Option<bool> {
+    let out = Command::new("lipc-get-prop")
         .args(["-i", "com.lab126.wifid", "enable"])
         .output()
-    {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                return s.trim() == "1";
-            }
-        }
+        .ok()?;
+    if !out.status.success() {
+        return None;
     }
-    // Fallback: assume on (the app will discover/retry anyway).
-    true
+    match String::from_utf8(out.stdout).ok()?.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+pub fn is_wifi_on() -> bool {
+    // Optimistic default for the startup paths — the app retries anyway.
+    wifi_state().unwrap_or(true)
 }
 
 pub fn turn_on_wifi() {
-    let _ = Command::new("lipc-set-prop")
-        .args(["-i", "com.lab126.cmd", "wirelessEnable", "1"])
-        .status();
+    // wifid FIRST: com.lab126.cmd is framework-owned and never answers
+    // in takeover mode, so leading with it could eat the whole toggle.
     let _ = Command::new("lipc-set-prop")
         .args(["-i", "com.lab126.wifid", "enable", "1"])
+        .status();
+    let _ = Command::new("lipc-set-prop")
+        .args(["-i", "com.lab126.cmd", "wirelessEnable", "1"])
         .status();
 }
 
