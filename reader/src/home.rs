@@ -5,10 +5,11 @@
 //! gestures (top-edge swipe / two-finger tap) everywhere.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
+use ybdev::sysinfo;
 
 use crate::books::ReaderScreen;
 use crate::library::list_books;
@@ -25,7 +26,7 @@ const TABS: [NavTab; 2] = [
 
 /// --- Home tab layout (pt) ---
 const PAD_PT: f32 = 20.0;
-const KICKER_BASE_PT: f32 = 26.0;
+const KICKER_BASE_PT: f32 = 30.0;
 const KICKER_SIZE_PT: f32 = 7.0;
 const HEADER_RULE_PT: f32 = 40.0;
 const ROWS_TOP_PT: f32 = 56.0;
@@ -38,7 +39,7 @@ const ICON_BOX_PT: f32 = 13.0;
 const ICON_GAP_PT: f32 = 8.0;
 
 /// --- Library tab layout (pt) ---
-const LIB_TITLE_BASE_PT: f32 = 28.0;
+const LIB_TITLE_BASE_PT: f32 = 30.0;
 const LIB_TITLE_SIZE_PT: f32 = 11.0;
 const LIB_COUNT_PT: f32 = 7.5;
 const KICKER2_SIZE_PT: f32 = 7.0;
@@ -134,6 +135,9 @@ pub struct HomeScreen {
     per_page: usize,
     /// Last painted frame, handed to popups so they float over the list.
     snap: Option<Vec<u8>>,
+    /// Header clock as painted — on_tick compares a fresh reading
+    /// against it and redraws when the minute flips.
+    hdr_time: String,
 }
 
 impl HomeScreen {
@@ -149,6 +153,7 @@ impl HomeScreen {
             cont: None,
             per_page: 1,
             snap: None,
+            hdr_time: String::new(),
         }
     }
 
@@ -292,6 +297,21 @@ impl Screen for HomeScreen {
         let content_h = h - nav::bar_h_px();
         let pad = pt(PAD_PT);
         p.clear(255);
+
+        // Ambient status, same slot the book header uses (chrome.rs):
+        // clock left, battery right (+ = charging). Deliberately smaller
+        // and lighter than the kicker below — metadata, not a peer row.
+        // on_tick keeps the clock honest while the screen idles.
+        let t = crate::chrome::current_time_str();
+        self.hdr_time = t.clone();
+        let (cap, plugged) = sysinfo::battery();
+        let bat = if plugged {
+            format!("+{}%", cap)
+        } else {
+            format!("{}%", cap)
+        };
+        p.text(pad, pt(12.0), 6.5, 165, &t);
+        p.text_right(w - pad, pt(12.0), 6.5, 165, &bat);
 
         match self.tab {
             0 => {
@@ -439,6 +459,21 @@ impl Screen for HomeScreen {
 
         nav::draw_nav(p, &TABS, self.tab);
         self.snap = Some(p.snapshot());
+    }
+
+    fn tick_interval(&self) -> Duration {
+        Duration::from_secs(20)
+    }
+
+    fn on_tick(&mut self) -> Action {
+        // Keep the header clock honest while the screen idles: a
+        // flash-less partial refresh roughly once a minute — the same
+        // cadence the stock status bar keeps.
+        if crate::chrome::current_time_str() != self.hdr_time {
+            Action::Redraw
+        } else {
+            Action::Keep
+        }
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
