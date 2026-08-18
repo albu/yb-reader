@@ -1,10 +1,16 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 const VOCAB_PATH: &str = "/mnt/us/extensions/reader/data/vocab.bin";
 const PROFILE_PATH: &str = "/mnt/us/extensions/reader/vocab_profile.json";
 const MAGIC: &[u8; 8] = b"YBVOC01\0";
+
+/// Process-wide dictionary, read once: the blob is ~14 MB and every book
+/// open would otherwise re-read it from flash into a fresh heap buffer.
+/// Lookups take &self, so every ReaderScreen shares this one instance.
+static DB: OnceLock<Option<VocabDb>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnotationStyle {
@@ -58,8 +64,9 @@ pub struct VocabDb {
 }
 
 impl VocabDb {
-    pub fn open() -> Option<Self> {
-        Self::open_path(VOCAB_PATH)
+    /// Open the device dictionary, cached for the process lifetime.
+    pub fn open() -> Option<&'static Self> {
+        DB.get_or_init(|| Self::open_path(VOCAB_PATH)).as_ref()
     }
 
     pub fn open_path<P: AsRef<Path>>(path: P) -> Option<Self> {
@@ -454,6 +461,18 @@ mod tests {
         let entry_inflected = db.lookup("ephemerally").expect("lookup ephemerally");
         assert_eq!(entry_inflected.word, "ephemerally");
         assert!(entry_inflected.difficulty >= 70);
+    }
+
+    #[test]
+    fn open_is_cached_for_process_lifetime() {
+        // Same &'static handle both times (None on the host, where the
+        // device path doesn't exist — also cached, also identical).
+        let a = VocabDb::open();
+        let b = VocabDb::open();
+        assert_eq!(a.is_some(), b.is_some());
+        if let (Some(a), Some(b)) = (a, b) {
+            assert!(std::ptr::eq(a, b));
+        }
     }
 }
 

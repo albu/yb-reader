@@ -172,7 +172,8 @@ enum CardSide {
 
 pub struct FlashcardsScreen {
     deck: FlashcardDeck,
-    vocab_db: Option<VocabDb>,
+    /// &'static: shared process-wide dictionary (vocab::open caches it).
+    vocab_db: Option<&'static VocabDb>,
     due_queue: Vec<String>,
     current_idx: usize,
     side: CardSide,
@@ -258,7 +259,7 @@ impl Screen for FlashcardsScreen {
         let close_y = pt(8.0);
         let close_rect = Rect::new(close_x, close_y, close_w, close_h);
         p.rect_outline_t(close_rect, 1, 100);
-        p.text_center_in(close_x, close_x + close_w, close_y + pt(16.0), 8.5, 0, "✕ Close");
+        p.text_center_in(close_x, close_x + close_w, close_y + pt(16.0), 8.5, 0, "Close");
 
         // Finished State
         if self.current_idx >= self.due_queue.len() || self.due_queue.is_empty() {

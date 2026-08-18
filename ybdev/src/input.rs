@@ -21,6 +21,11 @@ pub enum SwipeDir {
 pub enum Gesture {
     Tap { x: u32, y: u32 },
     LongPress { x: u32, y: u32 },
+    /// Continuous position after a fired long-press (finger stayed down
+    /// and moved). Emitted in ~12px steps; screens snap to word/slider
+    /// granularity and redraw only on index change, so the stream is
+    /// naturally throttled. No tap/swipe is synthesized on release.
+    Drag { x: u32, y: u32 },
     /// Direction plus the swipe's START and END points: handlers can bind
     /// edge gestures (top-edge swipe-down = brightness, bottom-right
     /// swipe-up = back) and turn bar-drags into value adjustments.
@@ -77,6 +82,9 @@ const ABS_MT_TRACKING_ID: u16 = 0x39;
 
 const SWIPE_MIN_DIST: i32 = 40;
 const TWO_FINGER_MAX_DIST: i32 = 25;
+/// Step between Drag emissions, in px — small enough to feel continuous
+/// at word granularity, large enough to jitter-proof a steady hold.
+const DRAG_STEP: i32 = 12;
 
 const EV_ABS_BIT: u64 = 1 << 3;
 const ABS_MT_POSITION_X_BIT: u64 = 1 << 53;
@@ -93,6 +101,9 @@ struct Touch {
     y_set: bool,
     _down: Instant,
     long_press_fired: bool,
+    /// Anchor of the fired long-press / last Drag emission — the reference
+    /// point for the next Drag step. None until the long-press fires.
+    drag_from: Option<(i32, i32)>,
 }
 
 
@@ -358,12 +369,27 @@ impl Input {
                     let dy = (t.y - t.down_y).abs();
                     if dx <= 25 && dy <= 25 && t._down.elapsed() >= Duration::from_millis(360) {
                         t.long_press_fired = true;
+                        t.drag_from = Some((t.x, t.y));
                         let g = Gesture::LongPress {
                             x: t.x.max(0) as u32,
                             y: t.y.max(0) as u32,
                         };
                         crate::log::plog(&format!("input: {:?}", g));
                         return Some(g);
+                    }
+                }
+                // The finger stayed down after the long-press and moved:
+                // stream its position as Drag steps. (No plog — a word-
+                // snapped drag emits dozens per selection.)
+                if t.long_press_fired && t.x_set && t.y_set {
+                    if let Some((lx, ly)) = t.drag_from {
+                        if (t.x - lx).abs() >= DRAG_STEP || (t.y - ly).abs() >= DRAG_STEP {
+                            t.drag_from = Some((t.x, t.y));
+                            return Some(Gesture::Drag {
+                                x: t.x.max(0) as u32,
+                                y: t.y.max(0) as u32,
+                            });
+                        }
                     }
                 }
             }
@@ -505,6 +531,7 @@ impl Input {
                             y_set: false,
                             _down: now,
                             long_press_fired: false,
+                            drag_from: None,
                         },
                     );
                 }

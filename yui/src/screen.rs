@@ -75,6 +75,7 @@ impl std::fmt::Debug for Action {
             Action::RedrawFull => "RedrawFull",
             Action::Push(_) => "Push(..)",
             Action::Pop => "Pop",
+            Action::PopN(_) => "PopN",
             Action::Quit => "Quit",
         })
     }
@@ -92,6 +93,11 @@ pub enum Action {
     Push(Box<dyn Screen>),
     /// Close the top screen (the root popping quits the app).
     Pop,
+    /// Close the top `n` screens at once — for a dialog that must unwind
+    /// through a parent dialog (e.g. a TOC picked on top of a scrubber:
+    /// the reader below, not the scrubber, must resume). Never pops the
+    /// root; each popped screen still gets `on_leave`.
+    PopN(usize),
     /// Exit the app entirely.
     Quit,
 }

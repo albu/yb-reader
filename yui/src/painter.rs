@@ -70,6 +70,35 @@ impl<'a> Painter<'a> {
         (self.w, self.h)
     }
 
+    /// Packed (stride-stripped) copy of what was just painted — screens
+    /// hand this to dialogs so they can float over the dimmed current view
+    /// instead of blanking the panel (same format `blit_gray` consumes).
+    pub fn snapshot(&self) -> Vec<u8> {
+        let w = self.w as usize;
+        let mut out = vec![0u8; w * self.h as usize];
+        for y in 0..self.h as usize {
+            let (src, dst) = (y * self.stride, y * w);
+            out[dst..dst + w].copy_from_slice(&self.buf[src..src + w]);
+        }
+        out
+    }
+
+    /// Invert a rect of the framebuffer (selection rendering: idempotent
+    /// per frame because every draw starts from a fresh blit).
+    pub fn invert(&mut self, r: Rect) {
+        let x1 = (r.x + r.w).min(self.w).max(0);
+        let y1 = (r.y + r.h).min(self.h).max(0);
+        let x0 = r.x.max(0);
+        let y0 = r.y.max(0);
+        for y in y0..y1 {
+            let row = y as usize * self.stride;
+            for x in x0..x1 {
+                let i = row + x as usize;
+                self.buf[i] = 255 - self.buf[i];
+            }
+        }
+    }
+
     /// Drawable size in points (for authoring layout).
     pub fn width_pt(&self) -> f32 {
         self.w as f32 / PX

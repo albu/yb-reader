@@ -13,7 +13,7 @@ LLVM_AR ?= /opt/homebrew/opt/llvm@22/bin/llvm-ar
 export LD := $(LLD) -m armelf_linux_eabi
 export AR := $(LLVM_AR)
 
-.PHONY: all setup check build probe deploy clean
+.PHONY: all setup check build probe deploy deploy-usb deploy-probe clean
 
 all: build
 
@@ -30,9 +30,14 @@ build:
 probe:
 	cargo zigbuild --target $(TARGET) --release -p yb-probe
 
+# deploy = SSH fast loop (see deploy.sh); deploy-usb for a mounted Kindle.
 deploy: build
 	chmod +x deploy.sh
 	./deploy.sh
+
+deploy-usb: build
+	chmod +x deploy.sh
+	./deploy.sh usb
 
 deploy-probe: probe
 	chmod +x deploy.sh

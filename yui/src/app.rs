@@ -169,6 +169,19 @@ fn transition(stack: &mut Vec<Box<dyn Screen>>, a: Action) -> (bool, Option<bool
             let a = stack.last_mut().unwrap().on_resume();
             transition(stack, a)
         }
+        Action::PopN(n) => {
+            // Unwind n overlays down to the screen that must handle the
+            // result. Clamped to the overlays: never quits by popping the
+            // root (an explicit Pop from the root screen means that).
+            let n = n.min(stack.len().saturating_sub(1));
+            for _ in 0..n {
+                if let Some(mut popped) = stack.pop() {
+                    popped.on_leave();
+                }
+            }
+            let a = stack.last_mut().unwrap().on_resume();
+            transition(stack, a)
+        }
         Action::Quit => (false, None),
     }
 }
@@ -221,6 +234,36 @@ mod tests {
         assert!(cont);
         assert_eq!(redraw, Some(true));
         assert_eq!(*log.borrow(), vec!["a:enter"]);
+    }
+
+    #[test]
+    fn popn_unwinds_multiple_overlays_and_resumes_the_base() {
+        // A TOC picked on top of a scrubber must unwind both dialogs and
+        // resume the reader beneath, not the scrubber in the middle.
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut stack = vec![fake("reader", &log), fake("scrubber", &log), fake("toc", &log)];
+        log.borrow_mut().clear();
+
+        let (cont, redraw) = transition(&mut stack, Action::PopN(2));
+        assert!(cont);
+        assert_eq!(redraw, Some(true));
+        assert_eq!(
+            *log.borrow(),
+            vec!["toc:leave", "scrubber:leave", "reader:resume"]
+        );
+        assert_eq!(stack.len(), 1);
+    }
+
+    #[test]
+    fn popn_never_pops_the_root() {
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut stack = vec![fake("base", &log), fake("over", &log)];
+        log.borrow_mut().clear();
+
+        let (cont, _) = transition(&mut stack, Action::PopN(9));
+        assert!(cont);
+        assert_eq!(stack.len(), 1);
+        assert_eq!(*log.borrow(), vec!["over:leave", "base:resume"]);
     }
 
     #[test]

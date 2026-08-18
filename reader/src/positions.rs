@@ -232,6 +232,12 @@ pub fn resume_pos(name: &str) -> Pos {
         .unwrap_or(Pos::simple(0, 0, 0))
 }
 
+/// The whole store in one read — for library-level ordering (last-read
+/// first) without an O(books) pile of single-entry loads.
+pub fn all() -> HashMap<String, Pos> {
+    load_at(STORE)
+}
+
 /// Saved page for a book (0 when never opened).
 pub fn resume_page(name: &str) -> usize {
     resume_pos(name).page

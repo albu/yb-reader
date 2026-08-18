@@ -9,7 +9,8 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -18,6 +19,7 @@ use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
 use ybdev::sysinfo;
 
+
 use crate::curtain::CurtainScreen;
 use crate::positions;
 use crate::settings_dialog::ReaderSettingsDialog;
@@ -25,7 +27,7 @@ use crate::split::{RectF, ReaderSettings};
 
 use crate::wifi;
 
-use yui::painter::{pt, Painter};
+use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
 const LIB_DIR: &str = "/mnt/us/documents";
@@ -151,12 +153,57 @@ fn open_async(
 
 // ---- ReaderScreen -------------------------------------------------------
 
+/// A pending text selection: word indices into `page_words` (reading
+/// order). `end` moves — by drag while holding, by tap after lifting —
+/// while `anchor` only moves by another long-press (re-anchor).
+struct SelState {
+    anchor: usize,
+    end: usize,
+}
+
+impl SelState {
+    fn span(&self) -> (usize, usize) {
+        (self.anchor.min(self.end), self.anchor.max(self.end))
+    }
+}
+
+/// Confirm bar geometry (bar + Save + Cancel), shared by draw and hit-testing.
+fn sel_bar_rects(w: i32, h: i32) -> (Rect, Rect, Rect) {
+    let bar_h = pt(48.0);
+    let bar_y = h - pt(76.0);
+    let bar_x = pt(24.0);
+    let bar_w = w - 2 * pt(24.0);
+    let btn_w = pt(64.0);
+    let btn_h = pt(32.0);
+    let by = bar_y + (bar_h - btn_h) / 2;
+    let x_btn = Rect::new(bar_x + bar_w - btn_w - pt(12.0), by, btn_w, btn_h);
+    let ok_btn = Rect::new(x_btn.x - btn_w - pt(10.0), by, btn_w, btn_h);
+    (Rect::new(bar_x, bar_y, bar_w, bar_h), ok_btn, x_btn)
+}
+
+/// Caret triangle pointing into the span at one of its end words.
+fn draw_sel_caret(p: &mut Painter, r: &RectF, start: bool) {
+    let cy = ((r.y0 + r.y1) / 2.0).round() as i32;
+    let hh = pt(8.0);
+    let cx = if start {
+        (r.x0 - 10.0).round() as i32
+    } else {
+        (r.x1 + 10.0).round() as i32
+    };
+    for dy in 0..hh {
+        let wdt = dy + 2;
+        let x = if start { cx - wdt } else { cx };
+        p.rect(Rect::new(x, cy - dy, wdt.max(1), 1), 0);
+        p.rect(Rect::new(x, cy + dy, wdt.max(1), 1), 0);
+    }
+}
+
 pub struct ReaderScreen {
     path: PathBuf,
     w: u32,
     h: u32,
     loading: Option<Receiver<Result<BookReady, String>>>,
-    doc: Option<Document>,
+    doc: Option<Rc<Document>>,
     err: Option<String>,
     total: usize,
     page_no: usize,
@@ -167,7 +214,9 @@ pub struct ReaderScreen {
     turns_since_full: usize,
     pending_turns: i32,
     time_str: String,
-    vocab_db: Option<crate::vocab::VocabDb>,
+    /// &'static: the 14 MB dictionary is read once per process
+    /// (vocab::open caches it) and shared by every ReaderScreen.
+    vocab_db: Option<&'static crate::vocab::VocabDb>,
     vocab_prof: crate::vocab::VocabProfile,
     page_words: Vec<(String, RectF)>,
     page_annotations: Vec<(RectF, crate::vocab::WordEntry)>,
@@ -175,6 +224,12 @@ pub struct ReaderScreen {
     page_start_time: Instant,
     avg_secs_per_page: f32,
     toc_chapters: Vec<usize>,
+    /// Selection mode (bookmark toggled): long-press selects instead of
+    /// opening the dictionary. Taps keep turning pages in every mode.
+    sel_mode: bool,
+    sel: Option<SelState>,
+    /// Cached highlights for this book (notes store), for underlining.
+    highlights: Vec<crate::notes::Highlight>,
 }
 
 impl ReaderScreen {
@@ -220,6 +275,9 @@ impl ReaderScreen {
             page_start_time: Instant::now(),
             avg_secs_per_page: 45.0,
             toc_chapters: Vec::new(),
+            sel_mode: false,
+            sel: None,
+            highlights: Vec::new(),
         }
     }
 
@@ -324,9 +382,9 @@ impl ReaderScreen {
 
     fn scan_toc_chapters(&mut self) {
         if let Some(doc) = &self.doc {
-            if let Ok(outlines) = doc.outlines() {
+            if let Ok(ref outlines) = doc.outlines() {
                 let mut chapters = Vec::new();
-                Self::collect_outline_pages(&outlines, &mut chapters);
+                Self::collect_outline_pages(outlines, &mut chapters);
                 chapters.sort_unstable();
                 chapters.dedup();
                 self.toc_chapters = chapters;
@@ -346,9 +404,8 @@ impl ReaderScreen {
     }
 
     fn open_toc_dialog(&mut self) -> Action {
-
         let Some(doc) = &self.doc else { return Action::Keep };
-        let Ok(outlines) = doc.outlines() else { return Action::Keep };
+        let Some(outlines) = doc.outlines().ok() else { return Action::Keep };
         let cur_page = self.page_no;
         let path_name = self.book_name();
         let total = self.total;
@@ -375,22 +432,78 @@ impl ReaderScreen {
         let bg = self.page_gray.clone();
         let path_name = self.book_name();
         let settings = self.settings;
+        let doc_for_renderer = self.doc.clone();
+        let doc_for_toc = self.doc.clone();
+        let w = self.w;
+        let h = self.h;
 
         Action::Push(Box::new(crate::scrubber_dialog::ScrubberDialog::new(
             cur_page,
             total,
             bg,
+            move |target_page| {
+                let doc = doc_for_renderer.as_ref()?;
+                render_page(doc, target_page, 0, &settings, w, h)
+            },
             move |act| {
                 match act {
-                    crate::scrubber_dialog::ScrubberAction::JumpTo(target) => {
+                    crate::scrubber_dialog::ScrubberAction::Done(target) => {
                         positions::record_pos(&path_name, target, total, 0, Some(settings));
                         Action::Pop
                     }
-                    crate::scrubber_dialog::ScrubberAction::Close => Action::Pop,
+                    crate::scrubber_dialog::ScrubberAction::OpenToc(target) => {
+                        if let Some(doc) = &doc_for_toc {
+                            if let Ok(ol) = doc.outlines() {
+                                let path_cl = path_name.clone();
+                                return Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
+                                    &ol,
+                                    target,
+                                    move |act| {
+                                        match act {
+                                            crate::toc_dialog::TocAction::JumpTo(t) => {
+                                                positions::record_pos(&path_cl, t, total, 0, Some(settings));
+                                                // Unwind BOTH the TOC and this scrubber:
+                                                // a single Pop would reveal the scrubber,
+                                                // whose Done would overwrite this position
+                                                // and the reader would never jump.
+                                                Action::PopN(2)
+                                            }
+                                            crate::toc_dialog::TocAction::Close => Action::Pop,
+                                        }
+                                    },
+                                )));
+                            }
+                        }
+                        Action::Pop
+                    }
+                    crate::scrubber_dialog::ScrubberAction::OpenHighlights(target) => {
+                        let path_hl = path_name.clone();
+                        let path_jump = path_hl.clone();
+                        Action::Push(Box::new(crate::highlights_dialog::HighlightsDialog::from_book(
+                            &path_hl,
+                            target,
+                            move |act| {
+                                match act {
+                                    crate::highlights_dialog::HighlightsAction::JumpTo(p) => {
+                                        // The stored page can predate a reflow — clamp.
+                                        let page = p.min(total.saturating_sub(1));
+                                        positions::record_pos(&path_jump, page, total, 0, Some(settings));
+                                        // Same unwind as the TOC jump: pop list + scrubber.
+                                        Action::PopN(2)
+                                    }
+                                    crate::highlights_dialog::HighlightsAction::Close => Action::Pop,
+                                }
+                            },
+                        )))
+                    }
                 }
             },
         )))
     }
+
+
+
+
 
     fn open_footnote_or_link(&mut self, uri: &str) -> Action {
         let Some(doc) = &self.doc else { return Action::Keep };
@@ -437,7 +550,7 @@ impl ReaderScreen {
         let settings = self.settings;
 
         Action::Push(Box::new(crate::footnote_dialog::FootnoteDialog::new(
-            "📖 Footnote / Note",
+            "Footnote / Note",
             &snippet,
             target_page,
             bg,
@@ -496,7 +609,7 @@ impl ReaderScreen {
     fn map_gesture(&self, g: Gesture) -> (i32, i32, Option<SwipeDir>) {
         let (w, h) = self.dims; // w=1236, h=1648
         match g {
-            Gesture::Tap { x, y } | Gesture::LongPress { x, y } => {
+            Gesture::Tap { x, y } | Gesture::LongPress { x, y } | Gesture::Drag { x, y } => {
                 let (px, py) = (x as i32, y as i32);
                 match self.settings.split.rotation {
                     270 => {
@@ -745,13 +858,35 @@ impl ReaderScreen {
     }
 
     fn find_word_at_pos(&self, vx: f32, vy: f32) -> Option<(String, RectF)> {
-        for (w, r) in &self.page_words {
-            // Hit test with generous touch padding
-            if vx >= r.x0 - 12.0 && vx <= r.x1 + 12.0 && vy >= r.y0 - 12.0 && vy <= r.y1 + 12.0 {
-                return Some((w.clone(), *r));
-            }
+        self.word_idx_at_pos(vx, vy)
+            .map(|i| (self.page_words[i].0.clone(), self.page_words[i].1))
+    }
+
+    /// Index of the word under (vx, vy) — the selection primitive: spans
+    /// are word indices, so finger imprecision disappears into snapping.
+    fn word_idx_at_pos(&self, vx: f32, vy: f32) -> Option<usize> {
+        self.page_words.iter().position(|(_, r)| {
+            vx >= r.x0 - 12.0 && vx <= r.x1 + 12.0 && vy >= r.y0 - 12.0 && vy <= r.y1 + 12.0
+        })
+    }
+
+    /// Commit the pending selection to the notes store and underline it.
+    fn sel_save(&mut self) -> Action {
+        let Some(sel) = self.sel.take() else {
+            return Action::Keep;
+        };
+        let (lo, hi) = sel.span();
+        let text = self.page_words[lo..=hi]
+            .iter()
+            .map(|(w, _)| w.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if crate::notes::add(&self.book_name(), self.page_no, &text) {
+            let head: String = text.chars().take(48).collect();
+            plog(&format!("highlight: p{} '{}…'", self.page_no + 1, head));
+            self.highlights = crate::notes::load(&self.book_name());
         }
-        None
+        Action::Redraw
     }
 
     fn find_link_at_pos(&self, vx: f32, vy: f32) -> Option<&(RectF, String)> {
@@ -821,9 +956,10 @@ impl Screen for ReaderScreen {
             if let Some((p, SendDoc(doc), total, font_sz)) = warm.take() {
                 if p == self.path && (font_sz - self.settings.font_size).abs() < 0.01 {
                     plog(&format!("book warm: instant open (rss={})", rss_mib()));
-                    self.doc = Some(doc);
+                    self.doc = Some(Rc::new(doc));
                     self.total = total;
                     self.scan_toc_chapters();
+                    self.highlights = crate::notes::load(&self.book_name());
                     self.save_progress();
                     return Action::Redraw;
                 }
@@ -841,17 +977,19 @@ impl Screen for ReaderScreen {
 
     fn on_leave(&mut self) {
         wifi::keep_awake(false);
-        if let Some(doc) = self.doc.take() {
-            if let Ok(mut warm) = WARM.lock() {
-                *warm = Some((
-                    self.path.clone(),
-                    SendDoc(doc),
-                    self.total,
-                    self.settings.font_size,
-                ));
+        if let Some(doc_rc) = self.doc.take() {
+            if let Ok(doc) = Rc::try_unwrap(doc_rc) {
+                if let Ok(mut warm) = WARM.lock() {
+                    *warm = Some((
+                        self.path.clone(),
+                        SendDoc(doc),
+                        self.total,
+                        self.settings.font_size,
+                    ));
+                }
             }
         }
-plog(&format!(
+        plog(&format!(
             "book closed rss={} avail={}",
             rss_mib(),
             avail_mib()
@@ -886,14 +1024,24 @@ plog(&format!(
                 self.sub_idx = 0;
                 self.page_gray = None;
                 // In-memory instant reflow without re-reading/re-parsing ZIP archive from disk
-                if let Some(doc) = self.doc.take() {
-                    self.loading = Some(reflow_async(
-                        SendDoc(doc),
-                        self.w,
-                        self.h,
-                        self.settings.font_size,
-                        self.settings.margin_pad,
-                    ));
+                if let Some(doc_rc) = self.doc.take() {
+                    if let Ok(doc) = Rc::try_unwrap(doc_rc) {
+                        self.loading = Some(reflow_async(
+                            SendDoc(doc),
+                            self.w,
+                            self.h,
+                            self.settings.font_size,
+                            self.settings.margin_pad,
+                        ));
+                    } else {
+                        self.loading = Some(open_async(
+                            self.path.clone(),
+                            self.w,
+                            self.h,
+                            self.settings.font_size,
+                            self.settings.margin_pad,
+                        ));
+                    }
                 } else {
                     self.loading = Some(open_async(
                         self.path.clone(),
@@ -930,10 +1078,12 @@ plog(&format!(
         };
         match rx.try_recv() {
             Ok(Ok(BookReady { doc, total })) => {
-                self.doc = Some(doc.0);
+                self.doc = Some(Rc::new(doc.0));
                 self.total = total;
                 self.scan_toc_chapters();
+                self.highlights = crate::notes::load(&self.book_name());
                 self.loading = None;
+
 
                 if self.pending_turns != 0 {
                     let steps = self.settings.split.total_steps(self.total);
@@ -1156,6 +1306,103 @@ plog(&format!(
                 p.text_center(h - pt(10.0), 7.0, fg_color, &footer);
             }
         }
+
+        // Saved highlights: solid light underlines, page-gated and matched
+        // by word sequence within the page. (A span that crosses a
+        // split-mode column boundary won't fully match either sub-page —
+        // acceptable; it still exports from the store.)
+        if !self.page_words.is_empty() {
+            for (lo, hi) in crate::notes::matched_spans(
+                &self.highlights,
+                self.page_no,
+                &self.page_words,
+            ) {
+                for (_, r) in &self.page_words[lo..=hi] {
+                    let y = (r.y1 + 1.0).round() as i32;
+                    let x0 = r.x0.round() as i32;
+                    let x1 = r.x1.round() as i32;
+                    if x1 > x0 {
+                        p.rect(Rect::new(x0, y, x1 - x0, 2), 170);
+                    }
+                }
+            }
+        }
+
+        // Selection-mode bookmark: a ribbon hanging from the top edge,
+        // left of the battery — outline when off, filled when on.
+        {
+            let bw = pt(13.0);
+            let bh = pt(20.0);
+            let x = w - pt(58.0);
+            let y = 0;
+            let body_h = bh - pt(4.0);
+            let seg = bw / 3;
+            if self.sel_mode {
+                p.rect(Rect::new(x, y, bw, body_h), 0);
+                p.rect(Rect::new(x, y + body_h, seg, pt(4.0)), 0);
+                p.rect(Rect::new(x + 2 * seg, y + body_h, seg, pt(4.0)), 0);
+            } else {
+                p.rect_outline_t(Rect::new(x, y, bw, body_h), 2, 130);
+                p.line_w(x, y + body_h, x + bw / 2, y + bh, 2, 130);
+                p.line_w(x + bw, y + body_h, x + bw / 2, y + bh, 2, 130);
+            }
+        }
+
+        // Pending selection: inverted span + end carets + confirm bar.
+        if let Some(sel) = &self.sel {
+            let (lo, hi) = sel.span();
+            if hi < self.page_words.len() {
+                for (_, r) in &self.page_words[lo..=hi] {
+                    let x0 = (r.x0 - 2.0).round() as i32;
+                    let y0 = (r.y0 - 1.0).round() as i32;
+                    let rw = ((r.x1 - r.x0) + 4.0).round().max(2.0) as i32;
+                    let rh = ((r.y1 - r.y0) + 2.0).round().max(2.0) as i32;
+                    p.invert(Rect::new(x0, y0, rw, rh));
+                }
+                draw_sel_caret(p, &self.page_words[lo].1, true);
+                draw_sel_caret(p, &self.page_words[hi].1, false);
+
+                let (bar, ok_btn, x_btn) = sel_bar_rects(w, h);
+                p.rect(bar, 255);
+                p.rect_outline_t(bar, 2, 0);
+                let text = self.page_words[lo..=hi]
+                    .iter()
+                    .map(|(w, _)| w.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let trunc = p.truncate(
+                    8.0,
+                    &text,
+                    (ok_btn.x - bar.x - pt(24.0)) as f32 / pt(1.0) as f32,
+                );
+                p.text(bar.x + pt(12.0), bar.y + pt(19.0), 8.0, 0, &trunc);
+                p.text(
+                    bar.x + pt(12.0),
+                    bar.y + pt(37.0),
+                    6.5,
+                    130,
+                    "tap: end · hold: start",
+                );
+                p.rect(ok_btn, 0);
+                p.text_center_in(
+                    ok_btn.x,
+                    ok_btn.x + ok_btn.w,
+                    ok_btn.y + pt(21.0),
+                    9.0,
+                    255,
+                    "Save",
+                );
+                p.rect_outline_t(x_btn, 2, 100);
+                p.text_center_in(
+                    x_btn.x,
+                    x_btn.x + x_btn.w,
+                    x_btn.y + pt(21.0),
+                    9.0,
+                    50,
+                    "Cancel",
+                );
+            }
+        }
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
@@ -1174,8 +1421,10 @@ plog(&format!(
         let (vx, vy, v_dir) = self.map_gesture(g);
 
         if let Some(dir) = v_dir {
+            // Any swipe cancels a pending selection (mode stays on).
+            let had_sel = self.sel.take().is_some();
             // Visual Swipes
-            return match dir {
+            let act = match dir {
                 SwipeDir::West => self.turn(true),  // swipe left -> forward
                 SwipeDir::East => self.turn(false), // swipe right -> back
                 SwipeDir::South => {
@@ -1202,11 +1451,26 @@ plog(&format!(
                     }
                 }
             };
+            // A cancelled selection must repaint even when the swipe itself
+            // was a no-op, or the bar lingers on screen.
+            if had_sel && matches!(act, Action::Keep) {
+                return Action::Redraw;
+            }
+            return act;
         }
 
 
         match g {
             Gesture::LongPress { .. } => {
+                // Selection mode: a long-press anchors a selection (or
+                // re-anchors a pending one — then dragging extends again).
+                if let Some(i) = self.word_idx_at_pos(vx as f32, vy as f32) {
+                    if self.sel.is_some() || self.sel_mode {
+                        self.sel = Some(SelState { anchor: i, end: i });
+                        return Action::Redraw;
+                    }
+                }
+
                 // 1. Check if an interactive link or footnote was held
                 if let Some((_, uri)) = self.find_link_at_pos(vx as f32, vy as f32) {
                     let uri_cl = uri.clone();
@@ -1232,6 +1496,44 @@ plog(&format!(
                 Action::Keep
             }
             Gesture::Tap { .. } => {
+                // 0a. Bookmark (top-right, left of the battery) toggles
+                // selection mode. Checked before the clean-refresh corner
+                // zone it sits inside; only the icon's own strip is
+                // carved out.
+                if vx > vis_w - pt(64.0) && vy < pt(34.0) {
+                    self.sel_mode = !self.sel_mode;
+                    self.sel = None;
+                    return Action::RedrawFull;
+                }
+
+                // 0b. Pending selection: bar buttons, or tap sets the end
+                // (extend / shrink / flip — one operation). Everything
+                // else is inert so a stray tap can't turn the page and
+                // eat the selection.
+                if self.sel.is_some() {
+                    let (bar, ok_btn, x_btn) = sel_bar_rects(self.dims.0, self.dims.1);
+                    if ok_btn.contains(vx, vy) {
+                        return self.sel_save();
+                    }
+                    if x_btn.contains(vx, vy) {
+                        self.sel = None;
+                        return Action::Redraw;
+                    }
+                    if bar.contains(vx, vy) {
+                        return Action::Keep;
+                    }
+                    if let Some(i) = self.word_idx_at_pos(vx as f32, vy as f32) {
+                        if let Some(sel) = &mut self.sel {
+                            if i != sel.end {
+                                sel.end = i;
+                                return Action::Redraw;
+                            }
+                        }
+                        return Action::Keep;
+                    }
+                    return Action::Keep;
+                }
+
                 // 1. Visual Top-Left corner -> Back to Library
                 if vx < 240 && vy < 160 {
                     return Action::Pop;
@@ -1267,6 +1569,19 @@ plog(&format!(
             Gesture::TwoFingerTap => {
                 // Two-finger tap anywhere -> Quick Curtain / Brightness
                 self.open_curtain()
+            }
+            Gesture::Drag { .. } => {
+                // Finger still down after the anchoring long-press: extend
+                // the span word by word (reading order; backtracking
+                // shrinks, crossing the anchor flips).
+                let idx = self.word_idx_at_pos(vx as f32, vy as f32);
+                if let (Some(sel), Some(i)) = (&mut self.sel, idx) {
+                    if i != sel.end {
+                        sel.end = i;
+                        return Action::Redraw;
+                    }
+                }
+                Action::Keep
             }
             _ => Action::Keep,
         }
@@ -1479,6 +1794,16 @@ mod tests {
     use super::*;
     use crate::split::{SplitConfig, SplitPreset};
 
+    #[test]
+    fn sel_state_span_orders_and_flips() {
+        // Drag/tap "backwards" past the anchor: the span is simply ordered.
+        let s = SelState { anchor: 5, end: 2 };
+        assert_eq!(s.span(), (2, 5));
+        let s = SelState { anchor: 5, end: 9 };
+        assert_eq!(s.span(), (5, 9));
+        let s = SelState { anchor: 5, end: 5 };
+        assert_eq!(s.span(), (5, 5));
+    }
 
     #[test]
     fn test_render_subbox_portrait() {

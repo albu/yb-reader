@@ -5,11 +5,18 @@ A minimal Rust reader for a jailbroken Kindle Paperwhite 5 (FW 5.19.x,
 One static binary, one job: **read**.
 
 - **Screen Mirror (Mac)** — the exact `yb-mirror` protocol, ported 1:1 from
-  `mirror.koplugin`. Your existing `mac/server.py` / `mac/send.py` are untouched
-  and the two can even run side-by-side during migration.
-- **Fetch book from Mac** — the `send.py` one-file delivery flow.
+  `mirror.koplugin`. Your existing `mac/server.py` is untouched and the two
+  can even run side-by-side during migration.
+- **Receive over Wi-Fi** — the Kindle *is* the server: a QR code on screen
+  points any phone/laptop browser at a drag-drop page; books stream straight
+  to `documents/` (atomically, never RAM-buffered). The lab126 default-DROP
+  firewall is opened for the listener's lifetime and closed on exit.
 - **Library** — local EPUB/PDF/MOBI/FB2/TXT/CBZ reading via MuPDF, reflowed to
-  the panel width.
+  the panel width. Per-book positions/settings persisted on `/mnt/us`.
+- **Reading tools** — TOC navigation, live-preview page scrubber, footnotes as
+  a bottom sheet, split-column/landscape modes, contrast curves, night mode.
+- **Vocabulary** — Word Wise–style inline translations (57k+ word Russian
+  dictionary) and an SM-2 flashcard deck fed from looked-up words.
 - **Frontlight** — `/dev/frontlight` ioctls (white + amber), two-finger tap from
   anywhere.
 
@@ -21,11 +28,11 @@ No LuaJIT, no KOReader, no 37 plugins. A few MB instead of a hundred.
 yb-reader/
   ybdev/     device layer: e-ink panel (MTK ioctls), frontlight, evdev input,
              mirror PNG decoding, mirror.conf, plugin log — no heavy deps
-  reader/    the app: mirror/fetch protocol, UI, MuPDF EPUB/PDF reader
+  reader/    the app: mirror protocol + Wi-Fi receive server, UI, MuPDF reader
   probe/     on-device introspection tool (fb geometry, input, frontlight)
   kual/      KUAL extension (kept for reference; the library scriptlet in
              documents/ is the real launcher on this unit — no KUAL here)
-  deploy.sh  build + copy to /Volumes/Kindle
+  deploy.sh  build + deploy: SSH fast loop (default), `usb`, or `probe`
 ```
 
 ## Prerequisites (macOS)
@@ -46,16 +53,18 @@ binary will never exec (it fails ENOEXEC and the shell reports a nonsense
 
 The Kindle runs a KOReader SSH server (`ssh kindle`; enable it in
 KOReader → Network → SSH server, and put the current IP in `~/.ssh/config`).
-No USB, no eject:
+No USB, no eject — one command does the whole loop:
 
 ```sh
-make build                              # cross-compile armhf release
-scp target/arm-unknown-linux-musleabihf/release/yb-reader \
-    kindle:/mnt/us/extensions/reader/bin/reader
-ssh kindle 'chmod +x /mnt/us/extensions/reader/bin/reader'
-md5 -q target/arm-unknown-linux-musleabihf/release/yb-reader
-ssh kindle md5sum /mnt/us/extensions/reader/bin/reader   # must match
+./deploy.sh        # or: make deploy
 ```
+
+It cross-compiles the armhf release, stages the binary as `reader.new`
+(scp'ing straight over the running binary fails ETXTBSY — "text file busy"),
+verifies the sha256 **before** swapping it in (a truncated copy execs as
+ENOEXEC), `mv`s it into the launch path atomically, syncs the KPM package
+copy, and kills the running reader so the next launch picks up the new build
+(safe: `start.sh` restores cvm/pillow when the reader exits).
 
 Then **tap "YB Reader" in the library, exactly like you start KOReader**.
 The launch mechanism on this unit is a scriptlet in `/mnt/us/documents/`
@@ -64,8 +73,9 @@ The launch mechanism on this unit is a scriptlet in `/mnt/us/documents/`
 **The launch-path gotcha (this bit us):** the library tap runs
 `/mnt/us/extensions/reader/bin/start.sh` → `./reader`. If you scp a new
 binary anywhere else (e.g. `/mnt/us/yb/`) the tap still runs the old one —
-the symptom is "nothing changed". Always update the launch-path copy above,
-and keep the KPM package copy in sync:
+the symptom is "nothing changed". `./deploy.sh` updates the launch-path
+copy and the KPM copy together; for ad-hoc manual scps keep them in sync
+yourself:
 
 ```sh
 ssh kindle 'cp /mnt/us/extensions/reader/bin/reader \
@@ -101,9 +111,10 @@ ssh kindle 'tail -f /mnt/us/extensions/mirror/plugin.log'
 
 ### USB fallback
 
-When the Kindle is mounted at `/Volumes/Kindle` (and SSH is off), `make deploy`
-stages the KPM package, does the direct install (binary + scriptlet), and
-hash-verifies every binary copy. It requires eject cycles — prefer SSH.
+When the Kindle is mounted at `/Volumes/Kindle` (and SSH is off),
+`./deploy.sh usb` (or `make deploy-usb`) stages the KPM package, does the
+direct install (binary + scriptlet), and hash-verifies every binary copy.
+It requires eject cycles — prefer SSH.
 
 ## On-device testing (probe)
 
@@ -144,14 +155,15 @@ later nicety, not needed for on-device use.
 Launched "like a book", the stock framework is still alive underneath: it
 keeps drawing its UI over ours ("letters jump") and keeps consuming touch
 input (taps/swipes dead). The launcher
-([packages/yb-reader/bin/start.sh](/tmp/dev/yb-reader/packages/yb-reader/bin/start.sh))
+([packages/yb-reader/bin/start.sh](packages/yb-reader/bin/start.sh))
 does exactly what KOReader's `koreader.sh` does: `killall -STOP cvm` and
 `lipc-set-prop com.lab126.pillow disableEnablePillow disable` before the
 binary, and restores both (`killall -CONT cvm`, pillow enable) on exit.
 Exit is a vertical swipe on the launcher, the **Exit** menu item, or
 `ssh kindle 'killall reader; killall -CONT cvm'`.
 
-Other targets: `make check` (host type-check), `make probe`, `make clean`.
+Other targets: `make check` (host type-check), `make probe`, `make deploy-usb`,
+`make clean`.
 
 ## Cross-compiling — the scars, documented
 
@@ -189,20 +201,6 @@ The two non-obvious pieces are **MuPDF's C build** and **Homebrew tool paths**:
 Both exports are baked into the `Makefile` and `deploy.sh`. Homebrew keg paths
 change with versions; override with `make LLD=... AR=...` or `YB_LD`/`YB_AR`.
 
-## On-device testing
-
-```sh
-make probe
-cp target/aarch64-unknown-linux-musl/release/yb-probe /Volumes/Kindle/
-```
-
-Eject, run it from KOReader's **Tools → Run hardware probe** menu (or via
-SSH), and paste the output back.
-It reports fb geometry/stride/bpp, the discovered touch device, frontlight
-max/current, `/proc/bus/input/devices`, FW version, and the documents folder.
-This is how we confirm the panel assumptions (1236×1648, Y8, `/dev/frontlight`)
-on a specific unit.
-
 ### Hardware truths from the first probe (PW5, FW 5.19.2)
 
 - **Panel**: the fb reports `1248x3296` via sysfs (`virtual_size`), but that
@@ -239,10 +237,23 @@ decoder now uses `Transformations::EXPAND` and there are unit tests
 | Mirror | vertical swipe | exit to launcher |
 | Reader | tap left third / swipe east | previous page |
 | Reader | tap elsewhere / swipe west | next page |
-| Reader | tap top-right corner | clean refresh |
-| Reader | two-finger tap | frontlight dialog |
-| Reader | vertical swipe | back to library |
+| Reader | tap top-left or bottom-right corner | back to library |
+| Reader | tap top-right corner | clean refresh (full flash) |
+| Reader | tap top strip / two-finger tap | curtain (frontlight & controls) |
+| Reader | tap bottom footer strip | page scrubber (live preview, ±steps, TOC + highlights) |
+| Reader | tap top-right bookmark | toggle selection mode (long-press selects instead of dictionary) |
+| Reader | hold word + drag (selection mode) | highlight span → saved with persistent underline |
+| Scrubber | 🖍 Highlights | highlights list: tap = jump back, hold = delete |
+| Reader | swipe down (below the top edge) | reader settings (font, margins, contrast, split) |
+| Reader | swipe down from the top edge | curtain |
+| Reader | swipe up, bottom-left | reader settings |
+| Reader | swipe up, bottom-center | table of contents |
+| Reader | swipe up, bottom-right | back to library |
+| Reader | long-press a word | dictionary / translation dialog |
+| Reader | long-press a footnote or link | footnote bottom sheet (jump to note) |
 | Library | tap row | open book |
+| Library | tap footer band (or header) | cycle sort: title / recent / reading |
+| Library | long-press row | delete book (confirm dialog) |
 | Library | swipe up/down | scroll / back |
 | Launcher | tap row | run |
 | Launcher | vertical swipe | exit app |
@@ -262,12 +273,11 @@ Same files as the Lua plugin, same semantics:
 - Log: `/mnt/us/extensions/mirror/plugin.log` (same format). Override with
   `yb-reader --log /tmp/x.log` for testing.
 
-## Known limitations (v0.1)
+## Known limitations
 
 - No suspend/resume handling yet: the app holds `preventScreenSaver` while
   mirroring/reading, but if the device does sleep (cover, power button) the
   app doesn't yet re-establish Wi-Fi / refresh the panel on wake.
-- No reading-position persistence or TOC navigation yet — page numbers only.
 - Touch device is discovered from `/proc/bus/input/devices`
   (`ABS_MT_POSITION_X`); if discovery fails it falls back to
   `/dev/input/touch`. The `probe` output will confirm the real path.
@@ -277,7 +287,5 @@ Same files as the Lua plugin, same semantics:
 ## Roadmap
 
 - Suspend/resume hooks (lipc event → re-enable Wi-Fi, full refresh).
-- Reading progress (remember last page per book).
-- TOC / chapter navigation, font size setting.
 - Optional auto-start at boot (upstart/init script) so the Kindle is
   single-purpose, as designed.

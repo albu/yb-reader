@@ -105,11 +105,11 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
 
         if let Some(target) = self.target_page {
             p.rect(btn_rect, 0);
-            let jump_lbl = format!("↗ p.{}", target + 1);
+            let jump_lbl = format!("p.{}", target + 1);
             p.text_center_in(btn_x, btn_x + btn_w, btn_y + pt(15.0), 8.0, 255, &jump_lbl);
         } else {
             p.rect_outline_t(btn_rect, 1, 100);
-            p.text_center_in(btn_x, btn_x + btn_w, btn_y + pt(15.0), 8.0, 50, "✕ Close");
+            p.text_center_in(btn_x, btn_x + btn_w, btn_y + pt(15.0), 8.0, 50, "Close");
         }
 
         p.hline_t(title_y + pt(6.0), card_x + pt(10.0), card_x + card_w - pt(10.0), 1, 220);

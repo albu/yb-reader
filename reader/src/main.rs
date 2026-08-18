@@ -4,14 +4,18 @@
 
 mod books;
 mod cache;
+mod confirm_dialog;
 mod curtain;
-mod fetch;
 mod flashcards;
 mod footnote_dialog;
+mod guard;
+mod highlights_dialog;
 mod home;
 mod mirror;
+mod notes;
 mod positions;
 mod protocol;
+mod receive;
 mod scrubber_dialog;
 mod settings_dialog;
 mod split;
@@ -51,6 +55,9 @@ fn main() {
         i += 1;
     }
     log::set_path(&log_path);
+    // From here on, any panic or TERM/INT leaves a reason in the log and
+    // the hardware (frontlight, Wi-Fi, firewall) in a sane state.
+    guard::install();
 
     let panel = match Panel::open() {
         Ok(p) => p,

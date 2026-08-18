@@ -4,18 +4,18 @@
 //! last-read book, then the full list. Brightness lives on the edge
 //! gestures (top-edge swipe / two-finger tap) everywhere.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ybdev::input::{Gesture, SwipeDir};
+use ybdev::log::plog;
 
 use crate::books::{list_books, ReaderScreen};
-use crate::fetch;
 use crate::mirror::MirrorScreen;
 use crate::positions::{self, Pos};
 use yui::nav::{self, Icon, NavTab};
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
-use yui::MessageScreen;
 
 const TABS: [NavTab; 2] = [
     NavTab::new(Icon::Home, "home"),
@@ -59,7 +59,46 @@ const LIB_ITEM_BASE_PT: f32 = 15.0;
 const LIB_FOOT_PT: f32 = 7.0;
 const LIB_FOOT_OFF_PT: f32 = 14.0;
 
-const ROW_LABELS: [&str; 4] = ["Flashcards Deck", "Mirror to Mac", "Fetch book from Mac", "Exit"];
+const ROW_LABELS: [&str; 4] = [
+    "Flashcards Deck",
+    "Receive over Wi-Fi",
+    "Mirror to Mac",
+    "Exit",
+];
+
+/// Library ordering — a view concern, not a filesystem one. Cycles on a
+/// header tap; `Reading` floats actively-read books (positions ts) to the
+/// top and sinks never-opened ones.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SortMode {
+    Title,
+    Recent,
+    Reading,
+}
+
+impl SortMode {
+    fn next(self) -> SortMode {
+        match self {
+            SortMode::Title => SortMode::Recent,
+            SortMode::Recent => SortMode::Reading,
+            SortMode::Reading => SortMode::Title,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SortMode::Title => "title",
+            SortMode::Recent => "recent",
+            SortMode::Reading => "reading",
+        }
+    }
+}
+
+fn mtime(p: &Path) -> SystemTime {
+    std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .unwrap_or(UNIX_EPOCH)
+}
 
 
 pub struct HomeScreen {
@@ -69,10 +108,13 @@ pub struct HomeScreen {
     books: Vec<PathBuf>,
     names: Vec<String>,
     offset: usize,
+    sort: SortMode,
     /// The last-read book (path + saved position), if it still exists.
     cont: Option<(PathBuf, Pos)>,
     /// Set in draw (depends on panel height); draw always runs first.
     per_page: usize,
+    /// Last painted frame, handed to popups so they float over the list.
+    snap: Option<Vec<u8>>,
 }
 
 impl HomeScreen {
@@ -84,8 +126,10 @@ impl HomeScreen {
             books: vec![],
             names: vec![],
             offset: 0,
+            sort: SortMode::Title,
             cont: None,
             per_page: 1,
+            snap: None,
         }
     }
 
@@ -108,6 +152,67 @@ impl HomeScreen {
                 self.cont = Some((self.books[i].clone(), pos));
             }
         }
+        self.apply_sort();
+    }
+
+    /// Order the in-memory list by the current mode. Title lowercases the
+    /// key — the old byte-order sort put "Zoo" before "apple" and every
+    /// accented title at the end.
+    fn apply_sort(&mut self) {
+        let mut items: Vec<(PathBuf, String)> = self
+            .books
+            .iter()
+            .cloned()
+            .zip(self.names.iter().cloned())
+            .collect();
+        match self.sort {
+            SortMode::Title => items.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase())),
+            SortMode::Recent => items.sort_by(|a, b| mtime(&b.0).cmp(&mtime(&a.0))),
+            SortMode::Reading => {
+                let pos = positions::all();
+                items.sort_by(|a, b| {
+                    let ta = pos.get(&a.1).map(|p| p.ts).unwrap_or(0);
+                    let tb = pos.get(&b.1).map(|p| p.ts).unwrap_or(0);
+                    // Last-read first, never-opened sink to the bottom
+                    // (ties inside a bucket stay alphabetical).
+                    tb.cmp(&ta)
+                        .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+                });
+            }
+        }
+        let (books, names) = items.into_iter().unzip();
+        self.books = books;
+        self.names = names;
+        self.offset = 0;
+    }
+
+    /// The footer band (range + sort control) — the tappable strip just
+    /// above the nav bar on the library tab.
+    fn in_footer(y: i32, h: u32) -> bool {
+        let content_h = h as i32 - nav::bar_h_px();
+        y >= content_h - pt(26.0) && y < content_h
+    }
+
+    /// Resolve a tap/long-press y on the library tab to the book under it
+    /// (Continue row included). Long-press entry point for deletes.
+    fn book_at(&self, y: i32) -> Option<(PathBuf, String)> {
+        if self.cont.is_some() && HomeScreen::in_continue(y) {
+            let (path, _) = self.cont.as_ref().unwrap();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            return Some((path.clone(), name));
+        }
+        let rows_top = HomeScreen::list_top(self.cont.is_some());
+        let row_h = pt(LIB_ROW_PT);
+        if y >= rows_top && y < rows_top + self.per_page as i32 * row_h {
+            let idx = self.offset + ((y - rows_top) / row_h) as usize;
+            if idx < self.books.len() {
+                return Some((self.books[idx].clone(), self.names[idx].clone()));
+            }
+        }
+        None
     }
 
     /// Pure hit-test for the home tab's action rows.
@@ -209,7 +314,7 @@ impl Screen for HomeScreen {
                     pt(LIB_TITLE_BASE_PT),
                     LIB_COUNT_PT,
                     130,
-                    &format!("{} books", self.names.len()),
+                    &format!("{} books · {}", self.names.len(), self.sort.label()),
                 );
                 p.hline_t(pt(HEADER_RULE_PT), pad, w - pad, 3, 140);
 
@@ -252,12 +357,21 @@ impl Screen for HomeScreen {
                 }
 
                 if self.names.is_empty() {
-                    p.text_center(content_h / 2, 10.0, 0, "Library is empty");
+                    // The empty state is the wireless CTA — the receive
+                    // loop is the fastest first-book path, and tapping
+                    // anywhere on the content opens it.
+                    p.text_center(content_h / 2 - pt(4.0), 10.0, 0, "Library is empty");
                     p.text_center(
                         content_h / 2 + pt(14.0),
-                        8.0,
+                        8.5,
                         130,
-                        "add books to /mnt/us/documents",
+                        "tap to receive books over Wi-Fi",
+                    );
+                    p.text_center(
+                        content_h / 2 + pt(28.0),
+                        8.0,
+                        160,
+                        "or copy files to /mnt/us/documents",
                     );
                 } else {
                     let rows_top = HomeScreen::list_top(has_cont);
@@ -274,7 +388,15 @@ impl Screen for HomeScreen {
                         );
                         p.text(pad, top + pt(LIB_ITEM_BASE_PT), LIB_ITEM_PT, 0, &label);
                     }
-                    let footer = format!("{}-{} · swipe: scroll", self.offset + 1, visible);
+                    // Footer doubles as the sort control: the label with a
+                    // ▾ marker reads as tappable, and the whole band is.
+                    let footer = format!(
+                        "{}-{} of {} · sort: {} (tap)",
+                        self.offset + 1,
+                        visible,
+                        self.names.len(),
+                        self.sort.label()
+                    );
                     p.text_center(
                         content_h - pt(LIB_FOOT_OFF_PT),
                         LIB_FOOT_PT,
@@ -286,6 +408,7 @@ impl Screen for HomeScreen {
         }
 
         nav::draw_nav(p, &TABS, self.tab);
+        self.snap = Some(p.snapshot());
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
@@ -307,20 +430,31 @@ impl Screen for HomeScreen {
                 match self.tab {
                     0 => match HomeScreen::hit_home_row(y) {
                         Some(0) => Action::Push(Box::new(crate::flashcards::FlashcardsScreen::new())),
-                        Some(1) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
-                        Some(2) => {
-                            let msg = fetch::fetch_book();
-                            let lines: Vec<String> = match msg {
-                                Ok(m) => m.lines().map(|l| l.to_string()).collect(),
-                                Err(e) => e.lines().map(|l| l.to_string()).collect(),
-                            };
-                            Action::Push(Box::new(MessageScreen::from_strings(lines)))
+                        Some(1) => {
+                            Action::Push(Box::new(crate::receive::ReceiveScreen::new()))
                         }
+                        Some(2) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
                         Some(_) => Action::Quit,
                         None => Action::Keep,
                     },
 
                     _ => {
+                        // Empty library: the whole content area is the
+                        // receive CTA (see draw).
+                        if self.names.is_empty() {
+                            return Action::Push(Box::new(
+                                crate::receive::ReceiveScreen::new(),
+                            ));
+                        }
+
+                        // Sort control: the footer band (primary, the hint
+                        // lives there) or the header (secondary).
+                        if HomeScreen::in_footer(y, self.h) || y < pt(HEADER_RULE_PT) {
+                            self.sort = self.sort.next();
+                            self.apply_sort();
+                            return Action::RedrawFull;
+                        }
+
                         // Continue row: open the last-read book where it
                         // was left.
                         if self.cont.is_some() && HomeScreen::in_continue(y) {
@@ -366,6 +500,34 @@ impl Screen for HomeScreen {
             Gesture::Swipe { dir: SwipeDir::East, .. } => self.switch(-1),
             Gesture::Swipe { dir: SwipeDir::West, .. } => self.switch(1),
             Gesture::TwoFingerTap => Action::Keep,
+            // Library tab: long-press a row (Continue included) to delete
+            // the book — the wireless loop needs cable-free removal too.
+            Gesture::LongPress { x: _, y } if self.tab == 1 => {
+                let Some((path, name)) = self.book_at(y as i32) else {
+                    return Action::Keep;
+                };
+                let bg = self.snap.clone();
+                Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                    "Delete book?",
+                    &format!("{}\n\nThe file is removed from documents/.", name),
+                    "Delete",
+                    bg,
+                    move |act| {
+                        match act {
+                            crate::confirm_dialog::ConfirmAction::Yes => {
+                                match std::fs::remove_file(&path) {
+                                    Ok(()) => plog(&format!("library: deleted {}", name)),
+                                    Err(e) => {
+                                        plog(&format!("library: delete {} failed: {}", name, e))
+                                    }
+                                }
+                            }
+                            crate::confirm_dialog::ConfirmAction::No => {}
+                        }
+                        Action::Pop
+                    },
+                )))
+            }
             _ => Action::Keep,
         }
     }
@@ -402,8 +564,8 @@ fn draw_book_icon(p: &mut Painter, x: i32, y: i32) {
 
 /// Row icons in a 13pt box:
 /// 0: Flashcards Stack
-/// 1: Display Monitor + Cast (Mirror)
-/// 2: Download Tray + Arrow (Fetch)
+/// 1: Mini QR code (Receive over Wi-Fi)
+/// 2: Display Monitor + Cast (Mirror)
 /// 3: Power / Exit button (Exit)
 fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
     let s = pt(ICON_BOX_PT);
@@ -421,6 +583,16 @@ fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
             p.hline_t(y + pt(7.0), x + pt(2.0), x + s - pt(5.0), 1, 0);
         }
         1 => {
+            // Mini QR glyph: frame with three finder squares + center dot
+            p.rect_outline_t(Rect::new(x, y, s, s), T, 0);
+            let f = pt(3.0);
+            let in1 = pt(1.0);
+            p.rect(Rect::new(x + in1, y + in1, f, f), 0);
+            p.rect(Rect::new(x + s - in1 - f, y + in1, f, f), 0);
+            p.rect(Rect::new(x + in1, y + s - in1 - f, f, f), 0);
+            p.rect(Rect::new(mid_x - 1, mid_y - 1, 2, 2), 0);
+        }
+        2 => {
             // Monitor screen
             let mon_h = s - pt(4.0);
             p.rect_outline_t(Rect::new(x, y, s, mon_h), T, 0);
@@ -431,18 +603,6 @@ fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
             p.line_w(x + pt(3.0), mid_y - pt(2.0), x + s - pt(3.0), mid_y - pt(2.0), T, 0);
             p.line_w(x + s - pt(5.0), mid_y - pt(4.0), x + s - pt(3.0), mid_y - pt(2.0), T, 0);
             p.line_w(x + s - pt(5.0), mid_y, x + s - pt(3.0), mid_y - pt(2.0), T, 0);
-        }
-        2 => {
-            // Download arrow
-            let arrow_bot = y + s - pt(4.5);
-            p.line_w(mid_x, y + pt(1.0), mid_x, arrow_bot, T, 0);
-            p.line_w(mid_x - pt(3.0), arrow_bot - pt(3.0), mid_x, arrow_bot, T, 0);
-            p.line_w(mid_x + pt(3.0), arrow_bot - pt(3.0), mid_x, arrow_bot, T, 0);
-            // Receiving Tray
-            let tray_y = y + s - pt(3.0);
-            p.line_w(x + pt(1.0), tray_y - pt(2.5), x + pt(1.0), tray_y, T, 0);
-            p.line_w(x + pt(1.0), tray_y, x + s - pt(1.0), tray_y, T, 0);
-            p.line_w(x + s - pt(1.0), tray_y, x + s - pt(1.0), tray_y - pt(2.5), T, 0);
         }
         _ => {
             // Power / Exit glyph: circle with vertical top line
@@ -487,5 +647,95 @@ mod tests {
         // With Continue present the list starts strictly below it.
         assert!(HomeScreen::list_top(true) > cont_top + pt(CONT_H_PT));
         assert!(HomeScreen::list_top(false) < HomeScreen::list_top(true));
+    }
+
+    #[test]
+    fn sort_mode_cycles_and_labels() {
+        assert_eq!(SortMode::Title.next(), SortMode::Recent);
+        assert_eq!(SortMode::Recent.next(), SortMode::Reading);
+        assert_eq!(SortMode::Reading.next(), SortMode::Title);
+        for m in [SortMode::Title, SortMode::Recent, SortMode::Reading] {
+            assert!(!m.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn title_sort_lowercases_the_key() {
+        let mut s = HomeScreen::new(1236, 1648);
+        s.sort = SortMode::Title;
+        s.books = vec![
+            PathBuf::from("/x/zoo.epub"),
+            PathBuf::from("/x/Apple.epub"),
+            PathBuf::from("/x/banana.epub"),
+        ];
+        s.names = vec!["zoo.epub".into(), "Apple.epub".into(), "banana.epub".into()];
+        s.apply_sort();
+        assert_eq!(s.names, vec!["Apple.epub", "banana.epub", "zoo.epub"]);
+    }
+
+    #[test]
+    fn reading_sort_sinks_unread_and_stays_stable() {
+        // positions::all() is empty on the host: every ts is 0, so the
+        // alphabetical tiebreak is the observable behavior.
+        let mut s = HomeScreen::new(1236, 1648);
+        s.sort = SortMode::Reading;
+        s.books = vec![
+            PathBuf::from("/x/B.epub"),
+            PathBuf::from("/x/a.epub"),
+            PathBuf::from("/x/C.epub"),
+        ];
+        s.names = vec!["B.epub".into(), "a.epub".into(), "C.epub".into()];
+        s.apply_sort();
+        assert_eq!(s.names, vec!["a.epub", "B.epub", "C.epub"]);
+    }
+
+    #[test]
+    fn empty_library_tap_opens_receive_and_full_list_does_not() {
+        let mut s = HomeScreen::new(1236, 1648);
+        s.tab = 1;
+        s.books = vec![];
+        s.names = vec![];
+        // Anywhere in the content (not the nav bar, not the header band).
+        assert!(matches!(
+            s.on_gesture(Gesture::Tap { x: 600, y: 800 }),
+            Action::Push(_)
+        ));
+
+        // With books present the same tap is a dead zone: no list row, no
+        // sort band, nothing pushed.
+        s.books = vec![PathBuf::from("/x/one.epub")];
+        s.names = vec!["one.epub".into()];
+        assert!(matches!(
+            s.on_gesture(Gesture::Tap { x: 600, y: 800 }),
+            Action::Keep
+        ));
+    }
+
+    #[test]
+    fn book_at_resolves_rows_and_misses() {
+        let mut s = HomeScreen::new(1236, 1648);
+        s.cont = None;
+        s.per_page = 10;
+        s.books = vec![PathBuf::from("/x/one.epub"), PathBuf::from("/x/two.epub")];
+        s.names = vec!["one.epub".into(), "two.epub".into()];
+        let top = HomeScreen::list_top(false);
+        let row_h = pt(LIB_ROW_PT);
+        assert_eq!(s.book_at(top + 5).unwrap().1, "one.epub");
+        assert_eq!(s.book_at(top + row_h + 5).unwrap().1, "two.epub");
+        assert!(s.book_at(top - 1).is_none());
+        assert!(s.book_at(top + 2 * row_h + 5).is_none());
+    }
+
+    #[test]
+    fn footer_band_sits_above_nav_and_below_rows() {
+        const H: u32 = 1648;
+        let content_h = H as i32 - nav::bar_h_px();
+        assert!(HomeScreen::in_footer(content_h - pt(14.0), H));
+        assert!(HomeScreen::in_footer(content_h - 1, H));
+        assert!(!HomeScreen::in_footer(content_h - pt(30.0), H));
+        // The band must not reach into list territory by much: a full page
+        // of rows still ends above it.
+        let rows_top = HomeScreen::list_top(true);
+        assert!(rows_top + 20 * pt(LIB_ROW_PT) > content_h - pt(26.0));
     }
 }

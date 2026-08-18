@@ -102,7 +102,7 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
         p.rect(Rect::new(0, 0, w, bar_h), 245);
         p.hline_t(bar_h, 0, w, 1, 200);
 
-        p.text(pt(16.0), pt(24.0), 10.5, 0, "📑 Table of Contents");
+        p.text(pt(16.0), pt(24.0), 10.5, 0, "Table of Contents");
 
         // Close Button on top-right
         let close_w = pt(55.0);
@@ -111,7 +111,7 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
         let close_y = pt(8.0);
         let close_rect = Rect::new(close_x, close_y, close_w, close_h);
         p.rect_outline_t(close_rect, 1, 100);
-        p.text_center_in(close_x, close_x + close_w, close_y + pt(16.0), 8.5, 0, "✕ Close");
+        p.text_center_in(close_x, close_x + close_w, close_y + pt(16.0), 8.5, 0, "Close");
 
         if self.items.is_empty() {
             p.text_center(h / 2, 11.0, 0, "No Table of Contents available in this book");

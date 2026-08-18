@@ -2,6 +2,8 @@
 //! tap-to-dismiss message overlay. Geometry is ported verbatim from the
 //! ad-hoc ui.rs screens (pt-authored).
 
+use std::sync::atomic::{AtomicI32, Ordering};
+
 use ybdev::input::{Gesture, SwipeDir};
 
 use crate::painter::{pt, Painter};
@@ -134,6 +136,74 @@ pub struct SleepScreen {
     prev_bright: i32,
     prev_tone: i32,
     image: Option<Vec<u8>>,
+    /// Sleep-entry wall-clock timestamp + battery, for drain accounting.
+    /// Wall clock, NOT Instant: CLOCK_MONOTONIC stops during
+    /// suspend-to-RAM (a 55-minute sleep logged "after 0m"), and
+    /// suspended time is precisely what we're measuring. A post-wake NTP
+    /// jump can distort one line — an acceptable trade.
+    entered_wall: std::time::SystemTime,
+    batt_enter: u8,
+    /// Kernel suspends this session. Every wake re-suspends on the next
+    /// tick unless a real gesture arrived, so suspends-1 is the count of
+    /// wakes that were NOT the power key — the spurious-wake churn number
+    /// the battery investigation wants.
+    suspends: u32,
+}
+
+/// Pre-sleep frontlight state, stashed when SleepScreen blanks it so the
+/// emergency exit path (panic / terminating signal — paths that skip
+/// on_leave and Drop) can still restore it. -1 = not currently sleeping.
+static SAVED_FL_BRIGHT: AtomicI32 = AtomicI32::new(-1);
+static SAVED_FL_TONE: AtomicI32 = AtomicI32::new(-1);
+
+/// Last-ditch hardware restore for the panic/signal guard: undo the
+/// sleep-screen state so a dying process doesn't leave the device dark
+/// and offline. Best effort — runs on the way out, once.
+pub fn emergency_wake_restore() {
+    let bright = SAVED_FL_BRIGHT.swap(-1, Ordering::SeqCst);
+    let tone = SAVED_FL_TONE.swap(-1, Ordering::SeqCst);
+    if bright >= 0 {
+        if let Ok(fl) = ybdev::frontlight::Frontlight::open() {
+            fl.set(bright);
+            fl.tone_set(tone.max(0));
+        }
+    }
+    // Wi-Fi back to the framework default (harmless if it never went down).
+    let _ = std::process::Command::new("/sbin/ifconfig")
+        .args(&["wlan0", "up"])
+        .output();
+    let _ = std::process::Command::new("lipc-set-prop")
+        .args(&["-i", "com.lab126.cmd", "wirelessEnable", "1"])
+        .status();
+    let _ = std::process::Command::new("lipc-set-prop")
+        .args(&["-i", "com.lab126.wifid", "enable", "1"])
+        .status();
+}
+
+/// Enter kernel suspend-to-RAM. Returns when the SoC wakes (power key or
+/// a spurious source); the caller re-suspends on its next tick unless a
+/// real gesture arrived — the KOReader standby loop pattern.
+fn suspend_to_mem() {
+    let _ = std::process::Command::new("sync").status();
+    if let Ok(mut f) = std::fs::File::create("/sys/power/state") {
+        use std::io::Write;
+        let _ = f.write_all(b"mem");
+    }
+}
+
+fn batt_stats() -> String {
+    let read = |f: &str| {
+        std::fs::read_to_string(format!("/sys/class/power_supply/bd71827_bat/{}", f))
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0)
+    };
+    format!(
+        "batt={}% v={}mV i={}mA",
+        read("capacity"),
+        read("voltage_now") / 1000,
+        read("current_now") / 1000
+    )
 }
 
 impl SleepScreen {
@@ -141,6 +211,9 @@ impl SleepScreen {
         let fl = ybdev::frontlight::Frontlight::open().ok();
         let prev_bright = fl.as_ref().map(|f| f.get()).unwrap_or(0);
         let prev_tone = fl.as_ref().map(|f| f.tone_get()).unwrap_or(0);
+        // Publish for the emergency path before the light goes out.
+        SAVED_FL_BRIGHT.store(prev_bright, Ordering::SeqCst);
+        SAVED_FL_TONE.store(prev_tone, Ordering::SeqCst);
         if let Some(f) = &fl {
             f.set(0);
             f.tone_set(0);
@@ -159,11 +232,16 @@ impl SleepScreen {
 
         let image = pick_random_screensaver(1236, 1648);
 
+        let batt_enter = ybdev::sysinfo::battery().0;
+        ybdev::log::plog(&format!("sleep: enter {}", batt_stats()));
 
         SleepScreen {
             prev_bright,
             prev_tone,
             image,
+            entered_wall: std::time::SystemTime::now(),
+            batt_enter,
+            suspends: 0,
         }
     }
 }
@@ -242,8 +320,21 @@ impl Screen for SleepScreen {
     }
 
     fn tick_interval(&self) -> std::time::Duration {
-        // In standby sleep, we set tick to 24h so CPU stays in deep WFI sleep
-        std::time::Duration::from_secs(86400)
+        // Short on purpose: the first tick after the screensaver paints is
+        // what carries us into kernel suspend, and each spurious wake
+        // re-suspends on the next one.
+        std::time::Duration::from_millis(300)
+    }
+
+    fn on_tick(&mut self) -> Action {
+        // The panel has painted by now (draw ran before the first tick),
+        // so the screensaver is on glass — safe to actually sleep. The
+        // power key that wakes the SoC queues a gesture that pops this
+        // screen; anything else (spurious wake source) falls through to
+        // this tick again and re-suspends.
+        self.suspends = self.suspends.wrapping_add(1);
+        suspend_to_mem();
+        Action::Keep
     }
 
     fn on_leave(&mut self) {
@@ -252,6 +343,9 @@ impl Screen for SleepScreen {
             fl.set(self.prev_bright);
             fl.tone_set(self.prev_tone);
         }
+        // Handled cleanly: retract what the emergency path would restore.
+        SAVED_FL_BRIGHT.store(-1, Ordering::SeqCst);
+        SAVED_FL_TONE.store(-1, Ordering::SeqCst);
         // Restore Wi-Fi
         let _ = std::process::Command::new("/sbin/ifconfig")
             .args(&["wlan0", "up"])
@@ -262,6 +356,30 @@ impl Screen for SleepScreen {
         let _ = std::process::Command::new("lipc-set-prop")
             .args(&["-i", "com.lab126.wifid", "enable", "1"])
             .status();
+
+        // Drain accounting: %/h over this sleep session, plus the suspend
+        // count — one entry per wake, so suspends-1 is how many wakes were
+        // NOT the power key. (A tick can race the pop after the real wake
+        // and briefly re-suspend, so a single-digit count is noise.)
+        let mins = self
+            .entered_wall
+            .elapsed()
+            .map(|d| d.as_secs() / 60)
+            .unwrap_or(0);
+        let now = ybdev::sysinfo::battery().0;
+        let rate = if mins >= 30 {
+            format!(" (-{:.2}%/h)", (self.batt_enter.saturating_sub(now)) as f64 * 60.0 / mins as f64)
+        } else {
+            String::new()
+        };
+        ybdev::log::plog(&format!(
+            "sleep: wake {} after {}m suspends={} spurious={}{}",
+            batt_stats(),
+            mins,
+            self.suspends,
+            self.suspends.saturating_sub(1),
+            rate
+        ));
     }
 }
 
