@@ -96,6 +96,23 @@ pub fn mem_total_kib() -> Option<u64> {
     parse_kv_kb(&fs::read_to_string("/proc/meminfo").ok()?, "MemTotal")
 }
 
+/// External power present (USB cable / charger). bd71827_ac is the VBUS
+/// node on this PMIC (probed on device 2026-08-19); the battery node's
+/// own `online` is always 1 and must not be used. Falls back to the
+/// battery-status charge flag for odd cases.
+pub fn vbus() -> bool {
+    for p in ["bd71827_ac", "Wireless"] {
+        if let Ok(s) = fs::read_to_string(format!("/sys/class/power_supply/{p}/online")) {
+            match s.trim() {
+                "1" => return true,
+                "0" => return false,
+                _ => {}
+            }
+        }
+    }
+    battery().1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

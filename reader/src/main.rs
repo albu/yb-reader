@@ -2,6 +2,7 @@
 //! closures push the feature screens. All loops, refresh discipline and
 //! edge gestures live in yui::App.
 
+mod awake;
 mod books;
 mod cache;
 mod chrome;
@@ -103,11 +104,17 @@ fn main() {
             std::process::exit(1);
         }
     }
-    .with_edge_overlay(Box::new(|| Box::new(CurtainScreen::new())));
+    .with_edge_overlay(Box::new(|| Box::new(CurtainScreen::new())))
+    .with_resume(Box::new(awake::on_resume));
     let (w, h) = app.dims();
 
+    awake::spawn();
     let root = HomeScreen::new(w, h);
     app.run(Box::new(root));
+    // Release the awake hold as the last hardware call: whoever comes
+    // next (the framework on exit-42, the launcher in stock mode) must
+    // not inherit a preventScreenSaver we set.
+    wifi::keep_awake(false);
     // Takeover mode: leaving the app means "back to the stock Kindle" —
     // exit 42 is boot.sh's cue to remove the flag and start the
     // framework. In stock mode exiting returns to the library as before.

@@ -3,6 +3,7 @@
 
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::mtk::Ioctl;
 
@@ -30,6 +31,20 @@ const FL_IOCTL_GET_RANGE_MAX_AMBER_2: Ioctl = fl_ioctl(0x0b, false);
 
 pub struct Frontlight {
     f: File,
+}
+
+// Last levels WE set. powerd restores its own idea of the frontlight
+// around suspend/wake; the resume hook reapplies these so our levels
+// survive. -1 = never set in this process.
+static LAST_BRIGHT: AtomicI32 = AtomicI32::new(-1);
+static LAST_TONE: AtomicI32 = AtomicI32::new(-1);
+
+pub fn last_bright() -> i32 {
+    LAST_BRIGHT.load(Ordering::SeqCst)
+}
+
+pub fn last_tone() -> i32 {
+    LAST_TONE.load(Ordering::SeqCst)
 }
 
 // The warm channel on the PW5 (FW 5.19): the /dev/frontlight amber ioctls
@@ -80,6 +95,7 @@ impl Frontlight {
         read_i32(BL1_BRIGHTNESS).unwrap_or_else(|| self.ioctl_val(FL_IOCTL_GET_INTENSITY).unwrap_or(0))
     }
     pub fn set(&self, v: i32) {
+        LAST_BRIGHT.store(v, Ordering::SeqCst);
         if std::path::Path::new(BL1_BRIGHTNESS).exists() {
             let _ = std::fs::write(BL1_BRIGHTNESS, format!("{}\n", v));
         } else {
@@ -116,6 +132,7 @@ impl Frontlight {
         read_i32(BL0_BRIGHTNESS).unwrap_or(0)
     }
     pub fn tone_set(&self, v: i32) {
+        LAST_TONE.store(v, Ordering::SeqCst);
         let _ = std::fs::write(BL0_BRIGHTNESS, format!("{}\n", v));
     }
 }

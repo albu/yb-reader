@@ -168,15 +168,18 @@ pub fn emergency_wake_restore() {
             fl.tone_set(tone.max(0));
         }
     }
-    // Wi-Fi back to the framework default (harmless if it never went down).
+    // Wi-Fi back to the framework default (harmless if it never went
+    // down). wifid before com.lab126.cmd — the cmd property is
+    // framework-owned and never answers without one (same order as
+    // the reader's turn_on_wifi).
     let _ = std::process::Command::new("/sbin/ifconfig")
         .args(&["wlan0", "up"])
         .output();
     let _ = std::process::Command::new("lipc-set-prop")
-        .args(&["-i", "com.lab126.cmd", "wirelessEnable", "1"])
+        .args(&["-i", "com.lab126.wifid", "enable", "1"])
         .status();
     let _ = std::process::Command::new("lipc-set-prop")
-        .args(&["-i", "com.lab126.wifid", "enable", "1"])
+        .args(&["-i", "com.lab126.cmd", "wirelessEnable", "1"])
         .status();
 }
 

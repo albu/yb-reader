@@ -345,7 +345,7 @@ impl MirrorScreen {
 impl Screen for MirrorScreen {
     fn on_enter(&mut self) -> Action {
         plog("mirror start");
-        wifi::keep_awake(true);
+        crate::awake::screen_wants_awake(true);
         self.last_ping = now_ms();
         self.ping_chain = true;
         self.fetch_first_frame()
@@ -354,7 +354,7 @@ impl Screen for MirrorScreen {
     fn on_leave(&mut self) {
         self.ping_chain = false;
         self.conn = None;
-        wifi::keep_awake(false);
+        crate::awake::screen_wants_awake(false);
         plog("mirror exit");
     }
 

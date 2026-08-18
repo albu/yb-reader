@@ -21,7 +21,6 @@ use crate::selection::{self, SelState, sel_bar_rects};
 use crate::split::{RectF, ReaderSettings};
 
 use crate::render::render_page;
-use crate::wifi;
 
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
@@ -442,7 +441,10 @@ impl Screen for ReaderScreen {
     }
 
     fn on_enter(&mut self) -> Action {
-        wifi::keep_awake(true);
+        // Deliberately no keep_awake hold: input-idle suspend while
+        // reading is the approved policy (page turns reset powerd's
+        // t2; stillness means the reader put the device down). The
+        // App's resume hook makes the wake seamless.
         self.time_str = chrome::current_time_str();
         self.save_progress();
 
@@ -483,7 +485,6 @@ impl Screen for ReaderScreen {
     }
 
     fn on_leave(&mut self) {
-        wifi::keep_awake(false);
         if let Some(doc_rc) = self.doc.take() {
             if let Ok(doc) = Rc::try_unwrap(doc_rc) {
                 if let Ok(mut warm) = WARM.lock() {

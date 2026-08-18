@@ -20,6 +20,18 @@ pub struct App {
     /// yui's FrontlightScreen; apps with a richer control center — clock,
     /// battery, wifi — install their own factory here).
     overlay: Option<Box<dyn Fn() -> Box<dyn Screen>>>,
+    /// Called with the suspend duration when the loop detects a
+    /// resume-from-suspend (wall-clock gap over the poll budget).
+    resume: Option<Box<dyn Fn(std::time::Duration)>>,
+}
+
+/// A wall-clock gap this much larger than the poll budget means the SoC
+/// was suspended under the loop: the poll deadline runs on the monotonic
+/// clock, which stops in suspend-to-RAM, while wall time does not (the
+/// same property SleepScreen's drain accounting relies on). The slack
+/// absorbs scheduler jitter and small clock steps.
+pub fn gap_is_suspend(expected: std::time::Duration, wall: std::time::Duration) -> bool {
+    wall > expected + std::time::Duration::from_secs(5)
 }
 
 impl App {
@@ -32,12 +44,19 @@ impl App {
             font,
             stack: Vec::new(),
             overlay: None,
+            resume: None,
         })
     }
 
     /// Replace the edge-gesture overlay with a custom screen factory.
     pub fn with_edge_overlay(mut self, make: Box<dyn Fn() -> Box<dyn Screen>>) -> App {
         self.overlay = Some(make);
+        self
+    }
+
+    /// Install the resume-from-suspend hook (gap duration handed over).
+    pub fn with_resume(mut self, f: Box<dyn Fn(std::time::Duration)>) -> App {
+        self.resume = Some(f);
         self
     }
 
@@ -58,8 +77,28 @@ impl App {
                 .last()
                 .map(|s| s.tick_interval())
                 .unwrap_or_else(|| std::time::Duration::from_secs(1));
+            let before = std::time::SystemTime::now();
             let gesture = self.input.next_gesture(interval);
+            let wall = before.elapsed().unwrap_or_default();
+            // powerd (or the sleep screen) suspended us under the loop.
+            // Hand the app its resume hook and repaint, then still
+            // dispatch whatever input woke us — with one exception: the
+            // power press that woke the device must not immediately
+            // re-sleep it (dispatch would push the sleep screen).
+            let mut woke = false;
+            if gap_is_suspend(interval, wall)
+                && !self.stack.last().map(|s| s.is_sleep()).unwrap_or(false)
+            {
+                woke = true;
+                if let Some(f) = &self.resume {
+                    f(wall);
+                }
+                if !self.apply(Action::RedrawFull) {
+                    break;
+                }
+            }
             let action = match gesture {
+                Some(g) if woke && matches!(g, Gesture::PowerButton) => Action::Keep,
                 Some(g) => self.dispatch(g),
                 None => self
                     .stack
@@ -191,8 +230,22 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::Duration;
 
     use crate::painter::Rect;
+
+    #[test]
+    fn gap_detection_boundaries() {
+        let e = Duration::from_secs(20);
+        // Normal poll: no.
+        assert!(!gap_is_suspend(e, Duration::from_secs(2)));
+        // Exactly at the slack boundary: no (strictly greater only).
+        assert!(!gap_is_suspend(e, e + Duration::from_secs(5)));
+        // Just past it: yes.
+        assert!(gap_is_suspend(e, e + Duration::from_secs(6)));
+        // A suspend-scale gap: yes.
+        assert!(gap_is_suspend(e, Duration::from_secs(900)));
+    }
 
     /// Screen that records its lifecycle calls into a shared log and never
     /// draws (there is no buffer here — draw is exercised by the Painter

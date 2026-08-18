@@ -467,13 +467,13 @@ impl Screen for ReceiveScreen {
     }
 
     fn on_enter(&mut self) -> Action {
-        wifi::keep_awake(true);
+        crate::awake::screen_wants_awake(true);
         self.start_setup();
         Action::RedrawFull
     }
 
     fn on_leave(&mut self) {
-        wifi::keep_awake(false);
+        crate::awake::screen_wants_awake(false);
         self.stop.store(true, Ordering::Relaxed);
         if let Some(s) = &mut self.server {
             s.shutdown();
