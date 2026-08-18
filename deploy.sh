@@ -55,12 +55,19 @@ ssh_deploy() {
 
     # TERM first so the in-app guard restores frontlight/wifi/firewall on
     # the way out; -9 one second later for anything that ignored it.
-    # Reset the crash counter (a deploy is not a crash) and relaunch:
-    # via the takeover job when the framework is disabled (start.sh's
-    # lipc calls need a live cvm), via start.sh otherwise.
+    # Reset the crash counter (a deploy is not a crash) and relaunch the
+    # way this session was launched: via the takeover job when the job is
+    # running, via start.sh for a stock session. The yb-reader JOB state
+    # is the truth, not the flag — the curtain card can arm the flag from
+    # a stock session, and boot.sh there would race start.sh's unfreeze
+    # of cvm (and a second reader).
     $SSHC "$HOST" "mv -f $DST.new $DST && chmod +x $DST && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails; killall reader 2>/dev/null || true; sleep 1; killall -9 reader 2>/dev/null || true"
     sleep 1
-    $SSHC "$HOST" "if [ -e /mnt/us/DONT_START_FRAMEWORK ]; then initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1; else nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 & fi"
+    if $SSHC "$HOST" "initctl status yb-reader 2>/dev/null | grep -q 'start/running'" 2>/dev/null; then
+        $SSHC "$HOST" "initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1"
+    else
+        $SSHC "$HOST" "nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 &"
+    fi
     # Post-verification: the deploy is not done when the bytes land, it is
     # done when the new binary is the one running (rc=0 TERM exits are
     # "normal" to the job, so nothing else guarantees the relaunch).

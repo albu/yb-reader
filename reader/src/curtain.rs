@@ -7,6 +7,7 @@ use std::process::Command;
 
 use ybdev::frontlight::Frontlight;
 use ybdev::input::{Gesture, SwipeDir};
+use ybdev::log::plog;
 use ybdev::sysinfo;
 
 use yui::painter::{pt, Painter, Rect};
@@ -320,9 +321,9 @@ impl Screen for CurtainScreen {
         // Exit-to-Kindle, with no ssh involved.
         let os_boot = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists();
         let (boot_val, boot_sub) = if os_boot {
-            ("yb OS", "Tap: next boot Stock")
+            ("yb OS", "Tap: switch to Stock")
         } else {
-            ("Stock", "Tap: next boot yb OS")
+            ("Stock", "Tap: switch to yb OS")
         };
         let r_boot = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
         CurtainScreen::draw_card(p, r_boot, "BOOT MODE", boot_val, boot_sub);
@@ -391,27 +392,23 @@ impl Screen for CurtainScreen {
         ];
         CurtainScreen::draw_pills(p, pt(REFRESH_PRESET_PT), w, &refresh_presets, cur_interval as f32);
 
-        // 7. Bottom Action Pills: [ Sleep Screen ] [ Full Refresh ] [ Close ]
+        // 7. Bottom Action Pills: [ Sleep ] [ Refresh ] [ Reboot ] [ Close ]
         let act_y = pt(ACTIONS_TOP_PT);
-        let act_w = (w - 2 * pad - 2 * pt(CARD_GAP_PT)) / 3;
+        let act_w = (w - 2 * pad - 3 * pt(CARD_GAP_PT)) / 4;
         let act_h = pt(ACTION_H_PT);
 
-        // Sleep Button
-        let sleep_rect = Rect::new(pad, act_y, act_w, act_h);
-        p.rect(sleep_rect, PILL_BG);
-        p.rect_outline_t(sleep_rect, 1, CARD_BORDER);
-        draw_box_text(p, sleep_rect, 8.0, INK, "Sleep Screen");
-
-        // Refresh Button
-        let ref_rect = Rect::new(pad + act_w + pt(CARD_GAP_PT), act_y, act_w, act_h);
-        p.rect(ref_rect, PILL_BG);
-        p.rect_outline_t(ref_rect, 1, CARD_BORDER);
-        draw_box_text(p, ref_rect, 8.0, INK, "Full Refresh");
-
-        // Close Button
-        let close_rect = Rect::new(pad + 2 * (act_w + pt(CARD_GAP_PT)), act_y, act_w, act_h);
-        p.rect(close_rect, PILL_ACTIVE_BG);
-        draw_box_text(p, close_rect, 8.0, 255, "Close");
+        let labels = ["Sleep", "Refresh", "Reboot", "Close"];
+        for (i, label) in labels.iter().enumerate() {
+            let r = Rect::new(pad + i as i32 * (act_w + pt(CARD_GAP_PT)), act_y, act_w, act_h);
+            if *label == "Close" {
+                p.rect(r, PILL_ACTIVE_BG);
+                draw_box_text(p, r, 8.0, 255, label);
+            } else {
+                p.rect(r, PILL_BG);
+                p.rect_outline_t(r, 1, CARD_BORDER);
+                draw_box_text(p, r, 8.0, INK, label);
+            }
+        }
     }
 
 
@@ -466,9 +463,11 @@ impl Screen for CurtainScreen {
                     return Action::Redraw;
                 }
 
-                // Boot mode toggle: flips the takeover flag. Reboot applies
-                // it (hot-switching from a scriptlet session would race a
-                // second reader instance — start.sh's lock exists for that).
+                // Boot mode toggle: flips the takeover flag for the next
+                // boot only. Applying it is the Reboot pill below (or any
+                // power-cycle) — a hot-switch from a live session would
+                // race a second reader instance (start.sh's lock exists
+                // for that).
                 let r_boot = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
                 if r_boot.contains(x, y) {
                     let flag = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK");
@@ -579,20 +578,58 @@ impl Screen for CurtainScreen {
 
 
 
-                // 6. Bottom Action Buttons: [ Sleep ] [ Refresh ] [ Close ]
+                // 6. Bottom Action Buttons: [ Sleep ] [ Refresh ] [ Reboot ] [ Close ]
                 let act_y = pt(ACTIONS_TOP_PT);
                 let act_h = pt(ACTION_H_PT);
-                let act_w = (w - 2 * pad - 2 * pt(CARD_GAP_PT)) / 3;
-                if y >= act_y - 6 && y < act_y + act_h + 6 {
-                    if x >= pad && x < pad + act_w {
-                        // Sleep Screen
-                        return Action::Push(Box::new(yui::widgets::SleepScreen::new()));
-                    } else if x >= pad + act_w && x < pad + 2 * act_w + pt(CARD_GAP_PT) {
-                        // Full Screen Refresh
-                        return Action::RedrawFull;
-                    } else if x >= pad + 2 * act_w {
-                        // Close
-                        return Action::Pop;
+                let act_w = (w - 2 * pad - 3 * pt(CARD_GAP_PT)) / 4;
+                if y >= act_y - 6 && y < act_y + act_h + 6 && x >= pad {
+                    // Gap taps round to the next pill right — 5 pt gaps,
+                    // not worth letterboxing.
+                    let idx = ((x - pad) / (act_w + pt(CARD_GAP_PT))) as usize;
+                    match idx {
+                        0 => {
+                            return Action::Push(Box::new(yui::widgets::SleepScreen::new()));
+                        }
+                        1 => {
+                            // Full Screen Refresh
+                            return Action::RedrawFull;
+                        }
+                        2 => {
+                            // Reboot, in whatever mode is armed. Plain
+                            // `reboot` rides the same init cascade as a
+                            // long-press power (TERM -> reader guard
+                            // restores frontlight/wifi/firewall) — no
+                            // teardown of our own needed.
+                            let next = if std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists() {
+                                "yb OS"
+                            } else {
+                                "Stock Kindle"
+                            };
+                            return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                                "Reboot now?",
+                                &format!("Next boot: {}.", next),
+                                "Reboot",
+                                None,
+                                move |act| {
+                                    if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
+                                        plog("curtain: reboot requested");
+                                        let spawned = std::process::Command::new("reboot")
+                                            .spawn()
+                                            .or_else(|_| {
+                                                std::process::Command::new("/sbin/reboot").spawn()
+                                            });
+                                        if spawned.is_err() {
+                                            plog("curtain: reboot command failed");
+                                        }
+                                    }
+                                    Action::Pop
+                                },
+                            )));
+                        }
+                        _ => {
+                            // Close
+                            return Action::Pop;
+                        }
                     }
                 }
 
