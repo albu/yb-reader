@@ -37,10 +37,14 @@ ssh_deploy() {
     cargo zigbuild --target "$TARGET" --release
     BIN="$ROOT/target/$TARGET/release/yb-reader"
     DST=/mnt/us/extensions/reader/bin/reader
+    # The device suspends on an input-idle timer even mid-conversation;
+    # a bare ssh then hangs to its 60s+ timeout and (set -e) can eat the
+    # rest of the deploy silently. Every remote call gets a timeout.
+    SSHC="ssh -o ConnectTimeout=10"
 
-    scp -q "$BIN" "$HOST:$DST.new"
+    scp -o ConnectTimeout=10 -q "$BIN" "$HOST:$DST.new"
     s=$(shasum -a 256 "$BIN" | awk '{print $1}')
-    d=$(ssh "$HOST" "sha256sum $DST.new" | awk '{print $1}')
+    d=$($SSHC "$HOST" "sha256sum $DST.new" | awk '{print $1}')
     if [ "$s" != "$d" ]; then
         echo "ERROR: hash mismatch after scp: $HOST:$DST.new" >&2
         echo "  expected $s" >&2
@@ -54,10 +58,26 @@ ssh_deploy() {
     # Reset the crash counter (a deploy is not a crash) and relaunch:
     # via the takeover job when the framework is disabled (start.sh's
     # lipc calls need a live cvm), via start.sh otherwise.
-    ssh "$HOST" "mv -f $DST.new $DST && chmod +x $DST && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails; killall reader 2>/dev/null || true; sleep 1; killall -9 reader 2>/dev/null || true"
+    $SSHC "$HOST" "mv -f $DST.new $DST && chmod +x $DST && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails; killall reader 2>/dev/null || true; sleep 1; killall -9 reader 2>/dev/null || true"
     sleep 1
-    ssh "$HOST" "if [ -e /mnt/us/DONT_START_FRAMEWORK ]; then initctl restart yb-reader </dev/null >/dev/null 2>&1; else nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 & fi"
-    echo "SSH deploy -> $HOST:$DST (+ kpm package copy, reader relaunched)"
+    $SSHC "$HOST" "if [ -e /mnt/us/DONT_START_FRAMEWORK ]; then initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1; else nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 & fi"
+    # Post-verification: the deploy is not done when the bytes land, it is
+    # done when the new binary is the one running (rc=0 TERM exits are
+    # "normal" to the job, so nothing else guarantees the relaunch).
+    ok=""
+    for i in 1 2 3 4 5 6; do
+        if $SSHC "$HOST" "pidof reader >/dev/null && ! ls -l /proc/\$(pidof reader | awk '{print \$1}')/exe 2>/dev/null | grep -q deleted" 2>/dev/null; then
+            ok=1; break
+        fi
+        sleep 3
+    done
+    if [ -n "$ok" ]; then
+        echo "SSH deploy -> $HOST:$DST (+ kpm package copy, reader running new build)"
+    else
+        echo "WARNING: binary deployed but reader not running — check:" >&2
+        $SSHC "$HOST" "initctl status yb-reader; tail -3 /var/local/yb-boot.log" >&2 || true
+        exit 1
+    fi
 }
 
 if [ "$1" = "probe" ]; then

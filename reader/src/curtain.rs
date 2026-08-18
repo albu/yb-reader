@@ -313,11 +313,22 @@ impl Screen for CurtainScreen {
         }
         p.text(r_ssh.x + r_ssh.w - pt(16.0), r_ssh.y + pt(12.0), 7.5, INK, ">_");
 
-        let storage_free = sysinfo::storage_free_gb()
-            .map(|gb| format!("{:.1} GB", gb))
-            .unwrap_or_else(|| "—".to_string());
-        let r_store = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
-        CurtainScreen::draw_card(p, r_store, "STORAGE", &storage_free, "Free Space");
+        // Card slot formerly showed free storage (nice-to-know, no action);
+        // BOOT MODE took it — control beats telemetry here. Which UI owns
+        // the next reboot: the flag is Amazon's own framework.conf check,
+        // and this is the on-device way back into takeover after
+        // Exit-to-Kindle, with no ssh involved.
+        let os_boot = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists();
+        let (boot_val, boot_sub) = if os_boot {
+            ("yb OS", "Tap: next boot Stock")
+        } else {
+            ("Stock", "Tap: next boot yb OS")
+        };
+        let r_boot = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
+        CurtainScreen::draw_card(p, r_boot, "BOOT MODE", boot_val, boot_sub);
+        if os_boot {
+            p.rect_outline_t(r_boot, 2, INK);
+        }
 
 
         // 4. Frontlight Controls
@@ -451,6 +462,20 @@ impl Screen for CurtainScreen {
                         ybdev::ssh::disable();
                     } else {
                         ybdev::ssh::enable();
+                    }
+                    return Action::Redraw;
+                }
+
+                // Boot mode toggle: flips the takeover flag. Reboot applies
+                // it (hot-switching from a scriptlet session would race a
+                // second reader instance — start.sh's lock exists for that).
+                let r_boot = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
+                if r_boot.contains(x, y) {
+                    let flag = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK");
+                    if flag.exists() {
+                        let _ = std::fs::remove_file(flag);
+                    } else {
+                        let _ = std::fs::File::create(flag);
                     }
                     return Action::Redraw;
                 }
