@@ -1487,11 +1487,24 @@ impl Screen for ReaderScreen {
                         }
                     }
 
-                    if let Some(db) = &self.vocab_db {
-                        if let Some(entry) = db.lookup(&word_text) {
-                            return self.open_word_dialog(entry);
-                        }
+                    let found = self
+                        .vocab_db
+                        .as_ref()
+                        .and_then(|db| db.lookup(&word_text));
+                    if let Some(entry) = found {
+                        return self.open_word_dialog(entry);
                     }
+                    // Not in the dictionary: say so — a silent no-op on a
+                    // deliberate long-press reads as broken, not as "no
+                    // entry". Same bottom-card form as the word dialog.
+                    let bg = self.page_gray.clone();
+                    return Action::Push(Box::new(crate::footnote_dialog::FootnoteDialog::new(
+                        "Dictionary",
+                        &format!("«{}» — no entry in the dictionary", word_text),
+                        None,
+                        bg,
+                        |_act| Action::Pop,
+                    )));
                 }
                 Action::Keep
             }

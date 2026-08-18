@@ -153,11 +153,18 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                 let contrast = it.next().map(str_to_contrast).unwrap_or_default();
                 let white_cut = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let invert = it.next().map(|s| s == "1").unwrap_or(false);
+                // Appended last so pre-margin-field lines (and out-of-range
+                // garbage) fall back to the old hardcoded default.
+                let margin_pad = it
+                    .next()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|m| (16..=216).contains(m))
+                    .unwrap_or(72);
 
                 settings = Some(ReaderSettings {
                     split,
                     font_size,
-                    margin_pad: 72,
+                    margin_pad,
                     contrast,
                     white_cutoff: white_cut,
                     invert,
@@ -194,7 +201,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
             if let Some(s) = p.settings {
                 let sc = s.split;
                 format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}",
                     k,
                     p.page,
                     p.total,
@@ -210,7 +217,8 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
                     s.font_size,
                     contrast_to_str(s.contrast),
                     s.white_cutoff,
-                    if s.invert { "1" } else { "0" }
+                    if s.invert { "1" } else { "0" },
+                    s.margin_pad
                 )
             } else {
                 format!("{}\t{}\t{}\t{}", k, p.page, p.total, p.ts)
@@ -314,6 +322,7 @@ mod tests {
         settings.font_size = 13.5;
         settings.contrast = ContrastMode::BoldText;
         settings.invert = true;
+        settings.margin_pad = 108;
 
         let mut map = HashMap::new();
         map.insert(
@@ -337,6 +346,24 @@ mod tests {
         assert_eq!(s.font_size, 13.5);
         assert_eq!(s.contrast, ContrastMode::BoldText);
         assert!(s.invert);
+        // margin_pad survives the store (it was silently reset to 72).
+        assert_eq!(s.margin_pad, 108);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn margin_field_defaults_on_old_lines_and_garbage() {
+        // 16-field line from before margin_pad existed: falls back to 72.
+        let old = "b.pdf\t3\t9\t1700000000\t1\th2\t270\t0.1000\t0.1000\t0.1000\t0.1000\t0.1000\t12.0\tnorm\t0\t0\n";
+        let map = parse(old);
+        assert_eq!(map["b.pdf"].settings.unwrap().margin_pad, 72);
+        // Same line with a garbage 17th field: still 72, not a parse failure.
+        let bad = "c.pdf\t3\t9\t1700000000\t1\th2\t270\t0.1000\t0.1000\t0.1000\t0.1000\t0.1000\t12.0\tnorm\t0\t0\txx\n";
+        let map = parse(bad);
+        assert_eq!(map["c.pdf"].settings.unwrap().margin_pad, 72);
+        // And a real value round-trips through parse.
+        let good = "d.pdf\t3\t9\t1700000000\t1\th2\t270\t0.1000\t0.1000\t0.1000\t0.1000\t0.1000\t12.0\tnorm\t0\t0\t36\n";
+        let map = parse(good);
+        assert_eq!(map["d.pdf"].settings.unwrap().margin_pad, 36);
     }
 }

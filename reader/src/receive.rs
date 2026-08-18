@@ -108,11 +108,27 @@ impl ReceiveServer {
                     // One connection at a time: this is a single-user drop
                     // zone, and sequential handling bounds RAM on a device
                     // with ~150 MB free.
-                    Ok((stream, _)) => handle_conn(stream, &last_t, &recv_t),
+                    Ok((mut stream, _)) => {
+                        // accept() inherits the listener's O_NONBLOCK on
+                        // Linux: without this, a read that races the
+                        // client's first packet returns WouldBlock, which
+                        // the header loop treats as a dead client — the
+                        // connection is closed with no response. That was
+                        // the host-test flake, and it drops real uploads
+                        // whenever Wi-Fi latency lets accept() beat the
+                        // request bytes.
+                        let _ = stream.set_nonblocking(false);
+                        handle_conn(stream, &last_t, &recv_t);
+                    }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(200));
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        // A dead listener with no trace is undebuggable on a
+                        // headless device — leave the reason in the log.
+                        plog(&format!("receive: accept failed, listener stopping: {}", e));
+                        break;
+                    }
                 }
             }
             plog("receive: listener stopped");
@@ -647,6 +663,21 @@ mod tests {
         c.read_to_end(&mut resp).unwrap();
         assert!(resp.starts_with(b"HTTP/1.1 200"));
         assert!(resp.windows(9).any(|w| w == b"text/html"));
+
+        // Regression for the O_NONBLOCK race: a client that connects and
+        // only sends its request a beat later must NOT be treated as dead.
+        // Before the set_nonblocking(false) fix, the server's first read
+        // returned WouldBlock and closed the connection with no response.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        c.write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(
+            resp.starts_with(b"HTTP/1.1 200"),
+            "delayed-request client was dropped: {}",
+            String::from_utf8_lossy(&resp)
+        );
 
         let (n, last) = srv.status();
         assert_eq!(n, 2);
