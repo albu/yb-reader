@@ -162,11 +162,12 @@ KPPMainApp, webreader, kfxreader (keyed on `framework_ready` /
 home vertical swipes confirm, then the reader exits 42 → boot.sh removes
 the flag, CONTs the frozen GUI, and starts the framework. Reboot brings
 takeover back — the flag survives use; only exit-42 or the crash
-fallback remove it. The curtain's **BOOT MODE card** flips the next-boot
-target, and the curtain's **Reboot pill** power-cycles in whichever mode
-is armed (plain `reboot` — the same init cascade as a long-press power,
-so the reader's signal guard still restores frontlight/wifi/firewall).
-No computer, no ssh, no button gymnastics in either direction.
+fallback remove it. The **System screen** (home row, gear icon) holds
+the BOOT MODE card (flips the next-boot target) and the Reboot card
+(power-cycles in whichever mode is armed; plain `reboot` — the same init
+cascade as a long-press power, so the reader's signal guard still
+restores frontlight/wifi/firewall). No computer, no ssh, no button
+gymnastics in either direction.
 
 Deploy in takeover mode works unchanged — `./deploy.sh` resets the
 counter, kills the reader, and relaunches via `initctl restart

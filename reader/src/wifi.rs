@@ -28,8 +28,14 @@ pub fn is_wifi_on() -> bool {
 }
 
 pub fn turn_on_wifi() {
-    // wifid FIRST: com.lab126.cmd is framework-owned and never answers
-    // in takeover mode, so leading with it could eat the whole toggle.
+    // The interface must be administratively up before wifid can
+    // associate: the off path (and a suspend) can leave wlan0 down, and
+    // `wifid enable 1` alone never raises it — the curtain tile turned
+    // Wi-Fi off fine and then could never turn it back on (2026-08-19).
+    // Mirrors guard's emergency_wake_restore, the proven wake path.
+    // wifid before com.lab126.cmd: cmd is framework-owned and never
+    // answers in takeover mode.
+    let _ = Command::new("/sbin/ifconfig").args(["wlan0", "up"]).status();
     let _ = Command::new("lipc-set-prop")
         .args(["-i", "com.lab126.wifid", "enable", "1"])
         .status();

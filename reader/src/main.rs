@@ -25,6 +25,7 @@ mod scrubber_dialog;
 mod selection;
 mod settings_dialog;
 mod split;
+mod system;
 mod toc_dialog;
 mod vocab;
 mod wifi;

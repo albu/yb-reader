@@ -1,13 +1,18 @@
-//! The top curtain — a full-screen control-center sheet: big clock +
-//! date, status rows (battery / wifi / ssh / storage), brightness +
-//! tone sliders. Opened by the top-edge swipe / two-finger tap from
-//! anywhere (the App edge overlay).
+//! The top curtain — the daily control sheet: big clock + date, the
+//! 2x2 status grid (battery / wifi / ssh / memory), and two bare
+//! frontlight sliders. Opened by the top-edge swipe / two-finger tap
+//! from anywhere (the App edge overlay).
+//!
+//! Everything not daily (boot mode, reboot, refresh cadence, trivia)
+//! moved to the System screen (home row) — this sheet stays one screen
+//! tall. Visually it floats: the first paint snapshots the screen it
+//! was opened over, and the sheet is drawn over a scanline-dimmed copy
+//! of it (the same language the dialogs speak).
 
 use std::process::Command;
 
 use ybdev::frontlight::Frontlight;
 use ybdev::input::{Gesture, SwipeDir};
-use ybdev::log::plog;
 use ybdev::sysinfo;
 
 use yui::painter::{pt, Painter, Rect};
@@ -25,28 +30,21 @@ const CARD_H_PT: f32 = 30.0;
 const CARD_GAP_PT: f32 = 5.0;
 const PAD_PT: f32 = 18.0;
 
-const BRIGHT_TITLE_PT: f32 = 138.0;
-const BRIGHT_BAR_PT: f32 = 150.0;
-const BRIGHT_PRESET_PT: f32 = 178.0;
+const BRIGHT_ROW_PT: f32 = 146.0;
+const TONE_ROW_PT: f32 = 176.0;
+const ROW_CY_OFF_PT: f32 = 11.0;
+const SLIDER_X_OFF_PT: f32 = 52.0;
+const KNOB_R_PX: i32 = 5;
 
-const TONE_TITLE_PT: f32 = 204.0;
-const TONE_BAR_PT: f32 = 216.0;
-const TONE_PRESET_PT: f32 = 244.0;
-
-const REFRESH_TITLE_PT: f32 = 270.0;
-const REFRESH_PRESET_PT: f32 = 284.0;
-
-const ACTIONS_TOP_PT: f32 = 314.0;
+const ACTIONS_TOP_PT: f32 = 210.0;
 const ACTION_H_PT: f32 = 28.0;
 
-const BAR_H_PT: f32 = 20.0;
-const BTN_SZ_PT: f32 = 20.0;
-
+const SHEET_H_PT: f32 = 252.0;
 
 // --- grays on white ---
 const DIM: u8 = 110;
 const INK: u8 = 0;
-const TRACK: u8 = 230;
+const TRACK: u8 = 210;
 const CARD_BG: u8 = 246;
 const CARD_BORDER: u8 = 200;
 const PILL_BG: u8 = 242;
@@ -56,16 +54,14 @@ pub struct CurtainScreen {
     fl: Option<Frontlight>,
     time: String,
     date: String,
+    // The screen underneath, captured on first paint (the buffer still
+    // holds it then) — the sheet floats over a dimmed copy.
+    bg: Option<Vec<u8>>,
     // Cached layout geometry in visual px
     w: i32,
     h: i32,
-    bright_track_x0: i32,
-    bright_track_x1: i32,
-    bright_bar_y: i32,
-    tone_track_x0: i32,
-    tone_track_x1: i32,
-    tone_bar_y: i32,
-    bar_h: i32,
+    track_x0: i32,
+    track_x1: i32,
 }
 
 fn draw_box_text(p: &mut Painter, r: Rect, size_pt: f32, color: u8, text: &str) {
@@ -94,15 +90,11 @@ impl CurtainScreen {
             fl: None,
             time,
             date,
+            bg: None,
             w: 1236,
             h: 1648,
-            bright_track_x0: 0,
-            bright_track_x1: 0,
-            bright_bar_y: 0,
-            tone_track_x0: 0,
-            tone_track_x1: 0,
-            tone_bar_y: 0,
-            bar_h: 0,
+            track_x0: 0,
+            track_x1: 0,
         }
     }
 
@@ -116,27 +108,25 @@ impl CurtainScreen {
         }
     }
 
-    fn draw_stepper_slider(
+    /// One bare slider line: icon, percentage, thin track with a knob.
+    /// Tap or drag anywhere on the row's band — no +/- buttons, no
+    /// presets (compact by request; the knob is the only chrome).
+    fn draw_line_slider(
         &self,
         p: &mut Painter,
-        title_y: i32,
-        title: &str,
-        is_amber: bool,
-        bar_y: i32,
-        track_x0: i32,
-        track_x1: i32,
+        row_y: i32,
+        amber: bool,
         frac: f32,
-        percent: i32,
+        pct: i32,
     ) {
         let pad = pt(PAD_PT);
-        let btn_w = pt(BTN_SZ_PT);
-        let bar_h = self.bar_h;
+        let cy = row_y + pt(ROW_CY_OFF_PT);
 
-        // Title row with icon
+        // Icon
         let icon_r = pt(3.0);
         let icon_cx = pad + icon_r + pt(1.0);
-        let icon_cy = title_y - pt(3.0);
-        if is_amber {
+        let icon_cy = cy - pt(2.0);
+        if amber {
             // Warm Amber double ring
             p.circle_fill(icon_cx, icon_cy, icon_r, 60);
             p.circle_outline_t(icon_cx, icon_cy, icon_r + pt(1.5), 1, 140);
@@ -145,55 +135,19 @@ impl CurtainScreen {
             draw_sun_icon(p, icon_cx, icon_cy, icon_r, INK);
         }
 
-        p.text(pad + pt(12.0), title_y, 8.0, INK, title);
-        let percent_str = format!("{}%", percent);
-        p.text_right(self.w - pad, title_y, 8.0, DIM, &percent_str);
+        // Percentage
+        p.text(pad + pt(16.0), cy + pt(3.0), 9.0, INK, &format!("{pct}%"));
 
-        // Minus Button [-]
-        let minus_rect = Rect::new(pad, bar_y, btn_w, bar_h);
-        p.rect(minus_rect, PILL_BG);
-        p.rect_outline_t(minus_rect, 1, CARD_BORDER);
-        draw_box_text(p, minus_rect, 11.0, INK, "−");
-
-        // Slider Track
-        let track_rect = Rect::new(track_x0, bar_y, track_x1 - track_x0, bar_h);
-        p.rect(track_rect, TRACK);
-        p.rect_outline_t(track_rect, 1, CARD_BORDER);
-
-        let fill_w = ((track_x1 - track_x0) as f32 * frac.clamp(0.0, 1.0)).round() as i32;
-        if fill_w > 0 {
-            p.rect(Rect::new(track_x0, bar_y, fill_w, bar_h), INK);
+        // Track + fill + knob
+        let (x0, x1) = (self.track_x0, self.track_x1);
+        p.rect(Rect::new(x0, cy - 1, x1 - x0, 2), TRACK);
+        let fill = ((x1 - x0) as f32 * frac.clamp(0.0, 1.0)).round() as i32;
+        if fill > 0 {
+            p.rect(Rect::new(x0, cy - 1, fill, 2), INK);
         }
-
-        // Plus Button [+]
-        let plus_rect = Rect::new(self.w - pad - btn_w, bar_y, btn_w, bar_h);
-        p.rect(plus_rect, PILL_BG);
-        p.rect_outline_t(plus_rect, 1, CARD_BORDER);
-        draw_box_text(p, plus_rect, 11.0, INK, "+");
-    }
-
-    fn draw_pills(p: &mut Painter, y: i32, w: i32, presets: &[(&str, f32)], cur_frac: f32) {
-        let pad = pt(PAD_PT);
-        let gap = pt(5.0);
-        let total_w = w - 2 * pad;
-        let n = presets.len() as i32;
-        let pill_w = (total_w - (n - 1) * gap) / n;
-        let pill_h = pt(16.0);
-
-        for (i, (label, target_frac)) in presets.iter().enumerate() {
-            let px = pad + i as i32 * (pill_w + gap);
-            let r = Rect::new(px, y, pill_w, pill_h);
-            let is_active = (cur_frac - target_frac).abs() < 0.08;
-
-            if is_active {
-                p.rect(r, PILL_ACTIVE_BG);
-                draw_box_text(p, r, 7.0, 255, label);
-            } else {
-                p.rect(r, PILL_BG);
-                p.rect_outline_t(r, 1, CARD_BORDER);
-                draw_box_text(p, r, 7.0, INK, label);
-            }
-        }
+        let kx = (x0 + fill).clamp(x0, x1);
+        p.circle_fill(kx, cy, KNOB_R_PX, INK);
+        p.circle_fill(kx, cy, 2, 255);
     }
 }
 
@@ -234,6 +188,19 @@ fn draw_wifi_bars(p: &mut Painter, x: i32, y: i32, online: bool) {
     }
 }
 
+fn draw_mem_icon(p: &mut Painter, x: i32, y: i32) {
+    // Memory chip: outline + inner die + three pins top and bottom
+    let w = pt(10.0);
+    let h = pt(8.0);
+    p.rect_outline_t(Rect::new(x, y, w, h), 1, INK);
+    p.rect_outline_t(Rect::new(x + pt(2.5), y + pt(2.5), w - pt(5.0), h - pt(5.0)), 1, INK);
+    for i in 0..3 {
+        let px = x + pt(1.5) + i as i32 * pt(3.5);
+        p.rect(Rect::new(px, y - pt(1.5), 1, pt(1.5)), INK);
+        p.rect(Rect::new(px, y + h, 1, pt(1.5)), INK);
+    }
+}
+
 
 impl Default for CurtainScreen {
     fn default() -> Self {
@@ -244,27 +211,34 @@ impl Default for CurtainScreen {
 impl Screen for CurtainScreen {
     fn on_enter(&mut self) -> Action {
         self.fl = Frontlight::open().ok();
-        Action::Redraw
+        Action::RedrawFull
     }
 
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
         self.w = w;
         self.h = h;
-        p.clear(255);
+        self.track_x0 = pt(PAD_PT) + pt(SLIDER_X_OFF_PT);
+        self.track_x1 = w - pt(PAD_PT);
+
+        // The live screen underneath, dimmed by scanlines — the popup
+        // pattern the dialogs use, so the reader stays visibly in place.
+        if self.bg.is_none() {
+            self.bg = Some(p.snapshot());
+        }
+        if let Some(bg) = &self.bg {
+            p.blit_gray(0, 0, w, h, bg, w as usize);
+        }
+        for y in (0..h).step_by(3) {
+            p.hline_t(y, 0, w, 1, 235);
+        }
+
+        // The sheet itself
+        let sheet_h = pt(SHEET_H_PT);
+        p.rect(Rect::new(0, 0, w, sheet_h), 255);
+        p.hline_t(sheet_h, 0, w, 2, INK);
 
         let pad = pt(PAD_PT);
-        let btn_sz = pt(BTN_SZ_PT);
-        let gap = pt(10.0);
-
-        self.bar_h = pt(BAR_H_PT);
-        self.bright_track_x0 = pad + btn_sz + gap;
-        self.bright_track_x1 = w - pad - btn_sz - gap;
-        self.bright_bar_y = pt(BRIGHT_BAR_PT);
-
-        self.tone_track_x0 = pad + btn_sz + gap;
-        self.tone_track_x1 = w - pad - btn_sz - gap;
-        self.tone_bar_y = pt(TONE_BAR_PT);
 
         // 1. Top Sheet Handle Bar
         let handle_w = pt(36.0);
@@ -277,7 +251,7 @@ impl Screen for CurtainScreen {
             p.text_center(pt(DATE_BASE_PT), DATE_SIZE_PT, DIM, &self.date);
         }
 
-        // 3. Status Cards Grid (2x2)
+        // 3. Status Cards Grid (2x2): POWER | NETWORK, SSH | MEMORY
         let card_w = (w - 2 * pad - pt(CARD_GAP_PT)) / 2;
         let card_h = pt(CARD_H_PT);
         let row1_y = pt(CARD_TOP_PT);
@@ -290,12 +264,11 @@ impl Screen for CurtainScreen {
         CurtainScreen::draw_card(p, r_bat, "POWER", &bat_val, bat_sub);
         draw_battery_icon(p, r_bat.x + r_bat.w - pt(18.0), r_bat.y + pt(6.0), cap as i32, plugged);
 
-
         let ip = sysinfo::wifi_ip();
         let (wifi_val, wifi_sub, is_online) = if let Some(ip_str) = ip {
             ("Online", ip_str, true)
         } else {
-            ("Offline", "Wi-Fi Disconnected".to_string(), false)
+            ("Offline", "Tap: turn on".to_string(), false)
         };
         let r_net = Rect::new(pad + card_w + pt(CARD_GAP_PT), row1_y, card_w, card_h);
         CurtainScreen::draw_card(p, r_net, "NETWORK", wifi_val, &wifi_sub);
@@ -314,90 +287,26 @@ impl Screen for CurtainScreen {
         }
         p.text(r_ssh.x + r_ssh.w - pt(16.0), r_ssh.y + pt(12.0), 7.5, INK, ">_");
 
-        // Card slot formerly showed free storage (nice-to-know, no action);
-        // BOOT MODE took it — control beats telemetry here. Which UI owns
-        // the next reboot: the flag is Amazon's own framework.conf check,
-        // and this is the on-device way back into takeover after
-        // Exit-to-Kindle, with no ssh involved.
-        let os_boot = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists();
-        let (boot_val, boot_sub) = if os_boot {
-            ("yb OS", "Tap: switch to Stock")
-        } else {
-            ("Stock", "Tap: switch to yb OS")
-        };
-        let r_boot = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
-        CurtainScreen::draw_card(p, r_boot, "BOOT MODE", boot_val, boot_sub);
-        if os_boot {
-            p.rect_outline_t(r_boot, 2, INK);
-        }
+        // The fourth status: device-level RAM headroom (takeover freed
+        // ~200 MB of it — nice to watch it go to page cache instead).
+        let mem_val = sysinfo::mem_available_kib()
+            .map(|k| format!("{:.0}M", k as f64 / 1024.0))
+            .unwrap_or_else(|| "—".to_string());
+        let mem_sub = sysinfo::mem_total_kib()
+            .map(|k| format!("free of {:.0}M", k as f64 / 1024.0))
+            .unwrap_or_else(|| "free".to_string());
+        let r_mem = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
+        CurtainScreen::draw_card(p, r_mem, "MEMORY", &mem_val, &mem_sub);
+        draw_mem_icon(p, r_mem.x + r_mem.w - pt(20.0), r_mem.y + pt(7.0));
 
-
-        // 4. Frontlight Controls
-        let Some(fl) = &self.fl else {
-            p.text_center(pt(BRIGHT_TITLE_PT), 10.0, DIM, "Frontlight hardware not available");
-            return;
-        };
-
-        let max = fl.max().max(1);
-        let cur_bright = fl.get();
-        let bright_frac = (cur_bright as f32 / max as f32).clamp(0.0, 1.0);
-        let bright_pct = (bright_frac * 100.0).round() as i32;
-
-        self.draw_stepper_slider(
-            p,
-            pt(BRIGHT_TITLE_PT),
-            "Brightness",
-            false,
-            self.bright_bar_y,
-            self.bright_track_x0,
-            self.bright_track_x1,
-            bright_frac,
-            bright_pct,
-        );
-
-        let bright_presets = [("Off", 0.0), ("Night", 0.15), ("Read", 0.40), ("Bright", 0.70), ("Max", 1.0)];
-        CurtainScreen::draw_pills(p, pt(BRIGHT_PRESET_PT), w, &bright_presets, bright_frac);
-
-        // 5. Warm Tone Controls
-        let tmax = fl.tone_max();
-        if tmax > 0 {
-            let cur_tone = fl.tone_get();
-            let tone_frac = (cur_tone as f32 / tmax as f32).clamp(0.0, 1.0);
-            let tone_pct = (tone_frac * 100.0).round() as i32;
-
-            self.draw_stepper_slider(
-                p,
-                pt(TONE_TITLE_PT),
-                "Warm Tone (Amber)",
-                true,
-                self.tone_bar_y,
-                self.tone_track_x0,
-                self.tone_track_x1,
-                tone_frac,
-                tone_pct,
-            );
-
-            let tone_presets = [("Cool", 0.0), ("Candle", 0.30), ("Cozy", 0.50), ("Amber", 0.70), ("Warm", 1.0)];
-            CurtainScreen::draw_pills(p, pt(TONE_PRESET_PT), w, &tone_presets, tone_frac);
-        }
-
-        // 6. E-Ink Full Refresh Setting
-        let cur_interval = crate::positions::global_refresh_interval();
-        p.text(pad, pt(REFRESH_TITLE_PT), 8.0, INK, "E-Ink Full Refresh Interval");
-        let refresh_presets = [
-            ("Fast (Off)", 0.0),
-            ("Every 5 pgs", 5.0),
-            ("Every 10 pgs", 10.0),
-            ("Every 20 pgs", 20.0),
-        ];
-        CurtainScreen::draw_pills(p, pt(REFRESH_PRESET_PT), w, &refresh_presets, cur_interval as f32);
-
-        // 7. Bottom Action Pills: [ Sleep ] [ Refresh ] [ Reboot ] [ Close ]
+        // 4. Bottom Action Pills: [ Sleep ] [ Full Refresh ] [ Close ]
+        //    (before the frontlight section: none of these need the fl,
+        //    and a frontlight-less device must not lose its Close button)
         let act_y = pt(ACTIONS_TOP_PT);
-        let act_w = (w - 2 * pad - 3 * pt(CARD_GAP_PT)) / 4;
+        let act_w = (w - 2 * pad - 2 * pt(CARD_GAP_PT)) / 3;
         let act_h = pt(ACTION_H_PT);
 
-        let labels = ["Sleep", "Refresh", "Reboot", "Close"];
+        let labels = ["Sleep Screen", "Full Refresh", "Close"];
         for (i, label) in labels.iter().enumerate() {
             let r = Rect::new(pad + i as i32 * (act_w + pt(CARD_GAP_PT)), act_y, act_w, act_h);
             if *label == "Close" {
@@ -409,18 +318,48 @@ impl Screen for CurtainScreen {
                 draw_box_text(p, r, 8.0, INK, label);
             }
         }
+
+        // 5. Frontlight: two bare sliders
+        let Some(fl) = &self.fl else {
+            p.text_center(
+                pt((BRIGHT_ROW_PT + TONE_ROW_PT) / 2.0 + ROW_CY_OFF_PT),
+                10.0,
+                DIM,
+                "Frontlight hardware not available",
+            );
+            return;
+        };
+
+        let max = fl.max().max(1);
+        let bright_frac = (fl.get() as f32 / max as f32).clamp(0.0, 1.0);
+        self.draw_line_slider(
+            p,
+            pt(BRIGHT_ROW_PT),
+            false,
+            bright_frac,
+            (bright_frac * 100.0).round() as i32,
+        );
+
+        let tmax = fl.tone_max();
+        if tmax > 0 {
+            let tone_frac = (fl.tone_get() as f32 / tmax as f32).clamp(0.0, 1.0);
+            self.draw_line_slider(
+                p,
+                pt(TONE_ROW_PT),
+                true,
+                tone_frac,
+                (tone_frac * 100.0).round() as i32,
+            );
+        }
     }
 
-
-
     fn on_gesture(&mut self, g: Gesture) -> Action {
-        let (w, _h) = (self.w, self.h);
+        let w = self.w;
         let pad = pt(PAD_PT);
-        let bar_h = self.bar_h;
-        let (bx0, bx1) = (self.bright_track_x0, self.bright_track_x1);
-        let (tx0, tx1) = (self.tone_track_x0, self.tone_track_x1);
-        let bright_y = self.bright_bar_y;
-        let tone_y = self.tone_bar_y;
+        let (x0, x1) = (self.track_x0, self.track_x1);
+        let bright_cy = pt(BRIGHT_ROW_PT + ROW_CY_OFF_PT);
+        let tone_cy = pt(TONE_ROW_PT + ROW_CY_OFF_PT);
+        let sheet_h = pt(SHEET_H_PT);
 
         let Some(fl) = &mut self.fl else {
             return Action::Pop;
@@ -428,14 +367,13 @@ impl Screen for CurtainScreen {
 
         let max = fl.max().max(1);
         let tmax = fl.tone_max();
-        let bright_step = (max / 24).max(1);
-        let tone_step = (tmax / 24).max(1);
 
         match g {
             Gesture::Tap { x, y } => {
                 let (x, y) = (x as i32, y as i32);
 
-                // 0. Hardware Status Card Taps: SSH Remote Toggle & Network Wi-Fi Toggle
+                // 0. Status card taps: Wi-Fi toggle (NETWORK), ssh
+                //    toggle (SSH). POWER and MEMORY are status-only.
                 let card_w = (w - 2 * pad - pt(CARD_GAP_PT)) / 2;
                 let card_h = pt(CARD_H_PT);
                 let row2_y = pt(CARD_TOP_PT) + card_h + pt(CARD_GAP_PT);
@@ -446,9 +384,12 @@ impl Screen for CurtainScreen {
                     // here turns the tile into a no-op exactly when the
                     // network is already unreachable.
                     if crate::wifi::wifi_state() == Some(true) {
-                        let _ = std::process::Command::new("/sbin/ifconfig").args(&["wlan0", "down"]).output();
-                        let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.cmd", "wirelessEnable", "0"]).status();
+                        // Pure lipc — a raw `ifconfig wlan0 down` leaves
+                        // the interface administratively down and
+                        // `wifid enable 1` can never bring it back
+                        // (found on device 2026-08-19).
                         let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.wifid", "enable", "0"]).status();
+                        let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.cmd", "wirelessEnable", "0"]).status();
                     } else {
                         crate::wifi::turn_on_wifi();
                     }
@@ -466,128 +407,23 @@ impl Screen for CurtainScreen {
                     return Action::Redraw;
                 }
 
-                // Boot mode toggle: flips the takeover flag for the next
-                // boot only. Applying it is the Reboot pill below (or any
-                // power-cycle) — a hot-switch from a live session would
-                // race a second reader instance (start.sh's lock exists
-                // for that).
-                let r_boot = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
-                if r_boot.contains(x, y) {
-                    let flag = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK");
-                    if flag.exists() {
-                        let _ = std::fs::remove_file(flag);
-                    } else {
-                        let _ = std::fs::File::create(flag);
-                    }
+                // 1. Slider bands: tap sets by position
+                if (y - bright_cy).abs() <= 14 && x >= x0 && x <= x1 {
+                    let frac = ((x - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
+                    fl.set((frac * max as f32).round() as i32);
+                    return Action::Redraw;
+                }
+                if tmax > 0 && (y - tone_cy).abs() <= 14 && x >= x0 && x <= x1 {
+                    let frac = ((x - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
+                    fl.tone_set((frac * tmax as f32).round() as i32);
                     return Action::Redraw;
                 }
 
-
-                // 1. Brightness Bar Controls
-                if y >= bright_y - 12 && y < bright_y + bar_h + 12 {
-
-                    if x < bx0 {
-                        // Minus Button [-]
-                        let cur = fl.get();
-                        fl.set((cur - bright_step).max(0));
-                        return Action::Redraw;
-                    } else if x > bx1 {
-                        // Plus Button [+]
-                        let cur = fl.get();
-                        fl.set((cur + bright_step).min(max));
-                        return Action::Redraw;
-                    } else {
-                        // Slider Track Tap
-                        let frac = ((x - bx0) as f32 / (bx1 - bx0) as f32).clamp(0.0, 1.0);
-                        fl.set((frac * max as f32).round() as i32);
-                        return Action::Redraw;
-                    }
-                }
-
-                // 2. Brightness Preset Pills
-                let b_pill_y = pt(BRIGHT_PRESET_PT);
-                let pill_h = pt(16.0);
-                if y >= b_pill_y - 6 && y < b_pill_y + pill_h + 6 {
-                    let presets = [("Off", 0.0), ("Night", 0.15), ("Read", 0.40), ("Bright", 0.70), ("Max", 1.0)];
-                    let gap = pt(5.0);
-                    let total_w = w - 2 * pad;
-                    let n = presets.len() as i32;
-                    let pill_w = (total_w - (n - 1) * gap) / n;
-                    for (i, (_label, frac)) in presets.iter().enumerate() {
-                        let px = pad + i as i32 * (pill_w + gap);
-                        if x >= px && x < px + pill_w {
-                            fl.set((frac * max as f32).round() as i32);
-                            return Action::Redraw;
-                        }
-                    }
-                }
-
-                // 3. Tone Controls (if available)
-                if tmax > 0 {
-                    // Tone Bar Controls
-                    if y >= tone_y - 12 && y < tone_y + bar_h + 12 {
-                        if x < tx0 {
-                            // Minus [-]
-                            let cur = fl.tone_get();
-                            fl.tone_set((cur - tone_step).max(0));
-                            return Action::Redraw;
-                        } else if x > tx1 {
-                            // Plus [+]
-                            let cur = fl.tone_get();
-                            fl.tone_set((cur + tone_step).min(tmax));
-                            return Action::Redraw;
-                        } else {
-                            // Slider Track Tap
-                            let frac = ((x - tx0) as f32 / (tx1 - tx0) as f32).clamp(0.0, 1.0);
-                            fl.tone_set((frac * tmax as f32).round() as i32);
-                            return Action::Redraw;
-                        }
-                    }
-
-                    // Tone Preset Pills
-                    let t_pill_y = pt(TONE_PRESET_PT);
-                    if y >= t_pill_y - 6 && y < t_pill_y + pill_h + 6 {
-                        let presets = [("Cool", 0.0), ("Candle", 0.30), ("Cozy", 0.50), ("Amber", 0.70), ("Warm", 1.0)];
-                        let gap = pt(5.0);
-                        let total_w = w - 2 * pad;
-                        let n = presets.len() as i32;
-                        let pill_w = (total_w - (n - 1) * gap) / n;
-                        for (i, (_label, frac)) in presets.iter().enumerate() {
-                            let px = pad + i as i32 * (pill_w + gap);
-                            if x >= px && x < px + pill_w {
-                                fl.tone_set((frac * tmax as f32).round() as i32);
-                                return Action::Redraw;
-                            }
-                        }
-                    }
-                }
-
-                // 4. E-Ink Refresh Interval Preset Pills
-                let ref_pill_y = pt(REFRESH_PRESET_PT);
-                if y >= ref_pill_y - 6 && y < ref_pill_y + pill_h + 6 {
-                    let intervals = [0usize, 5, 10, 20];
-                    let gap = pt(5.0);
-                    let total_w = w - 2 * pad;
-                    let n = intervals.len() as i32;
-                    let pill_w = (total_w - (n - 1) * gap) / n;
-                    for (i, &int_val) in intervals.iter().enumerate() {
-                        let px = pad + i as i32 * (pill_w + gap);
-                        if x >= px && x < px + pill_w {
-                            crate::positions::set_global_refresh_interval(int_val);
-                            return Action::Redraw;
-                        }
-                    }
-                }
-
-
-
-                // 6. Bottom Action Buttons: [ Sleep ] [ Refresh ] [ Reboot ] [ Close ]
+                // 2. Bottom Action Buttons: [ Sleep ] [ Refresh ] [ Close ]
                 let act_y = pt(ACTIONS_TOP_PT);
                 let act_h = pt(ACTION_H_PT);
-                let act_w = (w - 2 * pad - 3 * pt(CARD_GAP_PT)) / 4;
+                let act_w = (w - 2 * pad - 2 * pt(CARD_GAP_PT)) / 3;
                 if y >= act_y - 6 && y < act_y + act_h + 6 && x >= pad {
-                    // Gap taps round to the next pill right — 5 pt gaps,
-                    // not worth letterboxing.
                     let idx = ((x - pad) / (act_w + pt(CARD_GAP_PT))) as usize;
                     match idx {
                         0 => {
@@ -597,38 +433,6 @@ impl Screen for CurtainScreen {
                             // Full Screen Refresh
                             return Action::RedrawFull;
                         }
-                        2 => {
-                            // Reboot, in whatever mode is armed. Plain
-                            // `reboot` rides the same init cascade as a
-                            // long-press power (TERM -> reader guard
-                            // restores frontlight/wifi/firewall) — no
-                            // teardown of our own needed.
-                            let next = if std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists() {
-                                "yb OS"
-                            } else {
-                                "Stock Kindle"
-                            };
-                            return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
-                                "Reboot now?",
-                                &format!("Next boot: {}.", next),
-                                "Reboot",
-                                None,
-                                move |act| {
-                                    if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
-                                        plog("curtain: reboot requested");
-                                        let spawned = std::process::Command::new("reboot")
-                                            .spawn()
-                                            .or_else(|_| {
-                                                std::process::Command::new("/sbin/reboot").spawn()
-                                            });
-                                        if spawned.is_err() {
-                                            plog("curtain: reboot command failed");
-                                        }
-                                    }
-                                    Action::Pop
-                                },
-                            )));
-                        }
                         _ => {
                             // Close
                             return Action::Pop;
@@ -636,24 +440,24 @@ impl Screen for CurtainScreen {
                     }
                 }
 
-                // Dismiss if tapped in blank bottom region
-                if y > pt(ACTIONS_TOP_PT) + pt(ACTION_H_PT) + pt(15.0) {
+                // Dismiss if tapped below the sheet (on the dimmed screen)
+                if y > sheet_h + pt(10.0) {
                     return Action::Pop;
                 }
 
                 Action::Keep
             }
 
-            // Swipe / drag on brightness or tone slider adjusts smoothly
+            // Drag along a slider row adjusts smoothly
             Gesture::Swipe { y, ex, dir, .. } => {
                 let (y, ex) = (y as i32, ex as i32);
-                if y >= bright_y - 15 && y < bright_y + bar_h + 15 && ex >= bx0 && ex <= bx1 {
-                    let frac = ((ex - bx0) as f32 / (bx1 - bx0) as f32).clamp(0.0, 1.0);
+                if (y - bright_cy).abs() <= 15 && ex >= x0 && ex <= x1 {
+                    let frac = ((ex - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
                     fl.set((frac * max as f32).round() as i32);
                     return Action::Redraw;
                 }
-                if tmax > 0 && y >= tone_y - 15 && y < tone_y + bar_h + 15 && ex >= tx0 && ex <= tx1 {
-                    let frac = ((ex - tx0) as f32 / (tx1 - tx0) as f32).clamp(0.0, 1.0);
+                if tmax > 0 && (y - tone_cy).abs() <= 15 && ex >= x0 && ex <= x1 {
+                    let frac = ((ex - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
                     fl.tone_set((frac * tmax as f32).round() as i32);
                     return Action::Redraw;
                 }
@@ -674,17 +478,16 @@ impl Screen for CurtainScreen {
 }
 
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use yui::Font;
 
-    /// Headless render: the curtain must put dark ink in every band on
-    /// the white sheet — written while chasing a (false-alarm) "full
-    /// black screen" report, kept as a regression guard.
+    /// Headless render: the sheet must put dark ink in every band on
+    /// white, and the region below the sheet must be the dimmed
+    /// snapshot, not blank white (scanlines prove the backdrop blit).
     #[test]
-    fn curtain_draws_visible_content_on_white() {
+    fn curtain_draws_sheet_with_dimmed_backdrop() {
         let font = Font::load().unwrap();
         let mut buf = vec![255u8; 1248 * 1648];
         let mut c = CurtainScreen::new();
@@ -696,15 +499,23 @@ mod tests {
             let n = buf[y0 * 1248..y1 * 1248].iter().filter(|&&b| b < 140).count();
             assert!(n >= min, "{name}: only {n} ink pixels in rows {y0}-{y1}");
         };
-        // White sheet: everything else must stay light.
-        let lit = buf.iter().filter(|&&b| b > 200).count();
-        assert!(lit > 1248 * 1648 * 90 / 100, "sheet is not white: {lit}");
-        ink("clock", 100, 220, 200);
-        ink("date", 220, 280, 50);
-        ink("cards", 280, 550, 100);
-        ink("no-fl message", 550, 700, 50);
+        ink("clock", 60, 230, 200);
+        ink("date", 210, 280, 50);
+        ink("cards", 260, 530, 100);
+        ink("no-fl message", 600, 830, 50);
+        ink("actions", 870, 1000, 60);
+        // Below the sheet: scanline dim over the white snapshot — every
+        // third row is 235, so plenty of pixels sit below 250 but none
+        // need to be ink.
+        let dim = buf[1100 * 1248..1600 * 1248]
+            .iter()
+            .filter(|&&b| b < 250)
+            .count();
+        assert!(dim > 1000, "backdrop not dimmed below the sheet: {dim}");
+        let lit = buf[0..1000 * 1248].iter().filter(|&&b| b > 200).count();
+        assert!(
+            lit > 1000 * 1248 * 90 / 100,
+            "sheet is not white: {lit}"
+        );
     }
 }
-
-
-

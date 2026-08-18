@@ -91,6 +91,11 @@ pub fn mem_available_kib() -> Option<u64> {
     parse_kv_kb(&fs::read_to_string("/proc/meminfo").ok()?, "MemAvailable")
 }
 
+/// Total installed RAM, KiB (/proc/meminfo MemTotal).
+pub fn mem_total_kib() -> Option<u64> {
+    parse_kv_kb(&fs::read_to_string("/proc/meminfo").ok()?, "MemTotal")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -60,10 +60,11 @@ const LIB_ITEM_BASE_PT: f32 = 15.0;
 const LIB_FOOT_PT: f32 = 7.0;
 const LIB_FOOT_OFF_PT: f32 = 14.0;
 
-const ROW_LABELS: [&str; 4] = [
+const ROW_LABELS: [&str; 5] = [
     "Flashcards Deck",
     "Receive over Wi-Fi",
     "Mirror to Mac",
+    "System",
     "Exit",
 ];
 
@@ -463,6 +464,7 @@ impl Screen for HomeScreen {
                             Action::Push(Box::new(crate::receive::ReceiveScreen::new()))
                         }
                         Some(2) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
+                        Some(3) => Action::Push(Box::new(crate::system::SystemScreen::new())),
                         // Exit: in takeover mode this hands the device to
                         // the stock framework — confirm first.
                         Some(_) => {
@@ -649,6 +651,16 @@ fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
             p.line_w(x + s - pt(5.0), mid_y - pt(4.0), x + s - pt(3.0), mid_y - pt(2.0), T, 0);
             p.line_w(x + s - pt(5.0), mid_y, x + s - pt(3.0), mid_y - pt(2.0), T, 0);
         }
+        3 => {
+            // Gear: circle with four teeth and a center hole
+            let r = (s - pt(7.0)) / 2;
+            p.circle_outline_t(mid_x, mid_y, r, T, 0);
+            p.circle_fill(mid_x, mid_y, pt(1.5), 0);
+            p.rect(Rect::new(mid_x - 1, y, 2, pt(3.5)), 0);
+            p.rect(Rect::new(mid_x - 1, y + s - pt(3.5), 2, pt(3.5)), 0);
+            p.rect(Rect::new(x, mid_y - 1, pt(3.5), 2), 0);
+            p.rect(Rect::new(x + s - pt(3.5), mid_y - 1, pt(3.5), 2), 0);
+        }
         _ => {
             // Power / Exit glyph: circle with vertical top line
             let r = (s - pt(2.0)) / 2;
@@ -675,9 +687,10 @@ mod tests {
         assert_eq!(HomeScreen::hit_home_row(top + row_h + 4), Some(1));
         assert_eq!(HomeScreen::hit_home_row(top + 2 * row_h + 4), Some(2));
         assert_eq!(HomeScreen::hit_home_row(top + 3 * row_h + 4), Some(3));
+        assert_eq!(HomeScreen::hit_home_row(top + 4 * row_h + 4), Some(4));
         // Header and below the last row are not rows.
         assert_eq!(HomeScreen::hit_home_row(top - 1), None);
-        assert_eq!(HomeScreen::hit_home_row(top + 4 * row_h), None);
+        assert_eq!(HomeScreen::hit_home_row(top + 5 * row_h), None);
     }
 
 
