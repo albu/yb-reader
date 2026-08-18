@@ -1,14 +1,18 @@
-//! ssh, owned by the app: the KOReader-bundled dropbear on port 2222 —
-//! the very one the KOReader scriptlet starts (and the only thing that
-//! ever started it, so a reboot left ssh dead until someone tapped that
-//! menu). Same recipe as koreader-ext.sh's start_ssh/stop_ssh: an
-//! iptables accept rule plus `/mnt/us/koreader/dropbear -p 2222`.
+//! ssh, owned by the app: the bundled dropbear on port 2222 (koreader's
+//! binary as fallback — no KOReader install required). boot.sh starts
+//! the same server at boot in takeover mode; both launchers pin the
+//! host key to /var/local so the identity doesn't depend on which one
+//! won. Recipe as koreader-ext.sh's start_ssh/stop_ssh: an iptables
+//! accept rule pair plus the dropbear invocation.
 
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 const PIDFILE: &str = "/tmp/dropbear_koreader.pid";
-const DIR: &str = "/mnt/us/koreader";
+const OURS: &str = "/mnt/us/extensions/reader/bin/dropbear";
+const KOREADER: &str = "/mnt/us/koreader/dropbear";
+const KEY: &str = "/var/local/yb-reader/hostkey";
 const IPTABLES: &str = "/usr/sbin/iptables";
 
 /// Any live dropbear? A /proc comm scan — no forks, cheap enough to call
@@ -101,9 +105,12 @@ pub fn enable() -> bool {
         return true;
     }
     rules("A");
-    Command::new("./dropbear")
-        .current_dir(DIR)
-        .args(["-E", "-R", "-p", "2222", "-P", PIDFILE])
+    let bin = if Path::new(OURS).exists() { OURS } else { KOREADER };
+    // KEY's dir must exist before dropbear (lazily, via -R) writes the
+    // host key there; boot.sh normally makes it, don't depend on that.
+    let _ = fs::create_dir_all("/var/local/yb-reader");
+    Command::new(bin)
+        .args(["-E", "-R", "-p", "2222", "-P", PIDFILE, "-r", KEY])
         .spawn()
         .and_then(|mut c| c.wait())
         .is_ok()

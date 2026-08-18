@@ -38,6 +38,15 @@ extern "C" fn handle_term(_sig: libc::c_int) {
     std::process::exit(0);
 }
 
+/// Clean exit through the same restore path the TERM guard uses, with a
+/// caller-chosen code. 42 is the takeover "return to stock" handshake:
+/// boot.sh removes the flag and starts the framework when it sees it.
+pub fn graceful_exit(code: i32) -> ! {
+    ybdev::log::plog(&format!("graceful exit ({code})"));
+    restore();
+    std::process::exit(code);
+}
+
 fn restore() {
     if RESTORING.swap(true, Ordering::SeqCst) {
         return;

@@ -50,12 +50,13 @@ ssh_deploy() {
     fi
 
     # TERM first so the in-app guard restores frontlight/wifi/firewall on
-    # the way out; -9 one second later for anything that ignored it. Then
-    # relaunch via start.sh (ssh-safe per its header) so the loop ends
-    # with the new binary actually running — nothing else restarts it.
-    ssh "$HOST" "mv -f $DST.new $DST && chmod +x $DST && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; killall reader 2>/dev/null || true; sleep 1; killall -9 reader 2>/dev/null || true"
+    # the way out; -9 one second later for anything that ignored it.
+    # Reset the crash counter (a deploy is not a crash) and relaunch:
+    # via the takeover job when the framework is disabled (start.sh's
+    # lipc calls need a live cvm), via start.sh otherwise.
+    ssh "$HOST" "mv -f $DST.new $DST && chmod +x $DST && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails; killall reader 2>/dev/null || true; sleep 1; killall -9 reader 2>/dev/null || true"
     sleep 1
-    ssh "$HOST" "nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 &"
+    ssh "$HOST" "if [ -e /mnt/us/DONT_START_FRAMEWORK ]; then initctl restart yb-reader </dev/null >/dev/null 2>&1; else nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 & fi"
     echo "SSH deploy -> $HOST:$DST (+ kpm package copy, reader relaunched)"
 }
 

@@ -107,5 +107,11 @@ fn main() {
 
     let root = HomeScreen::new(w, h);
     app.run(Box::new(root));
+    // Takeover mode: leaving the app means "back to the stock Kindle" —
+    // exit 42 is boot.sh's cue to remove the flag and start the
+    // framework. In stock mode exiting returns to the library as before.
+    if std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists() {
+        guard::graceful_exit(42);
+    }
     log::plog("yb-reader exit");
 }

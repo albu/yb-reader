@@ -19,19 +19,25 @@ One static binary, one job: **read**.
   dictionary) and an SM-2 flashcard deck fed from looked-up words.
 - **Frontlight** — `/dev/frontlight` ioctls (white + amber), two-finger tap from
   anywhere.
+- **Takeover mode** — the reader *is* the OS: the framework never boots, no
+  JVM, no restart races, straight into the library at power-on. See
+  [Takeover mode](#takeover-mode--the-reader-as-the-os).
 
-No LuaJIT, no KOReader, no 37 plugins. A few MB instead of a hundred.
+No LuaJIT, no KOReader, no 37 plugins — not even for ssh (the dropbear is
+ours now). A few MB instead of a hundred.
 
 ## Layout
 
 ```
 yb-reader/
   ybdev/     device layer: e-ink panel (MTK ioctls), frontlight, evdev input,
-             mirror PNG decoding, mirror.conf, plugin log — no heavy deps
+             mirror PNG decoding, ssh (dropbear), plugin log — no heavy deps
   reader/    the app: mirror protocol + Wi-Fi receive server, UI, MuPDF reader
   probe/     on-device introspection tool (fb geometry, input, frontlight)
   kual/      KUAL extension (kept for reference; the library scriptlet in
              documents/ is the real launcher on this unit — no KUAL here)
+  packages/  KPM package incl. bin/{start,boot}.sh + upstart/yb-reader.conf
+             (the takeover pieces) + bin/dropbear (bundled ssh server)
   deploy.sh  build + deploy: SSH fast loop (default), `usb`, or `probe`
 ```
 
@@ -115,6 +121,55 @@ When the Kindle is mounted at `/Volumes/Kindle` (and SSH is off),
 `./deploy.sh usb` (or `make deploy-usb`) stages the KPM package, does the
 direct install (binary + scriptlet), and hash-verifies every binary copy.
 It requires eject cycles — prefer SSH.
+
+## Takeover mode — the reader as the OS
+
+Stock mode launches the reader "like a book" under the framework
+(start.sh SIGSTOPs cvm and restores it on exit). Takeover mode removes
+the framework from boot entirely — no JVM, no restart races, straight
+into the library at power-on. Three pieces:
+
+| Piece | Path | Notes |
+|---|---|---|
+| enable flag | `/mnt/us/DONT_START_FRAMEWORK` | Amazon's own `framework.conf` pre-start check. Touch to enable, remove to disable. USB-visible partition — no ssh needed to flip it. |
+| upstart job | `/etc/upstart/yb-reader.conf` | `start on stopped framework`; no-op without the flag (shutdown ghost-starts land there harmlessly). Copy from `packages/yb-reader/upstart/` (rootfs remount-rw for the copy), then `initctl reload`. |
+| boot script | `/mnt/us/extensions/reader/bin/boot.sh` | ssh lifeline, crash counter, GUI freeze, reader exec. Deploy atomically (stage + verify + `mv`): a live shell mid-`wait` reads its remaining lines from a rewritten file. |
+
+Verified surviving without cvm: **powerd** (owns `/sys/power/state`, t1/t2
+idle timers, battery monitor), **wifid** + wpa_supplicant + udhcpc
+(auto-join works on a cold framework-free boot), **volumd/fsp** (`/mnt/us`),
+**dropbear** (started by boot.sh — recovery never depends on the framework).
+Never starts / gets SIGSTOPped: Xorg, awesome, lxinit, pillow, kb,
+KPPMainApp, webreader, kfxreader (keyed on `framework_ready` /
+`started lab126_gui`, or frozen — start.sh's proven semantics).
+
+**Fallback ladder** — nothing below rung 4 needs more than the power button:
+
+1. boot.sh crash counter: 3 consecutive fast failures of the *same*
+   binary (a replaced binary resets the count — deploys don't count;
+   deploy.sh clears it too) → CONT the frozen GUI, remove the flag,
+   `initctl start framework`. Tested live with `kill -9`: stock GUI back
+   in under 30 s.
+2. Amazon's own net under that: 3 framework restarts → 2 reboots →
+   airplane-mode retry → halt with a customer-service page.
+3. Long-press power = clean shutdown cascade (`stopping lab126_gui` →
+   job stop → TERM → reader guard restores frontlight/wifi/firewall;
+   observed as reader rc=143).
+4. ssh over Wi-Fi, then remove the flag. Serial getty on `ttymxc0` is
+   the absolute floor (never needed so far).
+
+**Exit to stock**: the Exit row (relabelled "Exit to Kindle") and the
+home vertical swipes confirm, then the reader exits 42 → boot.sh removes
+the flag, CONTs the frozen GUI, and starts the framework. Reboot brings
+takeover back — the flag survives use; only exit-42 or the crash
+fallback remove it.
+
+Deploy in takeover mode works unchanged — `./deploy.sh` resets the
+counter, kills the reader, and relaunches via `initctl restart
+yb-reader` when the flag is present (start.sh's lipc calls need a live
+cvm, so it must not be used there). Every build shows its git sha
+top-right on the home tab (`vXXXX`, `*` = dirty tree) — the on-device
+answer to "did the deploy land?"
 
 ## On-device testing (probe)
 
@@ -277,7 +332,17 @@ Same files as the Lua plugin, same semantics:
 
 - No suspend/resume handling yet: the app holds `preventScreenSaver` while
   mirroring/reading, but if the device does sleep (cover, power button) the
-  app doesn't yet re-establish Wi-Fi / refresh the panel on wake.
+  app doesn't yet re-establish Wi-Fi / refresh the panel on wake. In
+  takeover mode this is worse: an open book keeps the device awake
+  *forever* (nobody else will suspend it), and 20+ min idle on the library
+  screen showed no autonomous suspend either — powerd's idle timers appear
+  to need arming by someone. Idle policy is the reader's job now.
+- USB cable in takeover mode: charging + **file access** — volumd
+  auto-configures `g_mass_storage` on plug (framework-free), so the
+  userstore (flag, boot.sh, binary) is editable from any computer. But
+  nothing holds the device awake on USB: it suspends ~100 s after plug
+  and the connection dies. (`ENABLE_USBNET`/usbnetd is a dead path on
+  this FW — the job exists, the binary doesn't.)
 - Touch device is discovered from `/proc/bus/input/devices`
   (`ABS_MT_POSITION_X`); if discovery fails it falls back to
   `/dev/input/touch`. The `probe` output will confirm the real path.
@@ -286,6 +351,10 @@ Same files as the Lua plugin, same semantics:
 
 ## Roadmap
 
+- Resume hook (one work item, three symptoms): on wake, re-apply the
+  frontlight (powerd restores *its* level over ours), repaint, and
+  re-establish Wi-Fi. The elapsed-suspend detection already exists
+  (SystemTime accounting).
+- Idle policy in takeover mode: release `preventScreenSaver` during plain
+  reading; hold awake while USB VBUS is present (~100 s window today).
 - Suspend/resume hooks (lipc event → re-enable Wi-Fi, full refresh).
-- Optional auto-start at boot (upstart/init script) so the Kindle is
-  single-purpose, as designed.

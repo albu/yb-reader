@@ -67,6 +67,23 @@ const ROW_LABELS: [&str; 4] = [
     "Exit",
 ];
 
+/// Takeover mode: we are the whole UI, so "exit" means handing the device
+/// back to the stock framework (exit 42, boot.sh's cue), not returning to
+/// a library that isn't running. Guarded by a confirm dialog everywhere.
+fn takeover() -> bool {
+    std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists()
+}
+
+fn confirm_exit_to_stock(bg: Option<Vec<u8>>) -> Action {
+    Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+        "Exit to Kindle?",
+        "The stock Kindle UI returns.\nReboot brings yb-reader back.",
+        "Exit",
+        bg,
+        move |_act| Action::Quit,
+    )))
+}
+
 /// Library ordering — a view concern, not a filesystem one. Cycles on a
 /// header tap; `Reading` floats actively-read books (positions ts) to the
 /// top and sinks never-opened ones.
@@ -278,6 +295,15 @@ impl Screen for HomeScreen {
         match self.tab {
             0 => {
                 p.text(pad, pt(KICKER_BASE_PT), KICKER_SIZE_PT, 130, "YB READER");
+                // Build stamp, top right: the on-device answer to "did the
+                // deploy land?" (* = dirty tree when built).
+                p.text_right(
+                    w - pad,
+                    pt(KICKER_BASE_PT),
+                    KICKER_SIZE_PT,
+                    180,
+                    concat!("v", env!("YB_BUILD")),
+                );
                 p.hline_t(pt(HEADER_RULE_PT), pad, w - pad, 3, 140);
                 for (i, default_label) in ROW_LABELS.iter().enumerate() {
                     let top = pt(ROWS_TOP_PT) + i as i32 * pt(ROW_H_PT);
@@ -290,6 +316,8 @@ impl Screen for HomeScreen {
                         } else {
                             "Flashcards Deck".to_string()
                         }
+                    } else if i == ROW_LABELS.len() - 1 && takeover() {
+                        "Exit to Kindle".to_string()
                     } else {
                         default_label.to_string()
                     };
@@ -435,7 +463,15 @@ impl Screen for HomeScreen {
                             Action::Push(Box::new(crate::receive::ReceiveScreen::new()))
                         }
                         Some(2) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
-                        Some(_) => Action::Quit,
+                        // Exit: in takeover mode this hands the device to
+                        // the stock framework — confirm first.
+                        Some(_) => {
+                            if takeover() {
+                                confirm_exit_to_stock(self.snap.clone())
+                            } else {
+                                Action::Quit
+                            }
+                        }
                         None => Action::Keep,
                     },
 
@@ -494,9 +530,17 @@ impl Screen for HomeScreen {
                     Action::Keep
                 }
             }
-            // Home tab: swipe down/up still exits (old muscle memory).
+            // Home tab: swipe down/up still exits (old muscle memory) —
+            // but leaving takeover mode deserves a confirm like the Exit
+            // row gets.
             Gesture::Swipe { dir: SwipeDir::North, .. }
-            | Gesture::Swipe { dir: SwipeDir::South, .. } => Action::Quit,
+            | Gesture::Swipe { dir: SwipeDir::South, .. } => {
+                if takeover() {
+                    confirm_exit_to_stock(self.snap.clone())
+                } else {
+                    Action::Quit
+                }
+            }
             // Horizontal swipes flip tabs, Boox-style.
             Gesture::Swipe { dir: SwipeDir::East, .. } => self.switch(-1),
             Gesture::Swipe { dir: SwipeDir::West, .. } => self.switch(1),
