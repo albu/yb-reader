@@ -48,7 +48,6 @@ pub struct LayoutGeom {
     pub rotation: u16,
     w: u32,
     h: u32,
-    margin_pad: u32,
 }
 
 impl LayoutGeom {
@@ -108,7 +107,6 @@ impl LayoutGeom {
             rotation: config.rotation,
             w,
             h,
-            margin_pad,
         })
     }
 
@@ -150,7 +148,9 @@ impl LayoutGeom {
         RectF::new(px0.min(px1), py0.min(py1), px0.max(px1), py0.max(py1))
     }
 
-    /// Visual rect of the sub-box itself, in document units.
+    /// Visual rect of the sub-box itself, in document units (test helper:
+    /// maps exactly the region this sub-page renders).
+    #[cfg(test)]
     pub fn sub_rect_doc(&self) -> (f32, f32, f32, f32) {
         (
             self.sub_box.x0 * self.pw,
@@ -167,7 +167,7 @@ impl LayoutGeom {
 /// twice in compute_annotations and once in tests.
 pub fn words_from_text_page(tp: &mupdf::TextPage, g: &LayoutGeom) -> Vec<(String, RectF)> {
     let mut words = Vec::new();
-    let mut flush = |cur: &mut String, min_x: &mut f32, min_y: &mut f32, max_x: &mut f32,
+    let flush = |cur: &mut String, min_x: &mut f32, min_y: &mut f32, max_x: &mut f32,
                      max_y: &mut f32,
                      out: &mut Vec<(String, RectF)>| {
         if cur.is_empty() {

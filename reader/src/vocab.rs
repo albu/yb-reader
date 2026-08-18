@@ -3,6 +3,10 @@ use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use yui::painter::{pt, Painter};
+
+use crate::split::RectF;
+
 const VOCAB_PATH: &str = "/mnt/us/extensions/reader/data/vocab.bin";
 const PROFILE_PATH: &str = "/mnt/us/extensions/reader/vocab_profile.json";
 const MAGIC: &[u8; 8] = b"YBVOC01\0";
@@ -396,6 +400,75 @@ impl VocabProfile {
 
         // Annotated if word difficulty exceeds user level
         entry.difficulty >= self.user_level
+    }
+}
+
+/// Paint the budgeted annotations in the profile's style: interlinear
+/// pills above each word, dotted underlines, or a two-line margin list.
+pub fn draw_annotations(
+    p: &mut Painter,
+    annotations: &[(RectF, WordEntry)],
+    style: AnnotationStyle,
+    is_night: bool,
+) {
+    let (_w, h) = p.size();
+    match style {
+        AnnotationStyle::Interlinear => {
+            for (r, entry) in annotations {
+                let full_gloss = &entry.gloss_en;
+                let short = if full_gloss.len() > 16 {
+                    let mut s = String::new();
+                    for w in full_gloss.split_whitespace() {
+                        if s.len() + w.len() + 1 > 15 {
+                            s.push('…');
+                            break;
+                        }
+                        if !s.is_empty() {
+                            s.push(' ');
+                        }
+                        s.push_str(w);
+                    }
+                    s
+                } else {
+                    full_gloss.clone()
+                };
+
+                let font_sz = 4.5;
+                let tw = p.text_width(font_sz, &short).round() as i32;
+                let word_mid = ((r.x0 + r.x1) / 2.0).round() as i32;
+                let gx = (word_mid - tw / 2).max(pt(6.0));
+                let gy = (r.y0 - pt(2.0) as f32).round() as i32;
+
+                // Floating outline pill badge centered above the word
+                let pill_r = yui::painter::Rect::new(gx - pt(2.0), gy - pt(4.5), tw + pt(4.0), pt(5.5));
+                p.rect(pill_r, if is_night { 0 } else { 255 });
+                p.rect_outline_t(pill_r, 1, if is_night { 80 } else { 200 });
+                p.text(gx, gy, font_sz, if is_night { 235 } else { 30 }, &short);
+            }
+        }
+        AnnotationStyle::DottedUnderline => {
+            for (r, _) in annotations {
+                let y = (r.y1 - 1.0).round() as i32;
+                let x0 = r.x0.round() as i32;
+                let x1 = r.x1.round() as i32;
+                let dot_fg = if is_night { 190 } else { 80 };
+                let mut x = x0;
+                while x + 2 <= x1 {
+                    p.rect(yui::painter::Rect::new(x, y, 2, 2), dot_fg);
+                    x += 4;
+                }
+            }
+        }
+        AnnotationStyle::Margin => {
+            let mut my = h - pt(28.0);
+            for (_, entry) in annotations.iter().take(2) {
+                let line = format!("• {}: {}", entry.word, entry.gloss_en);
+                let trunc = p.truncate(7.0, &line, p.width_pt() - 32.0);
+                p.text(pt(16.0), my, 7.0, if is_night { 190 } else { 85 }, &trunc);
+                my += pt(10.0);
+            }
+        }
+        AnnotationStyle::Off => {}
     }
 }
 

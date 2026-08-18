@@ -4,13 +4,17 @@
 
 mod books;
 mod cache;
+mod chrome;
 mod confirm_dialog;
 mod curtain;
+mod dialogs;
+mod document;
 mod flashcards;
 mod footnote_dialog;
 mod guard;
 mod highlights_dialog;
 mod home;
+mod library;
 mod mirror;
 mod notes;
 mod positions;
@@ -18,6 +22,7 @@ mod protocol;
 mod receive;
 mod render;
 mod scrubber_dialog;
+mod selection;
 mod settings_dialog;
 mod split;
 mod toc_dialog;

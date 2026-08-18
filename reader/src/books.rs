@@ -1,28 +1,23 @@
-//! Local library + EPUB/PDF reader screens via MuPDF (the same engine
-//! family KOReader uses). EPUB is reflowed to the panel width; pages
-//! render in grayscale and are CACHED as pixels — re-presenting a page
-//! after an overlay (frontlight/curtain) is a blit, never a MuPDF re-render.
-//!
-//! Includes Onyx Boox–style Article Mode & Multi-Split reading for PDFs,
-//! instant 8-bit LUT Contrast Curves / Text Boldness, Paper Whitening,
-//! Invert (Night Mode), Reflowable Font Size scaling, and Header Clock/Battery.
+//! The reader screen: page state, the gesture grammar, and the Screen
+//! lifecycle. Rendering and text geometry live in render.rs, document
+//! open/warm-cache in document.rs, dialog construction in dialogs.rs,
+//! selection visuals in selection.rs, page chrome in chrome.rs, library
+//! listing in library.rs.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Mutex;
 use std::time::Instant;
 
-use mupdf::{Colorspace, Document, Matrix};
+use mupdf::Document;
 use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
-use ybdev::sysinfo;
 
-
+use crate::chrome;
 use crate::curtain::CurtainScreen;
+use crate::dialogs;
+use crate::document::{self as doc_store, BookReady, SendDoc, WARM};
 use crate::positions;
-use crate::settings_dialog::ReaderSettingsDialog;
+use crate::selection::{self, SelState, sel_bar_rects};
 use crate::split::{RectF, ReaderSettings};
 
 use crate::render::render_page;
@@ -31,175 +26,11 @@ use crate::wifi;
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
-const LIB_DIR: &str = "/mnt/us/documents";
-
-
-/// Files in documents that carry a book-ish extension but belong to the
-/// framework (clippings ledger) or the jailbreak — not library entries.
-const SYSTEM_FILES: [&str; 2] = ["My Clippings.txt", "JAILBROKEN.txt"];
-
-pub fn list_books() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(LIB_DIR) {
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if SYSTEM_FILES.contains(&name.as_str()) {
-                continue;
-            }
-            let ext = p
-                .extension()
-                .map(|e| e.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
-            if matches!(
-                ext.as_str(),
-                "epub" | "pdf" | "mobi" | "azw3" | "fb2" | "txt" | "cbz"
-            ) {
-                v.push(p);
-            }
-        }
-    }
-    v.sort();
-    v
-}
-
-// ---- async open ---------------------------------------------------------
-
-struct BookReady {
-    doc: SendDoc,
-    total: usize,
-}
-
-/// mupdf-rs guards every call with the global BASE_CONTEXT mutex, so a
-/// Document handle is safe to move across threads: all uses serialize.
-struct SendDoc(Document);
-unsafe impl Send for SendDoc {}
-
-static WARM: Mutex<Option<(PathBuf, SendDoc, usize, f32)>> = Mutex::new(None);
-
-fn reflow_async(
-    mut send_doc: SendDoc,
-    w: u32,
-    h: u32,
-    font_size: f32,
-    margin_pad: u32,
-) -> Receiver<Result<BookReady, String>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let t0 = Instant::now();
-        let (avail_w, avail_h) = crate::render::avail_pt(w, h, margin_pad);
-        let _ = send_doc.0.layout(avail_w, avail_h, font_size);
-        let total = send_doc.0.page_count().unwrap_or(1).max(1) as usize;
-        plog(&format!(
-            "book in-memory reflow in {}ms ({} pages, font={:.1}pt) rss={} avail={}",
-            t0.elapsed().as_millis(),
-            total,
-            font_size,
-            rss_mib(),
-            avail_mib()
-        ));
-        let _ = tx.send(Ok(BookReady {
-            doc: send_doc,
-            total,
-        }));
-    });
-    rx
-}
-
-
-
-fn open_async(
-    path: PathBuf,
-    w: u32,
-    h: u32,
-    font_size: f32,
-    margin_pad: u32,
-) -> Receiver<Result<BookReady, String>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let t0 = Instant::now();
-        let r = (|| -> Result<BookReady, String> {
-            let mut doc = Document::open(path.as_os_str()).map_err(|e| e.to_string())?;
-            let open_ms = t0.elapsed().as_millis();
-            // Reflow to the reading area (no-op for fixed-layout docs).
-            let (avail_w, avail_h) = crate::render::avail_pt(w, h, margin_pad);
-            let _ = doc.layout(avail_w, avail_h, font_size);
-            let total = doc.page_count().unwrap_or(1).max(1) as usize;
-            plog(&format!(
-                "book open {}ms + layout {}ms ({} pages, font={:.1}pt) rss={} avail={}",
-                open_ms,
-                t0.elapsed().as_millis() - open_ms,
-                total,
-                font_size,
-                rss_mib(),
-                avail_mib()
-            ));
-            Ok(BookReady {
-                doc: SendDoc(doc),
-                total,
-            })
-        })();
-        let _ = tx.send(r);
-    });
-    rx
-}
-
-
-// ---- ReaderScreen -------------------------------------------------------
-
-/// A pending text selection: word indices into `page_words` (reading
-/// order). `end` moves — by drag while holding, by tap after lifting —
-/// while `anchor` only moves by another long-press (re-anchor).
-struct SelState {
-    anchor: usize,
-    end: usize,
-}
-
-impl SelState {
-    fn span(&self) -> (usize, usize) {
-        (self.anchor.min(self.end), self.anchor.max(self.end))
-    }
-}
-
-/// Confirm bar geometry (bar + Save + Cancel), shared by draw and hit-testing.
-fn sel_bar_rects(w: i32, h: i32) -> (Rect, Rect, Rect) {
-    let bar_h = pt(48.0);
-    let bar_y = h - pt(76.0);
-    let bar_x = pt(24.0);
-    let bar_w = w - 2 * pt(24.0);
-    let btn_w = pt(64.0);
-    let btn_h = pt(32.0);
-    let by = bar_y + (bar_h - btn_h) / 2;
-    let x_btn = Rect::new(bar_x + bar_w - btn_w - pt(12.0), by, btn_w, btn_h);
-    let ok_btn = Rect::new(x_btn.x - btn_w - pt(10.0), by, btn_w, btn_h);
-    (Rect::new(bar_x, bar_y, bar_w, bar_h), ok_btn, x_btn)
-}
-
-/// Caret triangle pointing into the span at one of its end words.
-fn draw_sel_caret(p: &mut Painter, r: &RectF, start: bool) {
-    let cy = ((r.y0 + r.y1) / 2.0).round() as i32;
-    let hh = pt(8.0);
-    let cx = if start {
-        (r.x0 - 10.0).round() as i32
-    } else {
-        (r.x1 + 10.0).round() as i32
-    };
-    for dy in 0..hh {
-        let wdt = dy + 2;
-        let x = if start { cx - wdt } else { cx };
-        p.rect(Rect::new(x, cy - dy, wdt.max(1), 1), 0);
-        p.rect(Rect::new(x, cy + dy, wdt.max(1), 1), 0);
-    }
-}
-
 pub struct ReaderScreen {
     path: PathBuf,
     w: u32,
     h: u32,
-    loading: Option<Receiver<Result<BookReady, String>>>,
+    loading: Option<std::sync::mpsc::Receiver<Result<BookReady, String>>>,
     doc: Option<Rc<Document>>,
     err: Option<String>,
     total: usize,
@@ -263,7 +94,7 @@ impl ReaderScreen {
             dims: (w as i32, h as i32),
             turns_since_full: 0,
             pending_turns: 0,
-            time_str: current_time_str(),
+            time_str: chrome::current_time_str(),
             vocab_db,
             vocab_prof,
             page_words: Vec::new(),
@@ -277,8 +108,6 @@ impl ReaderScreen {
             highlights: Vec::new(),
         }
     }
-
-
 
     fn book_name(&self) -> String {
         self.path
@@ -328,7 +157,6 @@ impl ReaderScreen {
         self.page_start_time = Instant::now();
 
         let (new_page, new_sub) = self.settings.split.step_to_page_sub(next_step);
-
 
         if self.doc.is_none() {
             // If background-loading, check if the neighbor page is already in snapshot
@@ -403,199 +231,51 @@ impl ReaderScreen {
     fn open_toc_dialog(&mut self) -> Action {
         let Some(doc) = &self.doc else { return Action::Keep };
         let Some(outlines) = doc.outlines().ok() else { return Action::Keep };
-        let cur_page = self.page_no;
-        let path_name = self.book_name();
-        let total = self.total;
-        let settings = self.settings;
-
-        Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
+        dialogs::toc_dialog(
             &outlines,
-            cur_page,
-            move |act| {
-                match act {
-                    crate::toc_dialog::TocAction::JumpTo(target) => {
-                        positions::record_pos(&path_name, target, total, 0, Some(settings));
-                        Action::Pop
-                    }
-                    crate::toc_dialog::TocAction::Close => Action::Pop,
-                }
-            },
-        )))
+            self.page_no,
+            self.book_name(),
+            self.total,
+            self.settings,
+        )
     }
 
     fn open_scrubber_dialog(&mut self) -> Action {
-        let cur_page = self.page_no;
-        let total = self.total;
-        let bg = self.page_gray.clone();
-        let path_name = self.book_name();
-        let settings = self.settings;
-        let doc_for_renderer = self.doc.clone();
-        let doc_for_toc = self.doc.clone();
-        let w = self.w;
-        let h = self.h;
-
-        Action::Push(Box::new(crate::scrubber_dialog::ScrubberDialog::new(
-            cur_page,
-            total,
-            bg,
-            move |target_page| {
-                let doc = doc_for_renderer.as_ref()?;
-                render_page(doc, target_page, 0, &settings, w, h)
-            },
-            move |act| {
-                match act {
-                    crate::scrubber_dialog::ScrubberAction::Done(target) => {
-                        positions::record_pos(&path_name, target, total, 0, Some(settings));
-                        Action::Pop
-                    }
-                    crate::scrubber_dialog::ScrubberAction::OpenToc(target) => {
-                        if let Some(doc) = &doc_for_toc {
-                            if let Ok(ol) = doc.outlines() {
-                                let path_cl = path_name.clone();
-                                return Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
-                                    &ol,
-                                    target,
-                                    move |act| {
-                                        match act {
-                                            crate::toc_dialog::TocAction::JumpTo(t) => {
-                                                positions::record_pos(&path_cl, t, total, 0, Some(settings));
-                                                // Unwind BOTH the TOC and this scrubber:
-                                                // a single Pop would reveal the scrubber,
-                                                // whose Done would overwrite this position
-                                                // and the reader would never jump.
-                                                Action::PopN(2)
-                                            }
-                                            crate::toc_dialog::TocAction::Close => Action::Pop,
-                                        }
-                                    },
-                                )));
-                            }
-                        }
-                        Action::Pop
-                    }
-                    crate::scrubber_dialog::ScrubberAction::OpenHighlights(target) => {
-                        let path_hl = path_name.clone();
-                        let path_jump = path_hl.clone();
-                        Action::Push(Box::new(crate::highlights_dialog::HighlightsDialog::from_book(
-                            &path_hl,
-                            target,
-                            move |act| {
-                                match act {
-                                    crate::highlights_dialog::HighlightsAction::JumpTo(p) => {
-                                        // The stored page can predate a reflow — clamp.
-                                        let page = p.min(total.saturating_sub(1));
-                                        positions::record_pos(&path_jump, page, total, 0, Some(settings));
-                                        // Same unwind as the TOC jump: pop list + scrubber.
-                                        Action::PopN(2)
-                                    }
-                                    crate::highlights_dialog::HighlightsAction::Close => Action::Pop,
-                                }
-                            },
-                        )))
-                    }
-                }
-            },
-        )))
+        let Some(doc) = &self.doc else { return Action::Keep };
+        dialogs::scrubber_dialog(
+            doc,
+            self.page_no,
+            self.total,
+            self.page_gray.clone(),
+            self.book_name(),
+            self.settings,
+            self.w,
+            self.h,
+        )
     }
-
-
-
-
 
     fn open_footnote_or_link(&mut self, uri: &str) -> Action {
         let Some(doc) = &self.doc else { return Action::Keep };
-        let dest = doc.resolve_link(uri).ok().flatten();
-        let target_page = dest.as_ref().map(|d| d.loc.page_number as usize);
-        
-        let mut snippet = String::new();
-        if let Some(target) = target_page {
-            if let Ok(p) = doc.load_page(target as i32) {
-                if let Ok(tp) = p.to_text_page(mupdf::TextPageFlags::empty()) {
-                    let mut lines = Vec::new();
-                    for block in tp.blocks() {
-                        for line in block.lines() {
-                            let mut line_str = String::new();
-                            for ch in line.chars() {
-                                if let Some(c) = ch.char() {
-                                    line_str.push(c);
-                                }
-                            }
-                            let text = line_str.trim().to_string();
-                            if !text.is_empty() {
-                                lines.push(text);
-                            }
-                            if lines.len() >= 6 {
-                                break;
-                            }
-                        }
-                        if lines.len() >= 6 {
-                            break;
-                        }
-                    }
-                    snippet = lines.join(" ");
-                }
-            }
-        }
-
-        if snippet.is_empty() {
-            snippet = format!("Link target: {}", uri);
-        }
-
-        let bg = self.page_gray.clone();
-        let path_name = self.book_name();
-        let total = self.total;
-        let settings = self.settings;
-
-        Action::Push(Box::new(crate::footnote_dialog::FootnoteDialog::new(
-            "Footnote / Note",
-            &snippet,
-            target_page,
-            bg,
-            move |act| {
-                match act {
-                    crate::footnote_dialog::FootnoteAction::JumpTo(target) => {
-                        positions::record_pos(&path_name, target, total, 0, Some(settings));
-                        Action::Pop
-                    }
-                    crate::footnote_dialog::FootnoteAction::Close => Action::Pop,
-                }
-            },
-        )))
+        dialogs::footnote_dialog(
+            doc,
+            uri,
+            self.page_gray.clone(),
+            self.book_name(),
+            self.total,
+            self.settings,
+        )
     }
 
     fn open_settings_dialog(&mut self) -> Action {
-        let settings = self.settings;
-        let is_pdf = self.is_pdf();
-        let samples = self.doc.as_ref().and_then(|doc| {
-            let page = doc.load_page(self.page_no as i32).ok()?;
-            let m = Matrix::new_scale(1.0, 1.0);
-            let pm = page.to_pixmap(&m, &Colorspace::device_gray(), false, true).ok()?;
-            Some((
-                pm.samples().to_vec(),
-                pm.width() as usize,
-                pm.height() as usize,
-                pm.stride() as usize,
-            ))
-        });
-
-        let path_name = self.book_name();
-        let page_no = self.page_no;
-        let total = self.total;
-
-        Action::Push(Box::new(ReaderSettingsDialog::new(
-            settings,
-            is_pdf,
-            samples,
-            move |new_settings| {
-                positions::record_pos(&path_name, page_no, total, 0, Some(new_settings));
-                Action::Pop
-            },
-        )))
+        dialogs::settings_dialog(
+            self.doc.as_ref(),
+            self.page_no,
+            self.settings,
+            self.is_pdf(),
+            self.book_name(),
+            self.total,
+        )
     }
-
-
-
-
 
     fn open_curtain(&mut self) -> Action {
         Action::Push(Box::new(CurtainScreen::new()))
@@ -750,41 +430,10 @@ impl ReaderScreen {
         })
     }
 
-
-
-
     fn open_word_dialog(&mut self, entry: crate::vocab::WordEntry) -> Action {
-        let mut prof = self.vocab_prof.clone();
-        let word = entry.word.clone();
-        let diff = entry.difficulty;
-        let is_learning = prof.learning_words.contains(&word);
-        let bg = self.page_gray.clone();
-
-        Action::Push(Box::new(crate::word_dialog::WordDialog::new(
-            entry,
-            is_learning,
-            bg,
-            move |action| {
-                match action {
-                    crate::word_dialog::WordAction::StarLearning => {
-                        prof.record_lookup(&word, diff);
-                        let mut deck = crate::flashcards::FlashcardDeck::load();
-                        deck.add_word(&word);
-                    }
-                    crate::word_dialog::WordAction::MarkKnown => {
-                        prof.mark_known(&word, diff);
-                    }
-                    crate::word_dialog::WordAction::Close => {}
-                }
-                Action::Pop
-            },
-        )))
+        dialogs::word_dialog(entry, self.vocab_prof.clone(), self.page_gray.clone())
     }
-
-
-
 }
-
 
 impl Screen for ReaderScreen {
     fn default_edges(&self) -> bool {
@@ -794,7 +443,7 @@ impl Screen for ReaderScreen {
 
     fn on_enter(&mut self) -> Action {
         wifi::keep_awake(true);
-        self.time_str = current_time_str();
+        self.time_str = chrome::current_time_str();
         self.save_progress();
 
         let pos = positions::resume_pos(&self.book_name());
@@ -810,7 +459,10 @@ impl Screen for ReaderScreen {
         if let Ok(mut warm) = WARM.lock() {
             if let Some((p, SendDoc(doc), total, font_sz)) = warm.take() {
                 if p == self.path && (font_sz - self.settings.font_size).abs() < 0.01 {
-                    plog(&format!("book warm: instant open (rss={})", rss_mib()));
+                    plog(&format!(
+                        "book warm: instant open (rss={})",
+                        doc_store::rss_mib()
+                    ));
                     self.doc = Some(Rc::new(doc));
                     self.total = total;
                     self.scan_toc_chapters();
@@ -820,7 +472,7 @@ impl Screen for ReaderScreen {
                 }
             }
         }
-        self.loading = Some(open_async(
+        self.loading = Some(doc_store::open_async(
             self.path.clone(),
             self.w,
             self.h,
@@ -846,13 +498,13 @@ impl Screen for ReaderScreen {
         }
         plog(&format!(
             "book closed rss={} avail={}",
-            rss_mib(),
-            avail_mib()
+            doc_store::rss_mib(),
+            doc_store::avail_mib()
         ));
     }
 
     fn on_resume(&mut self) -> Action {
-        self.time_str = current_time_str();
+        self.time_str = chrome::current_time_str();
         self.vocab_prof = crate::vocab::VocabProfile::load();
 
         let pos = positions::resume_pos(&self.book_name());
@@ -881,7 +533,7 @@ impl Screen for ReaderScreen {
                 // In-memory instant reflow without re-reading/re-parsing ZIP archive from disk
                 if let Some(doc_rc) = self.doc.take() {
                     if let Ok(doc) = Rc::try_unwrap(doc_rc) {
-                        self.loading = Some(reflow_async(
+                        self.loading = Some(doc_store::reflow_async(
                             SendDoc(doc),
                             self.w,
                             self.h,
@@ -889,7 +541,7 @@ impl Screen for ReaderScreen {
                             self.settings.margin_pad,
                         ));
                     } else {
-                        self.loading = Some(open_async(
+                        self.loading = Some(doc_store::open_async(
                             self.path.clone(),
                             self.w,
                             self.h,
@@ -898,7 +550,7 @@ impl Screen for ReaderScreen {
                         ));
                     }
                 } else {
-                    self.loading = Some(open_async(
+                    self.loading = Some(doc_store::open_async(
                         self.path.clone(),
                         self.w,
                         self.h,
@@ -916,8 +568,6 @@ impl Screen for ReaderScreen {
         }
     }
 
-
-
     fn tick_interval(&self) -> std::time::Duration {
         if self.loading.is_some() {
             std::time::Duration::from_millis(150)
@@ -927,7 +577,7 @@ impl Screen for ReaderScreen {
     }
 
     fn on_tick(&mut self) -> Action {
-        self.time_str = current_time_str();
+        self.time_str = chrome::current_time_str();
         let Some(rx) = &self.loading else {
             return Action::Keep;
         };
@@ -939,11 +589,12 @@ impl Screen for ReaderScreen {
                 self.highlights = crate::notes::load(&self.book_name());
                 self.loading = None;
 
-
                 if self.pending_turns != 0 {
                     let steps = self.settings.split.total_steps(self.total);
                     let cur_step = self.settings.split.page_sub_to_step(self.page_no, self.sub_idx);
-                    let target_step = (cur_step as i32 + self.pending_turns).clamp(0, steps.saturating_sub(1) as i32) as usize;
+                    let target_step =
+                        (cur_step as i32 + self.pending_turns).clamp(0, steps.saturating_sub(1) as i32)
+                            as usize;
                     let (target_page, target_sub) = self.settings.split.step_to_page_sub(target_step);
                     self.page_no = target_page;
                     self.sub_idx = target_sub;
@@ -957,15 +608,14 @@ impl Screen for ReaderScreen {
                 self.loading = None;
                 Action::Redraw
             }
-            Err(mpsc::TryRecvError::Empty) => Action::Keep,
-            Err(mpsc::TryRecvError::Disconnected) => {
+            Err(std::sync::mpsc::TryRecvError::Empty) => Action::Keep,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.err = Some("Loader thread disconnected".to_string());
                 self.loading = None;
                 Action::Redraw
             }
         }
     }
-
 
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
@@ -1004,7 +654,7 @@ impl Screen for ReaderScreen {
                     self.page_no,
                     self.sub_idx,
                     t0.elapsed().as_millis(),
-                    rss_mib()
+                    doc_store::rss_mib()
                 ));
                 match page {
                     Some(gray) => {
@@ -1041,126 +691,33 @@ impl Screen for ReaderScreen {
             }
         }
 
-        // Render Word Wise Inline Annotations
-        if self.vocab_prof.style == crate::vocab::AnnotationStyle::Interlinear {
+        // Word Wise annotations in the profile's style
+        crate::vocab::draw_annotations(
+            p,
+            &self.page_annotations,
+            self.vocab_prof.style,
+            is_night,
+        );
 
-            for (r, entry) in &self.page_annotations {
-                let full_gloss = &entry.gloss_en;
-                let short = if full_gloss.len() > 16 {
-                    let mut s = String::new();
-                    for w in full_gloss.split_whitespace() {
-                        if s.len() + w.len() + 1 > 15 {
-                            s.push('…');
-                            break;
-                        }
-                        if !s.is_empty() {
-                            s.push(' ');
-                        }
-                        s.push_str(w);
-                    }
-                    s
-                } else {
-                    full_gloss.clone()
-                };
-
-                let font_sz = 4.5;
-                let tw = p.text_width(font_sz, &short).round() as i32;
-                let word_mid = ((r.x0 + r.x1) / 2.0).round() as i32;
-                let gx = (word_mid - tw / 2).max(pt(6.0));
-                let gy = (r.y0 - pt(2.0) as f32).round() as i32;
-
-                // Draw floating outline pill badge directly centered above the word
-                let pill_r = yui::painter::Rect::new(gx - pt(2.0), gy - pt(4.5), tw + pt(4.0), pt(5.5));
-                p.rect(pill_r, if is_night { 0 } else { 255 });
-                p.rect_outline_t(pill_r, 1, if is_night { 80 } else { 200 });
-                p.text(gx, gy, font_sz, if is_night { 235 } else { 30 }, &short);
-            }
-        } else if self.vocab_prof.style == crate::vocab::AnnotationStyle::DottedUnderline {
-            for (r, _) in &self.page_annotations {
-                let y = (r.y1 - 1.0).round() as i32;
-                let x0 = r.x0.round() as i32;
-                let x1 = r.x1.round() as i32;
-                let dot_fg = if is_night { 190 } else { 80 };
-                let mut x = x0;
-                while x + 2 <= x1 {
-                    p.rect(yui::painter::Rect::new(x, y, 2, 2), dot_fg);
-                    x += 4;
-                }
-            }
-        } else if self.vocab_prof.style == crate::vocab::AnnotationStyle::Margin {
-            let mut my = h - pt(28.0);
-            for (_, entry) in self.page_annotations.iter().take(2) {
-                let line = format!("• {}: {}", entry.word, entry.gloss_en);
-                let trunc = p.truncate(7.0, &line, p.width_pt() - 32.0);
-                p.text(pt(16.0), my, 7.0, if is_night { 190 } else { 85 }, &trunc);
-                my += pt(10.0);
-            }
-        }
-
-        // Header Status Line (Clock + Battery + Title)
-
+        // Header status line + progress footer
         if self.settings.show_header {
-            let (bat_cap, _) = sysinfo::battery();
-            let bat_str = format!("{}%", bat_cap);
-            let title_trunc = p.truncate(7.0, &self.book_name(), p.width_pt() - 70.0);
-
-            if self.settings.split.is_landscape() {
-                // Header in landscape orientation
-                let rot = self.settings.split.rotation;
-                let header_text = format!("{} · {} · {}", self.time_str, title_trunc, bat_str);
-                let cx = if rot == 270 { pt(10.0) } else { w - pt(10.0) };
-                p.text_center_rotated(cx, h / 2, 6.5, fg_color, &header_text, rot);
-            } else {
-                // Header in portrait
-                p.text(pt(16.0), pt(14.0), 7.0, fg_color, &self.time_str);
-                p.text_center(pt(14.0), 7.0, fg_color, &title_trunc);
-                p.text_right(w - pt(16.0), pt(14.0), 7.0, fg_color, &bat_str);
-                p.hline_t(pt(20.0), pt(16.0), w - pt(16.0), 1, if is_night { 60 } else { 225 });
-            }
+            chrome::draw_header(p, &self.time_str, &self.book_name(), &self.settings, is_night);
         }
-
-        // Bottom Footer Line (Reading Progress & Time Left)
-        let pages_left_book = self.total.saturating_sub(self.page_no + 1);
-        let pages_left_chap = if let Some(next_chap_page) = self.toc_chapters.iter().find(|&&p| p > self.page_no) {
-            next_chap_page.saturating_sub(self.page_no)
-        } else {
-            pages_left_book
-        };
-
-        let mins_in_chap = ((pages_left_chap as f32 * self.avg_secs_per_page) / 60.0).round() as usize;
-        let mins_in_book = ((pages_left_book as f32 * self.avg_secs_per_page) / 60.0).round() as usize;
-        let time_left_str = if mins_in_book >= 60 {
-            format!("{}m in ch · {}h {}m left", mins_in_chap, mins_in_book / 60, mins_in_book % 60)
-        } else {
-            format!("{}m in ch · {}m left", mins_in_chap, mins_in_book)
-        };
-
-        let footer = if self.loading.is_some() {
-            format!("page {} · Loading book…", self.page_no + 1)
-        } else if self.settings.split.total_steps(self.total) > self.total {
-            format!(
-                "page {} ({}/{}) · {}",
-                self.page_no + 1,
-                self.sub_idx + 1,
-                self.settings.split.sub_box_count(),
-                time_left_str
-            )
-        } else {
-            format!("page {} / {} · {}", self.page_no + 1, self.total, time_left_str)
-        };
-
-
-        match self.settings.split.rotation {
-            270 => {
-                p.text_center_rotated(w - pt(10.0), h / 2, 7.0, fg_color, &footer, 270);
-            }
-            90 => {
-                p.text_center_rotated(pt(10.0), h / 2, 7.0, fg_color, &footer, 90);
-            }
-            _ => {
-                p.text_center(h - pt(10.0), 7.0, fg_color, &footer);
-            }
-        }
+        let time_left = chrome::time_left_str(
+            self.total,
+            self.page_no,
+            &self.toc_chapters,
+            self.avg_secs_per_page,
+        );
+        let footer = chrome::footer_str(
+            self.loading.is_some(),
+            self.page_no,
+            self.sub_idx,
+            self.total,
+            &self.settings,
+            &time_left,
+        );
+        chrome::draw_footer(p, &footer, self.settings.split.rotation, is_night);
 
         // Saved highlights: solid light underlines, page-gated and matched
         // by word sequence within the page. (A span that crosses a
@@ -1183,80 +740,10 @@ impl Screen for ReaderScreen {
             }
         }
 
-        // Selection-mode bookmark: a ribbon hanging from the top edge,
-        // left of the battery — outline when off, filled when on.
-        {
-            let bw = pt(13.0);
-            let bh = pt(20.0);
-            let x = w - pt(58.0);
-            let y = 0;
-            let body_h = bh - pt(4.0);
-            let seg = bw / 3;
-            if self.sel_mode {
-                p.rect(Rect::new(x, y, bw, body_h), 0);
-                p.rect(Rect::new(x, y + body_h, seg, pt(4.0)), 0);
-                p.rect(Rect::new(x + 2 * seg, y + body_h, seg, pt(4.0)), 0);
-            } else {
-                p.rect_outline_t(Rect::new(x, y, bw, body_h), 2, 130);
-                p.line_w(x, y + body_h, x + bw / 2, y + bh, 2, 130);
-                p.line_w(x + bw, y + body_h, x + bw / 2, y + bh, 2, 130);
-            }
-        }
-
-        // Pending selection: inverted span + end carets + confirm bar.
+        // Selection-mode ribbon + the pending selection itself
+        chrome::draw_bookmark_ribbon(p, w, self.sel_mode);
         if let Some(sel) = &self.sel {
-            let (lo, hi) = sel.span();
-            if hi < self.page_words.len() {
-                for (_, r) in &self.page_words[lo..=hi] {
-                    let x0 = (r.x0 - 2.0).round() as i32;
-                    let y0 = (r.y0 - 1.0).round() as i32;
-                    let rw = ((r.x1 - r.x0) + 4.0).round().max(2.0) as i32;
-                    let rh = ((r.y1 - r.y0) + 2.0).round().max(2.0) as i32;
-                    p.invert(Rect::new(x0, y0, rw, rh));
-                }
-                draw_sel_caret(p, &self.page_words[lo].1, true);
-                draw_sel_caret(p, &self.page_words[hi].1, false);
-
-                let (bar, ok_btn, x_btn) = sel_bar_rects(w, h);
-                p.rect(bar, 255);
-                p.rect_outline_t(bar, 2, 0);
-                let text = self.page_words[lo..=hi]
-                    .iter()
-                    .map(|(w, _)| w.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let trunc = p.truncate(
-                    8.0,
-                    &text,
-                    (ok_btn.x - bar.x - pt(24.0)) as f32 / pt(1.0) as f32,
-                );
-                p.text(bar.x + pt(12.0), bar.y + pt(19.0), 8.0, 0, &trunc);
-                p.text(
-                    bar.x + pt(12.0),
-                    bar.y + pt(37.0),
-                    6.5,
-                    130,
-                    "tap: end · hold: start",
-                );
-                p.rect(ok_btn, 0);
-                p.text_center_in(
-                    ok_btn.x,
-                    ok_btn.x + ok_btn.w,
-                    ok_btn.y + pt(21.0),
-                    9.0,
-                    255,
-                    "Save",
-                );
-                p.rect_outline_t(x_btn, 2, 100);
-                p.text_center_in(
-                    x_btn.x,
-                    x_btn.x + x_btn.w,
-                    x_btn.y + pt(21.0),
-                    9.0,
-                    50,
-                    "Cancel",
-                );
-            }
+            selection::draw_selection(p, sel, &self.page_words);
         }
     }
 
@@ -1314,14 +801,13 @@ impl Screen for ReaderScreen {
             return act;
         }
 
-
         match g {
             Gesture::LongPress { .. } => {
                 // Selection mode: a long-press anchors a selection (or
                 // re-anchors a pending one — then dragging extends again).
                 if let Some(i) = self.word_idx_at_pos(vx as f32, vy as f32) {
                     if self.sel.is_some() || self.sel_mode {
-                        self.sel = Some(SelState { anchor: i, end: i });
+                        self.sel = Some(SelState::new(i));
                         return Action::Redraw;
                     }
                 }
@@ -1351,15 +837,8 @@ impl Screen for ReaderScreen {
                     }
                     // Not in the dictionary: say so — a silent no-op on a
                     // deliberate long-press reads as broken, not as "no
-                    // entry". Same bottom-card form as the word dialog.
-                    let bg = self.page_gray.clone();
-                    return Action::Push(Box::new(crate::footnote_dialog::FootnoteDialog::new(
-                        "Dictionary",
-                        &format!("«{}» — no entry in the dictionary", word_text),
-                        None,
-                        bg,
-                        |_act| Action::Pop,
-                    )));
+                    // entry".
+                    return dialogs::dict_miss(&word_text, self.page_gray.clone());
                 }
                 Action::Keep
             }
@@ -1454,62 +933,4 @@ impl Screen for ReaderScreen {
             _ => Action::Keep,
         }
     }
-
-
 }
-
-fn current_time_str() -> String {
-    Command::new("date")
-        .arg("+%H:%M")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "--:--".to_string())
-}
-
-fn rss_mib() -> String {
-    sysinfo::rss_kib().map_or_else(|| "?".into(), |k| format!("{}m", k / 1024))
-}
-
-fn avail_mib() -> String {
-    sysinfo::mem_available_kib()
-        .map_or_else(|| "?".into(), |k| format!("{}m", k / 1024))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sel_state_span_orders_and_flips() {
-        // Drag/tap "backwards" past the anchor: the span is simply ordered.
-        let s = SelState { anchor: 5, end: 2 };
-        assert_eq!(s.span(), (2, 5));
-        let s = SelState { anchor: 5, end: 9 };
-        assert_eq!(s.span(), (5, 9));
-        let s = SelState { anchor: 5, end: 5 };
-        assert_eq!(s.span(), (5, 5));
-    }
-
-
-
-
-
-
-
-
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
