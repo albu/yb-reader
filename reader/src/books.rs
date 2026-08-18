@@ -25,14 +25,13 @@ use crate::positions;
 use crate::settings_dialog::ReaderSettingsDialog;
 use crate::split::{RectF, ReaderSettings};
 
+use crate::render::render_page;
 use crate::wifi;
 
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
 const LIB_DIR: &str = "/mnt/us/documents";
-const HEADER_H: u32 = 48; // px
-const FOOTER_H: u32 = 72; // px
 
 
 /// Files in documents that carry a book-ish extension but belong to the
@@ -91,8 +90,7 @@ fn reflow_async(
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let t0 = Instant::now();
-        let avail_w = (w - 2 * margin_pad) as f32 * 72.0 / 300.0;
-        let avail_h = (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32 * 72.0 / 300.0;
+        let (avail_w, avail_h) = crate::render::avail_pt(w, h, margin_pad);
         let _ = send_doc.0.layout(avail_w, avail_h, font_size);
         let total = send_doc.0.page_count().unwrap_or(1).max(1) as usize;
         plog(&format!(
@@ -127,8 +125,7 @@ fn open_async(
             let mut doc = Document::open(path.as_os_str()).map_err(|e| e.to_string())?;
             let open_ms = t0.elapsed().as_millis();
             // Reflow to the reading area (no-op for fixed-layout docs).
-            let avail_w = (w - 2 * margin_pad) as f32 * 72.0 / 300.0;
-            let avail_h = (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32 * 72.0 / 300.0;
+            let (avail_w, avail_h) = crate::render::avail_pt(w, h, margin_pad);
             let _ = doc.layout(avail_w, avail_h, font_size);
             let total = doc.page_count().unwrap_or(1).max(1) as usize;
             plog(&format!(
@@ -679,177 +676,35 @@ impl ReaderScreen {
     fn compute_annotations(&mut self) {
         self.page_words.clear();
         self.page_annotations.clear();
+        self.page_links.clear();
 
         let Some(doc) = &self.doc else { return };
         let Ok(page) = doc.load_page(self.page_no as i32) else { return };
+        let Some(geom) = crate::render::LayoutGeom::new(
+            &self.settings,
+            page.bounds().unwrap_or_default(),
+            self.sub_idx,
+            self.w,
+            self.h,
+        ) else {
+            return;
+        };
         let Ok(tp) = page.to_text_page(mupdf::TextPageFlags::empty()) else { return };
 
-        let bounds = page.bounds().unwrap_or_default();
-        let pw = bounds.x1 - bounds.x0;
-        let ph = bounds.y1 - bounds.y0;
-        if pw <= 0.0 || ph <= 0.0 {
-            return;
-        }
-
-        let config = &self.settings.split;
-        let boxes = config.sub_boxes();
-        let sub_box = boxes
-            .get(self.sub_idx)
-            .copied()
-            .unwrap_or(RectF::new(0.0, 0.0, 1.0, 1.0));
-
-        let bw = sub_box.width() * pw;
-        let bh = sub_box.height() * ph;
-        let margin_pad = self.settings.margin_pad;
-
-        let is_landscape = config.is_landscape();
-        let (vis_w, vis_h) = if is_landscape {
-            (
-                (self.h - 2 * margin_pad) as f32,
-                (self.w - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
-            )
-        } else {
-            (
-                (self.w - 2 * margin_pad) as f32,
-                (self.h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
-            )
-        };
-
-        let zoom = (vis_w / bw).min(vis_h / bh);
-        let rw = (bw * zoom).round() as usize;
-        let rh = (bh * zoom).round() as usize;
-
-        let vis_ox = ((vis_w as usize).saturating_sub(rw)) / 2 + margin_pad as usize;
-        let vis_oy = ((vis_h as usize).saturating_sub(rh)) / 2 + (HEADER_H + margin_pad) as usize;
-
-        let rot = config.rotation;
-        let mut candidate_entries: Vec<(RectF, crate::vocab::WordEntry)> = Vec::new();
-
-        // Extract interactive page links (e.g. footnotes, named destinations, URLs)
-        self.page_links.clear();
-        if let Ok(links) = page.links() {
-            for l in links {
-                let sx0 = vis_ox as f32 + (l.bounds.x0 - sub_box.x0 * pw) * zoom;
-                let sy0 = vis_oy as f32 + (l.bounds.y0 - sub_box.y0 * ph) * zoom;
-                let sx1 = vis_ox as f32 + (l.bounds.x1 - sub_box.x0 * pw) * zoom;
-                let sy1 = vis_oy as f32 + (l.bounds.y1 - sub_box.y0 * ph) * zoom;
-
-                let (px0, py0, px1, py1) = match rot {
-                    270 => (
-                        (self.h - 1) as f32 - sy1,
-                        sx0,
-                        (self.h - 1) as f32 - sy0,
-                        sx1,
-                    ),
-                    90 => (
-                        sy0,
-                        (self.w - 1) as f32 - sx1,
-                        sy1,
-                        (self.w - 1) as f32 - sx0,
-                    ),
-                    _ => (sx0, sy0, sx1, sy1),
-                };
-
-                let r = RectF::new(px0.min(px1), py0.min(py1), px0.max(px1), py0.max(py1));
-                self.page_links.push((r, l.uri));
-            }
-        }
-
-        for block in tp.blocks() {
-
-            for line in block.lines() {
-                let mut cur_word = String::new();
-                let mut min_x = f32::MAX;
-                let mut min_y = f32::MAX;
-                let mut max_x = f32::MIN;
-                let mut max_y = f32::MIN;
-
-                for ch in line.chars() {
-                    if let Some(c) = ch.char() {
-                        if c.is_whitespace() {
-                            if !cur_word.is_empty() {
-                                let sx0 = vis_ox as f32 + (min_x - sub_box.x0 * pw) * zoom;
-                                let sy0 = vis_oy as f32 + (min_y - sub_box.y0 * ph) * zoom;
-                                let sx1 = vis_ox as f32 + (max_x - sub_box.x0 * pw) * zoom;
-                                let sy1 = vis_oy as f32 + (max_y - sub_box.y0 * ph) * zoom;
-
-                                let (px0, py0, px1, py1) = match rot {
-                                    270 => (
-                                        (self.h - 1) as f32 - sy1,
-                                        sx0,
-                                        (self.h - 1) as f32 - sy0,
-                                        sx1,
-                                    ),
-                                    90 => (
-                                        sy0,
-                                        (self.w - 1) as f32 - sx1,
-                                        sy1,
-                                        (self.w - 1) as f32 - sx0,
-                                    ),
-                                    _ => (sx0, sy0, sx1, sy1),
-                                };
-
-                                let r = RectF::new(px0, py0, px1, py1);
-                                self.page_words.push((cur_word.clone(), r));
-                                if let Some(db) = &self.vocab_db {
-                                    if let Some(entry) = db.lookup(&cur_word) {
-                                        if self.vocab_prof.should_annotate(&entry) {
-                                            candidate_entries.push((r, entry));
-                                        }
-                                    }
-                                }
-                                cur_word.clear();
-                                min_x = f32::MAX;
-                                min_y = f32::MAX;
-                                max_x = f32::MIN;
-                                max_y = f32::MIN;
-                            }
-                        } else {
-                            cur_word.push(c);
-                            let q = ch.quad();
-                            min_x = min_x.min(q.ul.x).min(q.ll.x);
-                            min_y = min_y.min(q.ul.y).min(q.ur.y);
-                            max_x = max_x.max(q.ur.x).max(q.lr.x);
-                            max_y = max_y.max(q.ll.y).max(q.lr.y);
-                        }
-                    }
-                }
-                if !cur_word.is_empty() {
-                    let sx0 = vis_ox as f32 + (min_x - sub_box.x0 * pw) * zoom;
-                    let sy0 = vis_oy as f32 + (min_y - sub_box.y0 * ph) * zoom;
-                    let sx1 = vis_ox as f32 + (max_x - sub_box.x0 * pw) * zoom;
-                    let sy1 = vis_oy as f32 + (max_y - sub_box.y0 * ph) * zoom;
-
-                    let (px0, py0, px1, py1) = match rot {
-                        270 => (
-                            (self.h - 1) as f32 - sy1,
-                            sx0,
-                            (self.h - 1) as f32 - sy0,
-                            sx1,
-                        ),
-                        90 => (
-                            sy0,
-                            (self.w - 1) as f32 - sx1,
-                            sy1,
-                            (self.w - 1) as f32 - sx0,
-                        ),
-                        _ => (sx0, sy0, sx1, sy1),
-                    };
-
-                    let r = RectF::new(px0, py0, px1, py1);
-                    self.page_words.push((cur_word.clone(), r));
-                    if let Some(db) = &self.vocab_db {
-                        if let Some(entry) = db.lookup(&cur_word) {
-                            if self.vocab_prof.should_annotate(&entry) {
-                                candidate_entries.push((r, entry));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        self.page_links = crate::render::links_from_page(&page, &geom);
+        self.page_words = crate::render::words_from_text_page(&tp, &geom);
 
         // Budget annotations: take highest-difficulty words up to max_per_page
+        let mut candidate_entries: Vec<(RectF, crate::vocab::WordEntry)> = Vec::new();
+        if let Some(db) = &self.vocab_db {
+            for (word, r) in &self.page_words {
+                if let Some(entry) = db.lookup(word) {
+                    if self.vocab_prof.should_annotate(&entry) {
+                        candidate_entries.push((*r, entry));
+                    }
+                }
+            }
+        }
         candidate_entries.sort_by(|a, b| b.1.difficulty.cmp(&a.1.difficulty));
         self.page_annotations = candidate_entries
             .into_iter()
@@ -1622,190 +1477,9 @@ fn avail_mib() -> String {
         .map_or_else(|| "?".into(), |k| format!("{}m", k / 1024))
 }
 
-fn render_page(
-    doc: &Document,
-    page_no: usize,
-    sub_idx: usize,
-    settings: &ReaderSettings,
-    w: u32,
-    h: u32,
-) -> Option<Vec<u8>> {
-    let page = doc.load_page(page_no as i32).ok()?;
-    let bounds = page.bounds().ok()?;
-    let pw = bounds.x1 - bounds.x0;
-    let ph = bounds.y1 - bounds.y0;
-    if pw <= 0.0 || ph <= 0.0 {
-        return None;
-    }
-
-    let config = &settings.split;
-    let boxes = config.sub_boxes();
-    let sub_box = boxes
-        .get(sub_idx)
-        .copied()
-        .unwrap_or(RectF::new(0.0, 0.0, 1.0, 1.0));
-
-    let bw = sub_box.width() * pw;
-    let bh = sub_box.height() * ph;
-
-    let margin_pad = settings.margin_pad;
-    let mut out = vec![255u8; (w as usize) * (h as usize)];
-
-    let is_landscape = config.is_landscape();
-    let (vis_w, vis_h) = if is_landscape {
-        (
-            (h - 2 * margin_pad) as f32,
-            (w - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
-        )
-    } else {
-        (
-            (w - 2 * margin_pad) as f32,
-            (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
-        )
-    };
-
-    let zoom = (vis_w / bw).min(vis_h / bh);
-
-    let mut m = Matrix::IDENTITY;
-    m.scale(zoom, zoom);
-    let pm = page
-        .to_pixmap(&m, &Colorspace::device_gray(), false, true)
-        .ok()?;
-
-    let pm_w = pm.width() as usize;
-    let pm_h = pm.height() as usize;
-    let stride = pm.stride() as usize;
-    let samples = pm.samples();
-
-    let src_x = (sub_box.x0 * pw * zoom).round() as usize;
-    let src_y = (sub_box.y0 * ph * zoom).round() as usize;
-    let rw = ((bw * zoom).round() as usize).min(pm_w.saturating_sub(src_x));
-    let rh = ((bh * zoom).round() as usize).min(pm_h.saturating_sub(src_y));
-
-    if rw == 0 || rh == 0 {
-        settings.apply_lut(&mut out);
-        return Some(out);
-    }
-
-    let vis_ox = ((vis_w as usize).saturating_sub(rw)) / 2 + margin_pad as usize;
-    let vis_oy = ((vis_h as usize).saturating_sub(rh)) / 2 + (HEADER_H + margin_pad) as usize;
-
-    // Calculate dashed reading boundary line position (where previous sub-page ended)
-    let dash_y = if sub_idx > 0 && config.sub_box_count() > 1 {
-        let n = config.sub_box_count() as f32;
-        let ov = config.overlap.clamp(0.0, 0.35);
-        let overlap_frac = (n * ov) / (1.0 + (n - 1.0) * ov);
-        let dy = (overlap_frac * rh as f32).round() as usize;
-        if dy > 2 && dy < rh.saturating_sub(2) {
-            Some(dy)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    match config.rotation {
-        270 => {
-            // 270° CW (USB bezel on left):
-            // Visual X (0..rw) maps to physical Y: (h - 1 - (vis_ox + vx))
-            // Visual Y (0..rh) maps to physical X: (vis_oy + vy)
-            let w_u = w as usize;
-            let h_u = h as usize;
-
-            for vy in 0..rh {
-                let px = vis_oy + vy;
-                if px >= w_u {
-                    continue;
-                }
-                let src_row_start = (src_y + vy) * stride + src_x;
-                let is_dash_row = dash_y == Some(vy);
-
-                for vx in 0..rw {
-                    let py = (h_u - 1).saturating_sub(vis_ox + vx);
-                    if py < h_u && src_row_start + vx < samples.len() {
-                        let mut pixel = samples[src_row_start + vx];
-                        if is_dash_row && (vx / 8) % 2 == 0 && pixel > 140 {
-                            pixel = 140; // Subtle dotted guide line
-                        }
-                        out[py * w_u + px] = pixel;
-                    }
-                }
-            }
-        }
-
-        90 => {
-            // 90° CCW (USB bezel on right):
-            // Visual X (0..rw) maps to physical Y: (vis_ox + vx)
-            // Visual Y (0..rh) maps to physical X: (w - 1 - (vis_oy + vy))
-            let w_u = w as usize;
-            let h_u = h as usize;
-
-            for vy in 0..rh {
-                let px = (w_u - 1).saturating_sub(vis_oy + vy);
-                if px >= w_u {
-                    continue;
-                }
-                let src_row_start = (src_y + vy) * stride + src_x;
-                let is_dash_row = dash_y == Some(vy);
-
-                for vx in 0..rw {
-                    let py = vis_ox + vx;
-                    if py < h_u && src_row_start + vx < samples.len() {
-                        let mut pixel = samples[src_row_start + vx];
-                        if is_dash_row && (vx / 8) % 2 == 0 && pixel > 140 {
-                            pixel = 140;
-                        }
-                        out[py * w_u + px] = pixel;
-                    }
-                }
-            }
-        }
-
-        _ => {
-            // 0° Portrait:
-            let w_u = w as usize;
-            let h_u = h as usize;
-
-            for vy in 0..rh {
-                let dst_y = vis_oy + vy;
-                if dst_y >= h_u {
-                    break;
-                }
-                let src_start = (src_y + vy) * stride + src_x;
-                let dst_start = dst_y * w_u + vis_ox;
-                let len = rw.min(w_u.saturating_sub(vis_ox));
-                if src_start + len <= samples.len() && dst_start + len <= out.len() {
-                    out[dst_start..dst_start + len]
-                        .copy_from_slice(&samples[src_start..src_start + len]);
-
-                    if dash_y == Some(vy) {
-                        for vx in 0..len {
-                            if (vx / 8) % 2 == 0 {
-                                let p = &mut out[dst_start + vx];
-                                if *p > 140 {
-                                    *p = 140;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-
-    // Apply Contrast / Whitening / Invert LUT
-    settings.apply_lut(&mut out);
-
-    Some(out)
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::split::{SplitConfig, SplitPreset};
 
     #[test]
     fn sel_state_span_orders_and_flips() {
@@ -1818,149 +1492,16 @@ mod tests {
         assert_eq!(s.span(), (5, 5));
     }
 
-    #[test]
-    fn test_render_subbox_portrait() {
-        let pdf_path = "/tmp/sample_book.pdf";
-        if !std::path::Path::new(pdf_path).exists() {
-            return;
-        }
-        let doc = Document::open(pdf_path).expect("open doc");
-        let settings = ReaderSettings::default();
-        let rendered = render_page(&doc, 20, 0, &settings, 1236, 1648);
-        assert!(rendered.is_some());
-        assert_eq!(rendered.unwrap().len(), 1236 * 1648);
-    }
-
-    #[test]
-    fn test_mupdf_page_text_methods() {
-        let pdf_path = "/tmp/sample_book.pdf";
-        if !std::path::Path::new(pdf_path).exists() {
-            return;
-        }
-        let doc = Document::open(pdf_path).expect("open doc");
-        let page = doc.load_page(20).expect("load page 20");
-        let tp = page.to_text_page(mupdf::TextPageFlags::empty()).expect("to_text_page");
-
-        let mut words = Vec::new();
-        for block in tp.blocks() {
-            for line in block.lines() {
-                let mut cur_word = String::new();
-                let mut min_x = f32::MAX;
-                let mut min_y = f32::MAX;
-                let mut max_x = f32::MIN;
-                let mut max_y = f32::MIN;
-
-                for ch in line.chars() {
-                    if let Some(c) = ch.char() {
-                        if c.is_whitespace() {
-                            if !cur_word.is_empty() {
-                                words.push((cur_word.clone(), min_x, min_y, max_x, max_y));
-                                cur_word.clear();
-                                min_x = f32::MAX;
-                                min_y = f32::MAX;
-                                max_x = f32::MIN;
-                                max_y = f32::MIN;
-                            }
-                        } else {
-                            cur_word.push(c);
-                            let q = ch.quad();
-                            min_x = min_x.min(q.ul.x).min(q.ll.x);
-                            min_y = min_y.min(q.ul.y).min(q.ur.y);
-                            max_x = max_x.max(q.ur.x).max(q.lr.x);
-                            max_y = max_y.max(q.ll.y).max(q.lr.y);
-                        }
-                    }
-                }
-                if !cur_word.is_empty() {
-                    words.push((cur_word, min_x, min_y, max_x, max_y));
-                }
-            }
-        }
-
-        println!("Extracted {} words from page 20. First 10:", words.len());
-        for (w, x0, y0, x1, y1) in words.iter().take(10) {
-            println!("  '{}' at [{:.1}, {:.1}, {:.1}, {:.1}]", w, x0, y0, x1, y1);
-        }
-        assert!(!words.is_empty());
-    }
 
 
 
 
 
-    #[test]
-    fn test_render_subbox_horizontal2_landscape() {
-        let pdf_path = "/tmp/sample_book.pdf";
-        if !std::path::Path::new(pdf_path).exists() {
-            return;
-        }
-        let doc = Document::open(pdf_path).expect("open doc");
-        let mut settings = ReaderSettings::default();
-        settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
-        let r0 = render_page(&doc, 20, 0, &settings, 1236, 1648);
-        assert!(r0.is_some());
-        let r1 = render_page(&doc, 20, 1, &settings, 1236, 1648);
-        assert!(r1.is_some());
-    }
 
 
-    #[test]
-    fn test_render_subbox_horizontal3_landscape() {
-        let pdf_path = "/tmp/sample_book.pdf";
-        if !std::path::Path::new(pdf_path).exists() {
-            return;
-        }
-        let doc = Document::open(pdf_path).expect("open doc");
-        let mut settings = ReaderSettings::default();
-        settings.split = SplitConfig::for_preset(SplitPreset::Horizontal3);
-        for sub in 0..3 {
-            let r = render_page(&doc, 20, sub, &settings, 1236, 1648);
-            assert!(r.is_some());
-        }
-    }
 
-    #[test]
-    fn test_diagnostic_subboxes() {
-        let pdf_path = "/tmp/sample_book.pdf";
-        if !std::path::Path::new(pdf_path).exists() {
-            return;
-        }
-        let doc = Document::open(pdf_path).expect("open doc");
 
-        for page_no in [0, 1, 5, 20, 21, 50] {
-            let page = doc.load_page(page_no).unwrap();
-            let bounds = page.bounds().unwrap();
-            println!("\n=== Page {} bounds: x0={} y0={} x1={} y1={} ===", page_no, bounds.x0, bounds.y0, bounds.x1, bounds.y1);
-            let mut settings = ReaderSettings::default();
-            settings.split = SplitConfig::for_preset(SplitPreset::Horizontal3);
 
-            let boxes = settings.split.sub_boxes();
-            for (sub_idx, b) in boxes.iter().enumerate() {
-                let rendered = render_page(&doc, page_no as usize, sub_idx, &settings, 1236, 1648);
-                assert!(rendered.is_some());
-                println!("  Sub {}: box=[{:.4}, {:.4}, {:.4}, {:.4}] len={}", sub_idx, b.x0, b.y0, b.x1, b.y1, rendered.unwrap().len());
-            }
-        }
-    }
-
-    #[test]
-    fn test_probe_mupdf() {
-        let pdf_path = "/tmp/sample_book.pdf";
-        if !std::path::Path::new(pdf_path).exists() {
-            return;
-        }
-        let doc = Document::open(pdf_path).expect("open doc");
-        let page = doc.load_page(8).unwrap();
-        if let Ok(links) = page.links() {
-            for l in links.take(5) {
-                let uri = &l.uri;
-                println!("URI: {}", uri);
-                if let Ok(dest) = doc.resolve_link(uri) {
-                    println!("  Resolved link to page: {:?}", dest);
-                }
-            }
-        }
-    }
 }
 
 

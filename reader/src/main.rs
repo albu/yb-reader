@@ -16,6 +16,7 @@ mod notes;
 mod positions;
 mod protocol;
 mod receive;
+mod render;
 mod scrubber_dialog;
 mod settings_dialog;
 mod split;

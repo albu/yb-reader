@@ -108,7 +108,7 @@ impl ReceiveServer {
                     // One connection at a time: this is a single-user drop
                     // zone, and sequential handling bounds RAM on a device
                     // with ~150 MB free.
-                    Ok((mut stream, _)) => {
+                    Ok((stream, _)) => {
                         // accept() inherits the listener's O_NONBLOCK on
                         // Linux: without this, a read that races the
                         // client's first packet returns WouldBlock, which
