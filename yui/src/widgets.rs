@@ -146,6 +146,9 @@ pub struct SleepScreen {
     /// jump can distort one line — an acceptable trade.
     entered_wall: std::time::SystemTime,
     batt_enter: u8,
+    /// Gauge charge at entry (mAh) — sub-percent drain accounting for the
+    /// wake line, where capacity% granularity (1% ≈ 17mAh) floors out.
+    q_enter: i64,
     /// Kernel suspends this session. Every wake re-suspends on the next
     /// tick unless a real gesture arrived, so suspends-1 is the count of
     /// wakes that were NOT the power key — the spurious-wake churn number
@@ -197,6 +200,15 @@ fn suspend_to_mem() {
     }
 }
 
+/// Gauge-integrated charge right now, mAh (0 if unreadable).
+fn charge_now_mah() -> i64 {
+    std::fs::read_to_string("/sys/class/power_supply/bd71827_bat/charge_now")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .map(|ua| ua / 1000)
+        .unwrap_or(0)
+}
+
 fn batt_stats() -> String {
     let read = |f: &str| {
         std::fs::read_to_string(format!("/sys/class/power_supply/bd71827_bat/{}", f))
@@ -204,11 +216,16 @@ fn batt_stats() -> String {
             .and_then(|s| s.trim().parse::<i64>().ok())
             .unwrap_or(0)
     };
+    // q = the gauge's integrated charge in mAh (charge_now is µAh, and
+    // capacity% is just q/charge_full rounded — verified 1225/1703 → 72).
+    // It gives the sleep drain a real number where % granularity would
+    // floor at 1% per 8h.
     format!(
-        "batt={}% v={}mV i={}mA",
+        "batt={}% v={}mV i={}mA q={}mAh",
         read("capacity"),
         read("voltage_now") / 1000,
-        read("current_now") / 1000
+        read("current_now") / 1000,
+        read("charge_now") / 1000
     )
 }
 
@@ -239,6 +256,7 @@ impl SleepScreen {
         let image_raw = pick_random_screensaver();
 
         let batt_enter = ybdev::sysinfo::battery().0;
+        let q_enter = charge_now_mah();
         ybdev::log::plog(&format!("sleep: enter {}", batt_stats()));
 
         SleepScreen {
@@ -248,6 +266,7 @@ impl SleepScreen {
             image: None,
             entered_wall: std::time::SystemTime::now(),
             batt_enter,
+            q_enter,
             suspends: 0,
         }
     }
@@ -381,7 +400,11 @@ impl Screen for SleepScreen {
             .unwrap_or(0);
         let now = ybdev::sysinfo::battery().0;
         let rate = if mins >= 30 {
-            format!(" (-{:.2}%/h)", (self.batt_enter.saturating_sub(now)) as f64 * 60.0 / mins as f64)
+            format!(
+                " (-{:.2}%/h -{:.1}mAh)",
+                (self.batt_enter.saturating_sub(now)) as f64 * 60.0 / mins as f64,
+                (self.q_enter - charge_now_mah()).max(0)
+            )
         } else {
             String::new()
         };
