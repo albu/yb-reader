@@ -142,7 +142,7 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                 let split = SplitConfig {
                     preset: str_to_preset(preset_str),
                     rotation: rot,
-                    overlap: ov,
+                    overlap: if ov > 0.035 { 0.018 } else { ov },
                     margin_left: ml,
                     margin_top: mt,
                     margin_right: mr,

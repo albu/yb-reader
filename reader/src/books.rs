@@ -289,6 +289,7 @@ impl ReaderScreen {
         )
     }
 
+
     fn open_curtain(&mut self) -> Action {
         Action::Push(Box::new(CurtainScreen::new_with_rotation(
             crate::curtain::RotateCtx {
@@ -329,7 +330,7 @@ impl ReaderScreen {
         }
     }
 
-    fn compute_annotations(&mut self) {
+    fn extract_words_and_links(&mut self) {
         self.page_words.clear();
         self.page_annotations.clear();
         self.page_links.clear();
@@ -350,23 +351,36 @@ impl ReaderScreen {
 
         self.page_links = crate::render::links_from_page(&page, &geom);
         self.page_words = crate::render::words_from_text_page(&tp, &geom);
+    }
 
-        // Budget annotations: take highest-difficulty words up to max_per_page
-        let mut candidate_entries: Vec<(RectF, crate::vocab::WordEntry)> = Vec::new();
-        if let Some(db) = &self.vocab_db {
-            for (word, r) in &self.page_words {
-                if let Some(entry) = db.lookup(word) {
-                    if self.vocab_prof.should_annotate(&entry) {
-                        candidate_entries.push((*r, entry));
-                    }
+    fn open_quick_settings(&mut self) -> Action {
+        let book = self.book_name();
+        let page = self.page_no;
+        let sub = self.sub_idx;
+        let tot = self.total;
+        let s = self.settings;
+        let is_pdf = self.is_pdf();
+        let gray = self.page_gray.clone();
+        let doc_rc = self.doc.clone();
+        let (vw, vh) = self.visual_dims();
+
+        Action::Push(Box::new(crate::quick_settings::QuickSettingsSheet::new(
+            book,
+            page,
+            sub,
+            tot,
+            s,
+            is_pdf,
+            doc_rc.clone(),
+            gray,
+            move |new_settings| {
+                if let Some(doc) = &doc_rc {
+                    crate::render::render_page(doc.as_ref(), page, sub, &new_settings, vw, vh)
+                } else {
+                    None
                 }
-            }
-        }
-        candidate_entries.sort_by(|a, b| b.1.difficulty.cmp(&a.1.difficulty));
-        self.page_annotations = candidate_entries
-            .into_iter()
-            .take(self.vocab_prof.max_per_page)
-            .collect();
+            },
+        )))
     }
 
     fn find_word_at_pos(&self, vx: f32, vy: f32) -> Option<(String, RectF)> {
@@ -692,21 +706,13 @@ impl Screen for ReaderScreen {
             p.blit_gray(0, 0, w, h, gray, w as usize);
         }
 
-        // Trigger neighbor pre-caching and Word Wise annotation extraction
+        // Trigger neighbor pre-caching and word/link extraction for selection & lookups
         if self.doc.is_some() {
             self.pre_cache_neighbors(w as u32, h as u32);
             if self.page_words.is_empty() {
-                self.compute_annotations();
+                self.extract_words_and_links();
             }
         }
-
-        // Word Wise annotations in the profile's style
-        crate::vocab::draw_annotations(
-            p,
-            &self.page_annotations,
-            self.vocab_prof.style,
-            is_night,
-        );
 
         // Header status line + progress footer
         if self.settings.show_header {
@@ -726,7 +732,14 @@ impl Screen for ReaderScreen {
             &self.settings,
             &time_left,
         );
-        chrome::draw_footer(p, &footer, is_night);
+        chrome::draw_footer(
+            p,
+            &footer,
+            self.page_no,
+            self.total,
+            &self.toc_chapters,
+            is_night,
+        );
 
         // Saved highlights: solid light underlines, page-gated and matched
         // by word sequence within the page. (A span that crosses a
@@ -782,17 +795,17 @@ impl Screen for ReaderScreen {
                 SwipeDir::East => self.turn(false), // swipe right -> back
                 SwipeDir::South => {
                     // Top swipe down -> Curtain (brightness/control center)
-                    if vy < vis_h * 20 / 100 {
+                    if vy < vis_h * 25 / 100 {
                         self.open_curtain()
                     } else {
-                        self.open_settings_dialog()
+                        Action::Keep
                     }
                 }
                 SwipeDir::North => {
                     // Bottom swipes:
-                    // 1. Bottom-left swipe up -> Reader Settings (font size, margin, contrast, vocab)
+                    // 1. Bottom-left swipe up -> In-Book Quick Settings Sheet
                     if vx < vis_w * 35 / 100 && vy > vis_h * 70 / 100 {
-                        self.open_settings_dialog()
+                        self.open_quick_settings()
                     } else if vx >= vis_w * 35 / 100 && vx <= vis_w * 65 / 100 && vy > vis_h * 70 / 100 {
                         // 2. Bottom-center swipe up -> Table of Contents (Chapters)!
                         self.open_toc_dialog()
@@ -902,31 +915,43 @@ impl Screen for ReaderScreen {
                     return Action::RedrawFull;
                 }
 
-                // 3. Visual Bottom-Right corner -> Back to Library
-                if vx > vis_w - 240 && vy > vis_h - 160 {
-                    return Action::Pop;
+                // 3. Visual Bottom-Left corner -> TOC Dialog
+                if vx < 240 && vy > vis_h - 160 {
+                    return self.open_toc_dialog();
                 }
 
-                // 4. Visual Bottom Footer Strip -> Open Interactive Page Scrubber & "Go to Page"
+                // 4. Visual Bottom-Right corner -> Quick Settings Sheet
+                if vx > vis_w - 240 && vy > vis_h - 160 {
+                    return self.open_quick_settings();
+                }
+
+                // 5. Visual Bottom Footer Strip -> Open Interactive Page Scrubber & "Go to Page"
                 if vy > vis_h - 140 && vx > 240 && vx < vis_w - 240 {
                     return self.open_scrubber_dialog();
                 }
 
-                // 5. Visual Top strip (middle) -> Curtain (Brightness / Network / Controls)
+                // 6. Visual Top strip (middle) -> Curtain (Brightness / Network / Controls)
                 if vy < 140 && vx > 240 && vx < vis_w - 240 {
                     return self.open_curtain();
                 }
 
-                // 6. Page turns (Left third = Back, Right two-thirds = Forward)
+                // 7. Page turns (Left third = Back, Right two-thirds = Forward)
                 if vx < vis_w / 3 {
                     self.turn(false)
                 } else {
                     self.turn(true)
                 }
             }
+            Gesture::Swipe { dir, .. } => {
+                // Bottom-left up-swipe -> In-Book Quick Settings Sheet
+                if dir == ybdev::input::SwipeDir::North && vx < 350 && vy > vis_h - 260 {
+                    return self.open_quick_settings();
+                }
+                Action::Keep
+            }
             Gesture::TwoFingerTap => {
-                // Two-finger tap anywhere -> Quick Curtain / Brightness
-                self.open_curtain()
+                // Two-finger tap anywhere -> instant full waveform E-Ink clean refresh
+                Action::RedrawFull
             }
             Gesture::Drag { .. } => {
                 // Finger still down after the anchoring long-press: extend

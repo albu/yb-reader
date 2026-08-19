@@ -19,8 +19,8 @@ use mupdf::{Colorspace, Document, Matrix};
 
 use crate::split::{RectF, ReaderSettings};
 
-pub const HEADER_H: u32 = 48; // px
-pub const FOOTER_H: u32 = 72; // px
+pub const HEADER_H: u32 = 92; // px (covers clock/battery status header)
+pub const FOOTER_H: u32 = 50; // px (covers progress track and footer)
 
 /// The available text area in points for a reflow layout — shared by the
 /// async open/reflow paths so a warm document and a cold one lay out
@@ -47,8 +47,6 @@ pub struct LayoutGeom {
     /// Screen offset (px) of the rendered box inside the reading area.
     pub vis_ox: usize,
     pub vis_oy: usize,
-    w: u32,
-    h: u32,
 }
 
 impl LayoutGeom {
@@ -65,29 +63,29 @@ impl LayoutGeom {
         if pw <= 0.0 || ph <= 0.0 {
             return None;
         }
+
+        let header_h = if settings.show_header { HEADER_H } else { 0 };
+        let footer_h = FOOTER_H;
+        let (vis_w, vis_h) = (
+            w as f32,
+            (h.saturating_sub(footer_h + header_h)) as f32,
+        );
+
         let config = &settings.split;
-        let sub_box = config
-            .sub_boxes()
+        let sub_boxes = config.sub_boxes();
+        let sub_box = sub_boxes
             .get(sub_idx)
             .copied()
             .unwrap_or(RectF::new(0.0, 0.0, 1.0, 1.0));
-
-        let margin_pad = settings.margin_pad;
-        let (vis_w, vis_h) = (
-            (w - 2 * margin_pad) as f32,
-            (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
-        );
 
         let bw = sub_box.width() * pw;
         let bh = sub_box.height() * ph;
         let zoom = (vis_w / bw).min(vis_h / bh);
 
-        // Rounded box size on screen — the caller may clamp these to the
-        // rendered pixmap, then ask for offsets again.
         let rw = (bw * zoom).round() as usize;
         let rh = (bh * zoom).round() as usize;
 
-        let (vis_ox, vis_oy) = Self::offsets(vis_w as usize, vis_h as usize, margin_pad, rw, rh);
+        let (vis_ox, vis_oy) = Self::offsets(w as usize, vis_h as usize, header_h, rw, rh);
 
         Some(LayoutGeom {
             sub_box,
@@ -96,24 +94,20 @@ impl LayoutGeom {
             zoom,
             vis_ox,
             vis_oy,
-            w,
-            h,
         })
     }
 
-    /// Screen offsets for a box of (rw, rh) px, centered in the reading
-    /// area of a (vis_w × vis_h) buffer.
+    /// Screen offsets for a box of (rw, rh) px centered in the reading area of a (vis_w × vis_h) buffer.
     pub fn offsets(
         vis_w: usize,
         vis_h: usize,
-        margin_pad: u32,
+        header_h: u32,
         rw: usize,
         rh: usize,
     ) -> (usize, usize) {
-        (
-            vis_w.saturating_sub(rw) / 2 + margin_pad as usize,
-            vis_h.saturating_sub(rh) / 2 + (HEADER_H + margin_pad) as usize,
-        )
+        let ox = vis_w.saturating_sub(rw) / 2;
+        let oy = vis_h.saturating_sub(rh) / 2 + header_h as usize;
+        (ox, oy)
     }
 
     /// Map a document-space rect inside the current sub-box to visual
@@ -220,7 +214,6 @@ pub fn render_page(
     let sub_box = geom.sub_box;
     let zoom = geom.zoom;
 
-    let margin_pad = settings.margin_pad;
     let mut out = vec![255u8; (w as usize) * (h as usize)];
 
     let mut m = Matrix::IDENTITY;
@@ -245,13 +238,7 @@ pub fn render_page(
         return Some(out);
     }
 
-    let (vis_ox, vis_oy) = LayoutGeom::offsets(
-        (w - 2 * margin_pad) as usize,
-        (h - 2 * margin_pad - FOOTER_H as u32 - HEADER_H as u32) as usize,
-        margin_pad,
-        rw,
-        rh,
-    );
+    let (vis_ox, vis_oy) = (geom.vis_ox, geom.vis_oy);
 
     // Calculate dashed reading boundary line position (where previous sub-page ended)
     let dash_y = if sub_idx > 0 && config.sub_box_count() > 1 {
@@ -396,11 +383,11 @@ mod tests {
         let doc = Document::open(PDF).expect("open doc");
         let page = doc.load_page(20).expect("load page 20");
         let settings = ReaderSettings::default();
-        let g = LayoutGeom::new(&settings, page.bounds().unwrap(), 0, 1236, 1648)
-            .expect("geometry");
         let tp = page
             .to_text_page(TextPageFlags::empty())
             .expect("to_text_page");
+        let g = LayoutGeom::new(&settings, page.bounds().unwrap(), 0, 1236, 1648)
+            .expect("geometry");
 
         let words = words_from_text_page(&tp, &g);
         println!("Extracted {} words from page 20. First 10:", words.len());
@@ -429,8 +416,8 @@ mod tests {
         settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
         let (vw, vh) = (1648usize, 1236usize);
         let gray = render_page(&doc, 20, 0, &settings, 1648, 1236).expect("render");
-        let g = LayoutGeom::new(&settings, page.bounds().unwrap(), 0, 1648, 1236).expect("geom");
         let tp = page.to_text_page(TextPageFlags::empty()).expect("text page");
+        let g = LayoutGeom::new(&settings, page.bounds().unwrap(), 0, 1648, 1236).expect("geom");
         let words = words_from_text_page(&tp, &g);
         assert!(!words.is_empty());
 

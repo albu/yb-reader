@@ -86,11 +86,49 @@ pub fn draw_header(p: &mut Painter, time_str: &str, book: &str, is_night: bool) 
     p.hline_t(pt(20.0), pt(16.0), w - pt(16.0), 1, if is_night { 60 } else { 225 });
 }
 
-/// Progress footer along the visual bottom edge.
-pub fn draw_footer(p: &mut Painter, footer: &str, is_night: bool) {
-    let (_w, h) = p.size();
+/// Progress footer along the visual bottom edge: centered status text + minimal progress track.
+pub fn draw_footer(
+    p: &mut Painter,
+    footer: &str,
+    page_no: usize,
+    total: usize,
+    toc_chapters: &[usize],
+    is_night: bool,
+) {
+    let (w, h) = p.size();
     let fg_color = if is_night { 200 } else { 90 };
-    p.text_center(h - pt(10.0), 7.0, fg_color, footer);
+    let track_color = if is_night { 60 } else { 220 };
+    let fill_color = if is_night { 180 } else { 120 };
+    let tick_color = if is_night { 100 } else { 180 };
+
+    // Text status line: e.g. "page 42 / 318 · 12m in ch · 4h 15m left"
+    p.text_center(h - pt(10.5), 7.0, fg_color, footer);
+
+    // Micro progress bar along the bottom edge
+    if total > 1 {
+        let pad = pt(16.0);
+        let bar_x = pad;
+        let bar_w = w - 2 * pad;
+        let bar_y = h - pt(2.5);
+        let bar_h = 2;
+
+        p.rect(Rect::new(bar_x, bar_y, bar_w, bar_h), track_color);
+
+        let frac = ((page_no + 1) as f32 / total as f32).clamp(0.0, 1.0);
+        let fill_w = ((bar_w as f32) * frac).round() as i32;
+        if fill_w > 0 {
+            p.rect(Rect::new(bar_x, bar_y, fill_w, bar_h), fill_color);
+        }
+
+        // Chapter ticks
+        for &chap_page in toc_chapters {
+            if chap_page > 0 && chap_page < total {
+                let chap_frac = (chap_page as f32 / total as f32).clamp(0.0, 1.0);
+                let tx = bar_x + ((bar_w as f32) * chap_frac).round() as i32;
+                p.rect(Rect::new(tx, bar_y - 1, 1, bar_h + 2), tick_color);
+            }
+        }
+    }
 }
 
 /// Selection-mode bookmark: a ribbon hanging from the top edge, left of

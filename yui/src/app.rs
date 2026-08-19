@@ -150,7 +150,7 @@ impl App {
 
         let edges = self.stack.last().map(|s| s.default_edges()).unwrap_or(false);
         if edges {
-            if g.top_edge_swipe() || matches!(g, Gesture::TwoFingerTap) {
+            if g.top_edge_swipe() {
                 // No default overlay: the app registers its control
                 // center (with_edge_overlay) or edge gestures aren't
                 // special here.

@@ -81,7 +81,7 @@ const ABS_MT_POSITION_Y: u16 = 0x36;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
 
 const SWIPE_MIN_DIST: i32 = 40;
-const TWO_FINGER_MAX_DIST: i32 = 25;
+const TWO_FINGER_MAX_DIST: i32 = 50;
 /// Step between Drag emissions, in px — small enough to feel continuous
 /// at word granularity, large enough to jitter-proof a steady hold.
 const DRAG_STEP: i32 = 12;
@@ -363,32 +363,35 @@ impl Input {
 
         loop {
             // Check active hold for immediate long-press trigger while finger is held down!
-            for t in self.slots.values_mut() {
-                if !t.long_press_fired && t.x_set && t.y_set {
-                    let dx = (t.x - t.down_x).abs();
-                    let dy = (t.y - t.down_y).abs();
-                    if dx <= 25 && dy <= 25 && t._down.elapsed() >= Duration::from_millis(360) {
-                        t.long_press_fired = true;
-                        t.drag_from = Some((t.x, t.y));
-                        let g = Gesture::LongPress {
-                            x: t.x.max(0) as u32,
-                            y: t.y.max(0) as u32,
-                        };
-                        crate::log::plog(&format!("input: {:?}", g));
-                        return Some(g);
-                    }
-                }
-                // The finger stayed down after the long-press and moved:
-                // stream its position as Drag steps. (No plog — a word-
-                // snapped drag emits dozens per selection.)
-                if t.long_press_fired && t.x_set && t.y_set {
-                    if let Some((lx, ly)) = t.drag_from {
-                        if (t.x - lx).abs() >= DRAG_STEP || (t.y - ly).abs() >= DRAG_STEP {
+            // Only allow single-touch holds (suppressed during multi-touch gestures).
+            if !self.two_finger_seen && self.slots.len() == 1 {
+                for t in self.slots.values_mut() {
+                    if !t.long_press_fired && t.x_set && t.y_set {
+                        let dx = (t.x - t.down_x).abs();
+                        let dy = (t.y - t.down_y).abs();
+                        if dx <= 25 && dy <= 25 && t._down.elapsed() >= Duration::from_millis(360) {
+                            t.long_press_fired = true;
                             t.drag_from = Some((t.x, t.y));
-                            return Some(Gesture::Drag {
+                            let g = Gesture::LongPress {
                                 x: t.x.max(0) as u32,
                                 y: t.y.max(0) as u32,
-                            });
+                            };
+                            crate::log::plog(&format!("input: {:?}", g));
+                            return Some(g);
+                        }
+                    }
+                    // The finger stayed down after the long-press and moved:
+                    // stream its position as Drag steps. (No plog — a word-
+                    // snapped drag emits dozens per selection.)
+                    if t.long_press_fired && t.x_set && t.y_set {
+                        if let Some((lx, ly)) = t.drag_from {
+                            if (t.x - lx).abs() >= DRAG_STEP || (t.y - ly).abs() >= DRAG_STEP {
+                                t.drag_from = Some((t.x, t.y));
+                                return Some(Gesture::Drag {
+                                    x: t.x.max(0) as u32,
+                                    y: t.y.max(0) as u32,
+                                });
+                            }
                         }
                     }
                 }
@@ -573,14 +576,16 @@ impl Input {
 
     fn finalize_frame(&mut self) -> Option<Gesture> {
         if self.two_finger_seen {
-            self.two_finger_seen = false;
-            let small = self.released.iter().all(|t| {
-                (t.x - t.down_x).abs() <= TWO_FINGER_MAX_DIST
-                    && (t.y - t.down_y).abs() <= TWO_FINGER_MAX_DIST
-            });
-            self.released.clear();
-            if small {
-                return Some(Gesture::TwoFingerTap);
+            if self.slots.is_empty() {
+                self.two_finger_seen = false;
+                let small = self.released.iter().all(|t| {
+                    (t.x - t.down_x).abs() <= TWO_FINGER_MAX_DIST
+                        && (t.y - t.down_y).abs() <= TWO_FINGER_MAX_DIST
+                });
+                self.released.clear();
+                if small {
+                    return Some(Gesture::TwoFingerTap);
+                }
             }
             return None;
         }

@@ -107,7 +107,7 @@ impl Default for SplitConfig {
         Self {
             preset: SplitPreset::FitPage,
             rotation: 0,
-            overlap: 0.06,
+            overlap: 0.018,
             margin_left: 0.0,
             margin_top: 0.0,
             margin_right: 0.0,
@@ -131,7 +131,7 @@ impl SplitConfig {
             SplitPreset::Horizontal2 => Self {
                 preset: SplitPreset::Horizontal2,
                 rotation: 270, // Landscape default
-                overlap: 0.08,
+                overlap: 0.018, // minimal overlap to recover partially cut line
                 margin_left: 0.02,
                 margin_top: 0.02,
                 margin_right: 0.02,
@@ -140,7 +140,7 @@ impl SplitConfig {
             SplitPreset::Horizontal3 => Self {
                 preset: SplitPreset::Horizontal3,
                 rotation: 270, // Landscape default
-                overlap: 0.10, // 10% each side = 20% overlap between adjacent views
+                overlap: 0.018, // minimal overlap
                 margin_left: 0.02,
                 margin_top: 0.02,
                 margin_right: 0.02,
