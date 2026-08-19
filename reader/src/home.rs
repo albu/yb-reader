@@ -4,6 +4,7 @@
 //! last-read book, then the full list. Brightness lives on the edge
 //! gestures (top-edge swipe / two-finger tap) everywhere.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,7 +13,7 @@ use ybdev::log::plog;
 use ybdev::sysinfo;
 
 use crate::books::ReaderScreen;
-use crate::library::list_books;
+use crate::library::{self, list_books};
 use crate::mirror::MirrorScreen;
 use crate::positions::{self, Pos};
 use yui::nav::{self, Icon, NavTab};
@@ -88,29 +89,27 @@ fn confirm_exit_to_stock(bg: Option<Vec<u8>>) -> Action {
 }
 
 /// Library ordering — a view concern, not a filesystem one. Cycles on a
-/// header tap; `Reading` floats actively-read books (positions ts) to the
-/// top and sinks never-opened ones.
+/// footer/header tap. `Recent` (the default) ranks by last interaction:
+/// the position timestamp when the book was read, the file's arrival
+/// when it never was.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum SortMode {
-    Title,
     Recent,
-    Reading,
+    Title,
 }
 
 impl SortMode {
     fn next(self) -> SortMode {
         match self {
+            SortMode::Recent => SortMode::Title,
             SortMode::Title => SortMode::Recent,
-            SortMode::Recent => SortMode::Reading,
-            SortMode::Reading => SortMode::Title,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            SortMode::Title => "title",
             SortMode::Recent => "recent",
-            SortMode::Reading => "reading",
+            SortMode::Title => "title",
         }
     }
 }
@@ -121,6 +120,52 @@ fn mtime(p: &Path) -> SystemTime {
         .unwrap_or(UNIX_EPOCH)
 }
 
+/// Last interaction with a book: read-timestamp vs file arrival,
+/// whichever is fresher. A book read yesterday outranks one uploaded an
+/// hour ago but never opened; a freshly received book still floats above
+/// stale ones.
+fn recency_key(name: &str, pos_map: &HashMap<String, Pos>, p: &Path) -> u64 {
+    let read = pos_map.get(name).map(|pos| pos.ts).unwrap_or(0);
+    let file = mtime(p)
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    read.max(file)
+}
+
+/// Row progress label: "38%" when the total is known, nothing when it
+/// isn't. Clamped at 100 for the last page.
+fn progress_str(pos: &Pos) -> Option<String> {
+    if pos.total == 0 {
+        return None;
+    }
+    let pct = (((pos.page + 1) as f32 / pos.total as f32) * 100.0).round() as i32;
+    Some(format!("{}%", pct.min(100)))
+}
+
+/// Filename without its extension — the display fallback when a file
+/// carries no metadata.
+fn sans_ext(name: &str) -> String {
+    match name.rfind('.') {
+        Some(i) if i > 0 => name[..i].to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// Right-edge row tag: format badge (two files can share a title — the
+/// same book as PDF and EPUB must stay distinguishable), with progress
+/// appended when the total is known.
+fn row_tag(ext: &str, pos: Option<&Pos>) -> Option<String> {
+    if ext.is_empty() {
+        return None;
+    }
+    let ext = ext.to_uppercase();
+    match pos.and_then(progress_str) {
+        Some(p) => Some(format!("{} · {}", ext, p)),
+        None => Some(ext),
+    }
+}
+
 
 pub struct HomeScreen {
     w: u32,
@@ -128,6 +173,12 @@ pub struct HomeScreen {
     tab: usize,
     books: Vec<PathBuf>,
     names: Vec<String>,
+    /// What rows actually show: metadata title or filename-sans-extension.
+    /// `names` stays the identity (positions/highlights are keyed by it).
+    disp: Vec<String>,
+    authors: Vec<String>,
+    /// Positions captured at scan, so draw/sort don't re-read the file.
+    pos_map: HashMap<String, Pos>,
     offset: usize,
     sort: SortMode,
     /// The last-read book (path + saved position), if it still exists.
@@ -149,8 +200,11 @@ impl HomeScreen {
             tab: 0,
             books: vec![],
             names: vec![],
+            disp: vec![],
+            authors: vec![],
+            pos_map: HashMap::new(),
             offset: 0,
-            sort: SortMode::Title,
+            sort: SortMode::Recent,
             cont: None,
             per_page: 1,
             snap: None,
@@ -169,6 +223,28 @@ impl HomeScreen {
                     .unwrap_or_default()
             })
             .collect();
+        let metas = library::meta_for(&self.books);
+        self.disp = self
+            .names
+            .iter()
+            .zip(metas.iter())
+            .map(|(n, m)| {
+                m.as_ref()
+                    .map(|(t, _)| t.clone())
+                    .unwrap_or_else(|| sans_ext(n))
+            })
+            .collect();
+        self.authors = self
+            .names
+            .iter()
+            .zip(metas.iter())
+            .map(|(_, m)| {
+                m.as_ref()
+                    .map(|(_, a)| a.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        self.pos_map = positions::all();
         self.offset = 0;
         self.cont = None;
         // Continue = freshest stored position whose file still exists.
@@ -180,34 +256,41 @@ impl HomeScreen {
         self.apply_sort();
     }
 
-    /// Order the in-memory list by the current mode. Title lowercases the
-    /// key — the old byte-order sort put "Zoo" before "apple" and every
-    /// accented title at the end.
+    /// Order the in-memory list by the current mode, keeping the parallel
+    /// display vectors aligned. Title lowercases the key — the old
+    /// byte-order sort put "Zoo" before "apple" and every accented title
+    /// at the end.
     fn apply_sort(&mut self) {
-        let mut items: Vec<(PathBuf, String)> = self
+        // The parallel vectors must match the book count before zipping —
+        // zip truncates to the shortest, and a short one would silently
+        // empty the whole list. Reconcile instead of trusting.
+        let n = self.books.len();
+        self.names.resize(n, String::new());
+        if self.disp.len() != n {
+            self.disp = self.names.iter().map(|s| sans_ext(s)).collect();
+        }
+        self.authors.resize(n, String::new());
+        let mut items: Vec<(PathBuf, String, String, String)> = self
             .books
             .iter()
             .cloned()
             .zip(self.names.iter().cloned())
+            .zip(self.disp.iter().cloned())
+            .zip(self.authors.iter().cloned())
+            .map(|(((a, b), c), d)| (a, b, c, d))
             .collect();
         match self.sort {
-            SortMode::Title => items.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase())),
-            SortMode::Recent => items.sort_by(|a, b| mtime(&b.0).cmp(&mtime(&a.0))),
-            SortMode::Reading => {
-                let pos = positions::all();
-                items.sort_by(|a, b| {
-                    let ta = pos.get(&a.1).map(|p| p.ts).unwrap_or(0);
-                    let tb = pos.get(&b.1).map(|p| p.ts).unwrap_or(0);
-                    // Last-read first, never-opened sink to the bottom
-                    // (ties inside a bucket stay alphabetical).
-                    tb.cmp(&ta)
-                        .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
-                });
-            }
+            SortMode::Title => items.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase())),
+            SortMode::Recent => items.sort_by(|a, b| {
+                recency_key(&b.1, &self.pos_map, &b.0)
+                    .cmp(&recency_key(&a.1, &self.pos_map, &a.0))
+                    .then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase()))
+            }),
         }
-        let (books, names) = items.into_iter().unzip();
-        self.books = books;
-        self.names = names;
+        self.books = items.iter().map(|i| i.0.clone()).collect();
+        self.names = items.iter().map(|i| i.1.clone()).collect();
+        self.disp = items.iter().map(|i| i.2.clone()).collect();
+        self.authors = items.iter().map(|i| i.3.clone()).collect();
         self.offset = 0;
     }
 
@@ -382,11 +465,18 @@ impl Screen for HomeScreen {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
+                    // Show what the row shows: metadata title + author
+                    // (by filename lookup — identity, not display).
+                    let i = self.names.iter().position(|n| *n == name);
+                    let disp = i
+                        .map(|i| self.disp[i].clone())
+                        .unwrap_or_else(|| sans_ext(&name));
+                    let author = i.map(|i| self.authors[i].clone()).unwrap_or_default();
                     p.text(pad, pt(54.0), KICKER2_SIZE_PT, 130, "CONTINUE");
                     let top = pt(CONT_TOP_PT);
                     draw_book_icon(p, pad, top + (pt(CONT_H_PT) - pt(CONT_ICON_PT)) / 2);
                     let label =
-                        p.truncate(CONT_TITLE_PT, &name, p.width_pt() - 2.0 * PAD_PT - 18.0);
+                        p.truncate(CONT_TITLE_PT, &disp, p.width_pt() - 2.0 * PAD_PT - 18.0);
                     p.text(
                         pad + pt(CONT_ICON_PT) + pt(8.0),
                         top + pt(20.0),
@@ -394,10 +484,15 @@ impl Screen for HomeScreen {
                         0,
                         &label,
                     );
-                    let sub = if pos.total > 0 {
+                    let page = if pos.total > 0 {
                         format!("page {} of {}", pos.page + 1, pos.total)
                     } else {
                         format!("page {}", pos.page + 1)
+                    };
+                    let sub = if author.is_empty() {
+                        page
+                    } else {
+                        format!("{} · {}", author, page)
                     };
                     p.text(
                         pad + pt(CONT_ICON_PT) + pt(8.0),
@@ -406,6 +501,17 @@ impl Screen for HomeScreen {
                         130,
                         &sub,
                     );
+                    // Thin progress bar along the block's bottom edge.
+                    if pos.total > 0 {
+                        let bx = pad + pt(CONT_ICON_PT) + pt(8.0);
+                        let bw = (w - pad - bx).max(1);
+                        let frac = ((pos.page + 1) as f32 / pos.total as f32).clamp(0.0, 1.0);
+                        p.rect(Rect::new(bx, top + pt(41.0), bw, pt(2.0)), 230);
+                        let fw = ((bw as f32) * frac).round() as i32;
+                        if fw > 0 {
+                            p.rect(Rect::new(bx, top + pt(41.0), fw.min(bw), pt(2.0)), 90);
+                        }
+                    }
                     p.text_right(w - pad, top + pt(26.0), CHEV_PT, 160, ">");
                     p.hline_t(pt(112.0), pad, w - pad, 2, 180);
                     p.text(pad, pt(124.0), KICKER2_SIZE_PT, 130, "ALL BOOKS");
@@ -438,12 +544,23 @@ impl Screen for HomeScreen {
                     let visible = self.names.len().min(self.offset + self.per_page);
                     for (i, idx) in (self.offset..visible).enumerate() {
                         let top = rows_top + i as i32 * pt(LIB_ROW_PT);
+                        let ext = self.books[idx]
+                            .extension()
+                            .map(|e| e.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let tag = row_tag(&ext, self.pos_map.get(&self.names[idx]));
+                        // Reserve the right edge for the tag when present;
+                        // rows without one use the full width.
+                        let reserve = if tag.is_some() { 16.0 } else { 2.0 };
                         let label = p.truncate(
                             LIB_ITEM_PT,
-                            &self.names[idx],
-                            p.width_pt() - 2.0 * PAD_PT - 2.0,
+                            &self.disp[idx],
+                            p.width_pt() - 2.0 * PAD_PT - reserve,
                         );
                         p.text(pad, top + pt(LIB_ITEM_BASE_PT), LIB_ITEM_PT, 0, &label);
+                        if let Some(s) = &tag {
+                            p.text_right(w - pad, top + pt(LIB_ITEM_BASE_PT), 7.0, 130, &s);
+                        }
                     }
                     // Footer doubles as the sort control: the label with a
                     // ▾ marker reads as tappable, and the whole band is.
@@ -751,10 +868,11 @@ mod tests {
 
     #[test]
     fn sort_mode_cycles_and_labels() {
+        assert_eq!(SortMode::Recent.next(), SortMode::Title);
         assert_eq!(SortMode::Title.next(), SortMode::Recent);
-        assert_eq!(SortMode::Recent.next(), SortMode::Reading);
-        assert_eq!(SortMode::Reading.next(), SortMode::Title);
-        for m in [SortMode::Title, SortMode::Recent, SortMode::Reading] {
+        // Recent is the default: it's what "open the library" means.
+        assert_eq!(HomeScreen::new(1236, 1648).sort, SortMode::Recent);
+        for m in [SortMode::Recent, SortMode::Title] {
             assert!(!m.label().is_empty());
         }
     }
@@ -769,24 +887,81 @@ mod tests {
             PathBuf::from("/x/banana.epub"),
         ];
         s.names = vec!["zoo.epub".into(), "Apple.epub".into(), "banana.epub".into()];
+        s.disp = vec!["Zoo".into(), "Apple".into(), "banana".into()];
         s.apply_sort();
         assert_eq!(s.names, vec!["Apple.epub", "banana.epub", "zoo.epub"]);
+        // Display vectors travel with the sort.
+        assert_eq!(s.disp, vec!["Apple", "banana", "Zoo"]);
     }
 
     #[test]
-    fn reading_sort_sinks_unread_and_stays_stable() {
-        // positions::all() is empty on the host: every ts is 0, so the
-        // alphabetical tiebreak is the observable behavior.
+    fn recent_sort_ranks_by_last_interaction() {
+        // The /x paths don't exist on the host, so file mtime is the
+        // epoch and the position timestamps decide the order.
         let mut s = HomeScreen::new(1236, 1648);
-        s.sort = SortMode::Reading;
+        s.sort = SortMode::Recent;
         s.books = vec![
-            PathBuf::from("/x/B.epub"),
-            PathBuf::from("/x/a.epub"),
-            PathBuf::from("/x/C.epub"),
+            PathBuf::from("/x/old.epub"),
+            PathBuf::from("/x/fresh.epub"),
+            PathBuf::from("/x/never.epub"),
         ];
-        s.names = vec!["B.epub".into(), "a.epub".into(), "C.epub".into()];
+        s.names = vec!["old.epub".into(), "fresh.epub".into(), "never.epub".into()];
+        s.disp = vec!["Old".into(), "Fresh".into(), "Never".into()];
+        let mut pos = Pos::simple(3, 100, 500);
+        s.pos_map.insert("old.epub".into(), pos);
+        pos.ts = 900;
+        s.pos_map.insert("fresh.epub".into(), pos);
         s.apply_sort();
-        assert_eq!(s.names, vec!["a.epub", "B.epub", "C.epub"]);
+        // Read most recently first; never-opened (ts 0) sinks.
+        assert_eq!(s.names, vec!["fresh.epub", "old.epub", "never.epub"]);
+    }
+
+    #[test]
+    fn recency_key_takes_the_max_of_read_and_arrival() {
+        let mut map = HashMap::new();
+        map.insert("read.epub".into(), Pos::simple(1, 10, 100));
+        // A real file: its mtime is "now", far past any fixed read ts —
+        // arrival must win for a never-opened book.
+        let tmp = std::env::temp_dir().join("yb-reader-recency-test.epub");
+        std::fs::write(&tmp, b"x").unwrap();
+        let k = recency_key("read.epub", &map, &tmp);
+        assert!(k >= 100);
+        assert_eq!(recency_key("read.epub", &map, Path::new("/x/missing")), 100);
+        // Never touched, missing file: zero.
+        assert_eq!(recency_key("no.epub", &map, Path::new("/x/missing")), 0);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn progress_str_boundaries() {
+        let mut pos = Pos::simple(0, 0, 123); // total unknown
+        assert!(progress_str(&pos).is_none());
+        pos.total = 200;
+        assert_eq!(progress_str(&pos).unwrap(), "1%");
+        pos.page = 99;
+        assert_eq!(progress_str(&pos).unwrap(), "50%");
+        pos.page = 199;
+        assert_eq!(progress_str(&pos).unwrap(), "100%");
+        pos.page = 500; // past the end (position from a bigger total)
+        assert_eq!(progress_str(&pos).unwrap(), "100%");
+    }
+
+    #[test]
+    fn sans_ext_strips_only_the_last_extension() {
+        assert_eq!(sans_ext("SAMPLE.pdf"), "SAMPLE");
+        assert_eq!(sans_ext("my.book.epub"), "my.book");
+        assert_eq!(sans_ext("noext"), "noext");
+        assert_eq!(sans_ext(".hidden"), ".hidden");
+    }
+
+    #[test]
+    fn row_tag_badges_format_and_progress() {
+        let mut pos = Pos::simple(49, 100, 7); // 50%
+        assert_eq!(row_tag("pdf", Some(&pos)).unwrap(), "PDF · 50%");
+        assert_eq!(row_tag("epub", None).unwrap(), "EPUB");
+        pos.total = 0; // unknown total: badge without the % part
+        assert_eq!(row_tag("epub", Some(&pos)).unwrap(), "EPUB");
+        assert!(row_tag("", Some(&pos)).is_none());
     }
 
     #[test]
