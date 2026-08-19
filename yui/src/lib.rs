@@ -15,7 +15,6 @@
 
 pub mod app;
 pub mod font;
-pub mod frontlight;
 pub mod nav;
 pub mod orientation;
 pub mod painter;
@@ -24,7 +23,6 @@ pub mod widgets;
 
 pub use app::App;
 pub use font::Font;
-pub use frontlight::FrontlightScreen;
 pub use orientation::Orientation;
 pub use painter::{Painter, Rect};
 pub use screen::{Action, Screen};

@@ -11,7 +11,6 @@ use ybdev::input::{Gesture, Input};
 use ybdev::panel::Panel;
 
 use crate::font::Font;
-use crate::frontlight::FrontlightScreen;
 use crate::orientation::Orientation;
 use crate::painter::Painter;
 use crate::screen::{Action, Screen};
@@ -152,14 +151,13 @@ impl App {
         let edges = self.stack.last().map(|s| s.default_edges()).unwrap_or(false);
         if edges {
             if g.top_edge_swipe() || matches!(g, Gesture::TwoFingerTap) {
-                let overlay = self
-                    .overlay
-                    .as_ref()
-                    .map(|make| make())
-                    .unwrap_or_else(|| Box::new(FrontlightScreen::new()));
-                return Action::Push(overlay);
-            }
-            if g.corner_back() {
+                // No default overlay: the app registers its control
+                // center (with_edge_overlay) or edge gestures aren't
+                // special here.
+                if let Some(make) = self.overlay.as_ref() {
+                    return Action::Push(make());
+                }
+            } else if g.corner_back() {
                 return Action::Pop;
             }
         }

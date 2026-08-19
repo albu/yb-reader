@@ -31,16 +31,22 @@ const CARD_H_PT: f32 = 30.0;
 const CARD_GAP_PT: f32 = 5.0;
 const PAD_PT: f32 = 18.0;
 
-const BRIGHT_ROW_PT: f32 = 146.0;
-const TONE_ROW_PT: f32 = 176.0;
+const BRIGHT_ROW_PT: f32 = 138.0;
+const TONE_ROW_PT: f32 = 164.0;
 const ROW_CY_OFF_PT: f32 = 11.0;
 const SLIDER_X_OFF_PT: f32 = 52.0;
+
+/// Composite light-preset tiles, between the tone slider and the
+/// action pills: one (brightness, warmth) pair per tap.
+const TILE_TOP_PT: f32 = 194.0;
+const TILE_H_PT: f32 = 14.0;
+const TILE_GAP_PT: f32 = 6.0;
 const KNOB_R_PX: i32 = 5;
 
-const ACTIONS_TOP_PT: f32 = 210.0;
+const ACTIONS_TOP_PT: f32 = 214.0;
 const ACTION_H_PT: f32 = 28.0;
 
-const SHEET_H_PT: f32 = 252.0;
+const SHEET_H_PT: f32 = 258.0;
 
 // --- grays on white ---
 const DIM: u8 = 110;
@@ -369,8 +375,7 @@ impl Screen for CurtainScreen {
             return;
         };
 
-        let max = fl.max().max(1);
-        let bright_frac = (fl.get() as f32 / max as f32).clamp(0.0, 1.0);
+        let (bright_frac, tone_frac) = fl.levels();
         self.draw_line_slider(
             p,
             pt(BRIGHT_ROW_PT),
@@ -381,7 +386,6 @@ impl Screen for CurtainScreen {
 
         let tmax = fl.tone_max();
         if tmax > 0 {
-            let tone_frac = (fl.tone_get() as f32 / tmax as f32).clamp(0.0, 1.0);
             self.draw_line_slider(
                 p,
                 pt(TONE_ROW_PT),
@@ -389,6 +393,29 @@ impl Screen for CurtainScreen {
                 tone_frac,
                 (tone_frac * 100.0).round() as i32,
             );
+        }
+
+        // 5b. Composite light presets: one (brightness, warmth) pair per
+        //     tile; the tile matching the current levels renders filled.
+        let (lb, lw) = fl.levels();
+        let active = ybdev::frontlight::nearest_preset(lb, lw);
+        let n = ybdev::frontlight::PRESETS.len() as i32;
+        let tw = (w - 2 * pad - (n - 1) * pt(TILE_GAP_PT)) / n;
+        for (i, (name, _, _)) in ybdev::frontlight::PRESETS.iter().enumerate() {
+            let r = Rect::new(
+                pad + i as i32 * (tw + pt(TILE_GAP_PT)),
+                pt(TILE_TOP_PT),
+                tw,
+                pt(TILE_H_PT),
+            );
+            if active == Some(i) {
+                p.rect(r, INK);
+                draw_box_text(p, r, 7.0, 255, name);
+            } else {
+                p.rect(r, PILL_BG);
+                p.rect_outline_t(r, 1, CARD_BORDER);
+                draw_box_text(p, r, 7.0, INK, name);
+            }
         }
     }
 
@@ -404,7 +431,6 @@ impl Screen for CurtainScreen {
             return Action::Pop;
         };
 
-        let max = fl.max().max(1);
         let tmax = fl.tone_max();
 
         match g {
@@ -446,15 +472,28 @@ impl Screen for CurtainScreen {
                     return Action::Redraw;
                 }
 
-                // 1. Slider bands: tap sets by position
+                // 0b. Preset tiles: one composite light point per tap.
+                if let Some(i) = preset_tile_at(x, w) {
+                    if y >= pt(TILE_TOP_PT) && y < pt(TILE_TOP_PT) + pt(TILE_H_PT) {
+                        let (_, pb, pw) = ybdev::frontlight::PRESETS[i];
+                        fl.apply_levels(pb, pw);
+                        return Action::Redraw;
+                    }
+                }
+
+                // 1. Slider bands: tap sets by position. Both speak the
+                //    crossfade model — brightness scales the two strings,
+                //    tone swaps white for amber at constant light.
                 if (y - bright_cy).abs() <= 14 && x >= x0 && x <= x1 {
                     let frac = ((x - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
-                    fl.set((frac * max as f32).round() as i32);
+                    let (_, w) = fl.levels();
+                    fl.apply_levels(frac, w);
                     return Action::Redraw;
                 }
                 if tmax > 0 && (y - tone_cy).abs() <= 14 && x >= x0 && x <= x1 {
                     let frac = ((x - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
-                    fl.tone_set((frac * tmax as f32).round() as i32);
+                    let (b, _) = fl.levels();
+                    fl.apply_levels(b, frac);
                     return Action::Redraw;
                 }
 
@@ -506,12 +545,14 @@ impl Screen for CurtainScreen {
                 let (y, ex) = (y as i32, ex as i32);
                 if (y - bright_cy).abs() <= 15 && ex >= x0 && ex <= x1 {
                     let frac = ((ex - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
-                    fl.set((frac * max as f32).round() as i32);
+                    let (_, w) = fl.levels();
+                    fl.apply_levels(frac, w);
                     return Action::Redraw;
                 }
                 if tmax > 0 && (y - tone_cy).abs() <= 15 && ex >= x0 && ex <= x1 {
                     let frac = ((ex - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
-                    fl.tone_set((frac * tmax as f32).round() as i32);
+                    let (b, _) = fl.levels();
+                    fl.apply_levels(b, frac);
                     return Action::Redraw;
                 }
                 if matches!(dir, SwipeDir::North | SwipeDir::South) {
@@ -531,6 +572,24 @@ impl Screen for CurtainScreen {
 }
 
 
+/// Preset tile under an x on the sheet (y checked by the caller): the
+/// index of the tile whose column contains x, gaps counting as none.
+fn preset_tile_at(x: i32, w: i32) -> Option<usize> {
+    let pad = pt(PAD_PT);
+    let n = ybdev::frontlight::PRESETS.len() as i32;
+    let tw = (w - 2 * pad - (n - 1) * pt(TILE_GAP_PT)) / n;
+    let step = tw + pt(TILE_GAP_PT);
+    if x < pad || x >= w - pad {
+        return None;
+    }
+    let i = (x - pad) / step;
+    if (x - pad) - i * step < tw && i >= 0 && (i as usize) < ybdev::frontlight::PRESETS.len() {
+        Some(i as usize)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +598,28 @@ mod tests {
     /// Headless render: the sheet must put dark ink in every band on
     /// white, and the region below the sheet must be the dimmed
     /// snapshot, not blank white (scanlines prove the backdrop blit).
+    #[test]
+    fn preset_tiles_hit_by_third_and_clear_of_neighbors() {
+        let w = 1236;
+        let n = ybdev::frontlight::PRESETS.len();
+        assert_eq!(n, 3);
+        let pad = pt(PAD_PT);
+        let tw = (w - 2 * pad - (n as i32 - 1) * pt(TILE_GAP_PT)) / n as i32;
+        let step = tw + pt(TILE_GAP_PT);
+        for i in 0..n {
+            assert_eq!(preset_tile_at(pad + i as i32 * step + tw / 2, w), Some(i));
+        }
+        // Gap columns belong to nobody; neither do the outer margins.
+        assert_eq!(preset_tile_at(pad + tw + 1, w), None);
+        assert_eq!(preset_tile_at(pad - 1, w), None);
+        assert_eq!(preset_tile_at(w - pad, w), None);
+        // The row must sit clear of the tone slider's drag band above
+        // and the action pills' hit band below (both in px, as hit).
+        let tone_cy = pt(TONE_ROW_PT + ROW_CY_OFF_PT);
+        assert!(pt(TILE_TOP_PT) > tone_cy + 15);
+        assert!(pt(TILE_TOP_PT) + pt(TILE_H_PT) <= pt(ACTIONS_TOP_PT) - 6);
+    }
+
     #[test]
     fn curtain_draws_sheet_with_dimmed_backdrop() {
         let font = Font::load().unwrap();
