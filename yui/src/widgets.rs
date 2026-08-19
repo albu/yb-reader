@@ -135,6 +135,9 @@ impl Screen for MessageScreen {
 pub struct SleepScreen {
     prev_bright: i32,
     prev_tone: i32,
+    /// Raw image bytes; decoded+fitted lazily at first draw, when the
+    /// visual canvas dims (orientation included) are actually known.
+    image_raw: Option<Vec<u8>>,
     image: Option<Vec<u8>>,
     /// Sleep-entry wall-clock timestamp + battery, for drain accounting.
     /// Wall clock, NOT Instant: CLOCK_MONOTONIC stops during
@@ -233,7 +236,7 @@ impl SleepScreen {
             .args(&["-i", "com.lab126.wifid", "enable", "0"])
             .status();
 
-        let image = pick_random_screensaver(1236, 1648);
+        let image_raw = pick_random_screensaver();
 
         let batt_enter = ybdev::sysinfo::battery().0;
         ybdev::log::plog(&format!("sleep: enter {}", batt_stats()));
@@ -241,7 +244,8 @@ impl SleepScreen {
         SleepScreen {
             prev_bright,
             prev_tone,
-            image,
+            image_raw,
+            image: None,
             entered_wall: std::time::SystemTime::now(),
             batt_enter,
             suspends: 0,
@@ -249,7 +253,7 @@ impl SleepScreen {
     }
 }
 
-fn pick_random_screensaver(dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
+fn pick_random_screensaver() -> Option<Vec<u8>> {
     let dirs = [
         "/mnt/us/screensavers",
         "/mnt/us/extensions/reader/screensavers",
@@ -277,8 +281,7 @@ fn pick_random_screensaver(dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let choice = &files[(seed as usize) % files.len()];
-    let data = std::fs::read(choice).ok()?;
-    ybdev::img::load_png_fitted(&data, dst_w, dst_h)
+    std::fs::read(choice).ok()
 }
 
 impl Screen for SleepScreen {
@@ -292,6 +295,13 @@ impl Screen for SleepScreen {
 
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
+        // First draw is where the visual dims (orientation included) are
+        // known — decode and fit exactly once, to this canvas.
+        if self.image.is_none() {
+            if let Some(raw) = &self.image_raw {
+                self.image = ybdev::img::load_png_fitted(raw, w as u32, h as u32);
+            }
+        }
         if let Some(img) = &self.image {
             p.blit_gray(0, 0, w, h, img, w as usize);
         } else {

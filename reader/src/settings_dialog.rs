@@ -3,6 +3,7 @@
 
 use ybdev::input::Gesture;
 use yui::painter::{pt, Painter, Rect};
+use yui::Orientation;
 use yui::screen::{Action, Screen};
 
 use crate::split::{detect_margins, ContrastMode, ReaderSettings, SplitConfig, SplitPreset};
@@ -47,6 +48,14 @@ const ROW_H_PT: f32 = 28.0;
 const BTN_H_PT: f32 = 24.0;
 
 impl Screen for ReaderSettingsDialog {
+    /// Fixed-height tabbed content (330pt) authored for the tall canvas —
+    /// always a portrait modal, whatever grip the book beneath is in.
+    /// Rotation changes apply when the dialog closes and the reader
+    /// resumes (App flips the panel then, with a full refresh).
+    fn orientation(&self) -> Option<Orientation> {
+        Some(Orientation::Portrait)
+    }
+
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
         self.dims = (w, h);
@@ -443,11 +452,8 @@ impl Screen for ReaderSettingsDialog {
 
                         let rot_btn = Rect::new(dx + pt(10.0), py, dw - pt(20.0), pt(22.0));
                         if rot_btn.contains(tx, ty) {
-                            self.settings.split.rotation = match self.settings.split.rotation {
-                                0 => 270,
-                                270 => 90,
-                                _ => 0,
-                            };
+                            self.settings.split.rotation =
+                                SplitConfig::next_rotation(self.settings.split.rotation);
                             return Action::Redraw;
                         }
                         py += pt(26.0);

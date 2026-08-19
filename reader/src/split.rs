@@ -171,6 +171,18 @@ impl SplitConfig {
         self.rotation == 90 || self.rotation == 270
     }
 
+    /// The orientation cycle both rotation entry points (the settings
+    /// dialog's button and the curtain's ROTATE pill) walk: portrait →
+    /// landscape CW → landscape CCW → portrait. One function, one order —
+    /// the two UIs can never disagree about what "next" means.
+    pub fn next_rotation(cur: u16) -> u16 {
+        match cur {
+            0 => 270,
+            270 => 90,
+            _ => 0,
+        }
+    }
+
     pub fn sub_box_count(&self) -> usize {
         match self.preset {
             SplitPreset::FitPage => 1,

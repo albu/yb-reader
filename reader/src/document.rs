@@ -24,7 +24,10 @@ pub struct BookReady {
 pub struct SendDoc(pub Document);
 unsafe impl Send for SendDoc {}
 
-pub static WARM: Mutex<Option<(PathBuf, SendDoc, usize, f32)>> = Mutex::new(None);
+/// (path, doc, total, font, visual w, visual h) — the layout dims are part
+/// of the key: a document laid out portrait must not be reused in a
+/// landscape grip.
+pub static WARM: Mutex<Option<(PathBuf, SendDoc, usize, f32, u32, u32)>> = Mutex::new(None);
 
 pub fn reflow_async(
     mut send_doc: SendDoc,

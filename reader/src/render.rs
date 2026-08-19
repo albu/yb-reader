@@ -1,16 +1,19 @@
 //! Page rendering and text-geometry extraction for the reader screen.
 //!
 //! Two jobs that must agree on one coordinate system:
-//! - [`render_page`] rasterizes a (page, sub-box) to panel-sized
-//!   grayscale pixels;
+//! - [`render_page`] rasterizes a (page, sub-box) to VISUAL-space
+//!   grayscale pixels — the caller's w/h are the visual dims (landscape
+//!   means `Orientation` already swapped them; rotation is not this
+//!   module's business, Painter::flush owns it);
 //! - [`words_from_text_page`] / [`links_from_page`] map MuPDF text
 //!   coordinates onto the SAME visual space, so selection spans, vocab
 //!   annotations and link hit-boxes land on what is actually painted.
 //!
-//! The shared math lives in [`LayoutGeom`]. Before this module existed it
-//! was pasted three times (pixel render, word walk, link walk) and the
-//! rotation transforms three more — the exact duplication that made
-//! landscape behavior impossible to test on the host.
+//! The shared math lives in [`LayoutGeom`]: one source for zoom, offsets
+//! and the sub-box crop. Before this module existed it was pasted three
+//! times (pixel render, word walk, link walk) and the rotation transforms
+//! three more — the exact duplication that made landscape behavior
+//! impossible to test on the host.
 
 use mupdf::{Colorspace, Document, Matrix};
 
@@ -21,7 +24,7 @@ pub const FOOTER_H: u32 = 72; // px
 
 /// The available text area in points for a reflow layout — shared by the
 /// async open/reflow paths so a warm document and a cold one lay out
-/// identically.
+/// identically. Callers pass VISUAL dims (Orientation decides the swap).
 pub fn avail_pt(w: u32, h: u32, margin_pad: u32) -> (f32, f32) {
     (
         (w - 2 * margin_pad) as f32 * 72.0 / 300.0,
@@ -29,8 +32,8 @@ pub fn avail_pt(w: u32, h: u32, margin_pad: u32) -> (f32, f32) {
     )
 }
 
-/// Reading-area geometry for one (settings, page bounds, sub_idx, panel)
-/// combination. Everything downstream — pixel placement and text
+/// Reading-area geometry for one (settings, page bounds, sub_idx, visual
+/// dims) combination. Everything downstream — pixel placement and text
 /// coordinate mapping — derives from these fields, never from its own
 /// copy of the formulas.
 pub struct LayoutGeom {
@@ -44,13 +47,12 @@ pub struct LayoutGeom {
     /// Screen offset (px) of the rendered box inside the reading area.
     pub vis_ox: usize,
     pub vis_oy: usize,
-    /// 0 / 90 / 270 — the visual-orientation transforms below key on it.
-    pub rotation: u16,
     w: u32,
     h: u32,
 }
 
 impl LayoutGeom {
+    /// `w`/`h` are the VISUAL dims of the target buffer.
     pub fn new(
         settings: &ReaderSettings,
         bounds: mupdf::Rect,
@@ -71,17 +73,10 @@ impl LayoutGeom {
             .unwrap_or(RectF::new(0.0, 0.0, 1.0, 1.0));
 
         let margin_pad = settings.margin_pad;
-        let (vis_w, vis_h) = if config.is_landscape() {
-            (
-                (h - 2 * margin_pad) as f32,
-                (w - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
-            )
-        } else {
-            (
-                (w - 2 * margin_pad) as f32,
-                (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
-            )
-        };
+        let (vis_w, vis_h) = (
+            (w - 2 * margin_pad) as f32,
+            (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
+        );
 
         let bw = sub_box.width() * pw;
         let bh = sub_box.height() * ph;
@@ -92,9 +87,6 @@ impl LayoutGeom {
         let rw = (bw * zoom).round() as usize;
         let rh = (bh * zoom).round() as usize;
 
-        // Offsets derive from the (possibly swapped) vis dims — passing
-        // raw panel w/h here would compute portrait offsets for a
-        // landscape layout and push the box off-center.
         let (vis_ox, vis_oy) = Self::offsets(vis_w as usize, vis_h as usize, margin_pad, rw, rh);
 
         Some(LayoutGeom {
@@ -104,16 +96,20 @@ impl LayoutGeom {
             zoom,
             vis_ox,
             vis_oy,
-            rotation: config.rotation,
             w,
             h,
         })
     }
 
     /// Screen offsets for a box of (rw, rh) px, centered in the reading
-    /// area. Callers pass the ORIENTATION-CORRECT vis dims (swapped for
-    /// landscape) — the reading area's width lives on the long axis.
-    pub fn offsets(vis_w: usize, vis_h: usize, margin_pad: u32, rw: usize, rh: usize) -> (usize, usize) {
+    /// area of a (vis_w × vis_h) buffer.
+    pub fn offsets(
+        vis_w: usize,
+        vis_h: usize,
+        margin_pad: u32,
+        rw: usize,
+        rh: usize,
+    ) -> (usize, usize) {
         (
             vis_w.saturating_sub(rw) / 2 + margin_pad as usize,
             vis_h.saturating_sub(rh) / 2 + (HEADER_H + margin_pad) as usize,
@@ -121,7 +117,7 @@ impl LayoutGeom {
     }
 
     /// Map a document-space rect inside the current sub-box to visual
-    /// (screen, pre-rotation axes) coordinates.
+    /// (screen) coordinates.
     fn to_screen(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> (f32, f32, f32, f32) {
         let sx0 = self.vis_ox as f32 + (x0 - self.sub_box.x0 * self.pw) * self.zoom;
         let sy0 = self.vis_oy as f32 + (y0 - self.sub_box.y0 * self.ph) * self.zoom;
@@ -130,22 +126,11 @@ impl LayoutGeom {
         (sx0, sy0, sx1, sy1)
     }
 
-    /// Screen-space rect rotated into the visual orientation the reader
-    /// paints and gestures use. The physical placement mirrors
-    /// render_page's pixel loops (and map_gesture's inverse): visual-x
-    /// rides the LONG physical axis. The pre-extraction inline copies had
-    /// both rotations transposed — portrait (identity) always worked, but
-    /// landscape word/link/selection hit-rects never matched what was
-    /// painted.
+    /// Visual-space rect for a document-space rect. What is painted and
+    /// what is hit-tested share this one mapping.
     pub fn to_visual(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> RectF {
         let (sx0, sy0, sx1, sy1) = self.to_screen(x0, y0, x1, y1);
-        let (w, h) = (self.w as f32, self.h as f32);
-        let (px0, py0, px1, py1) = match self.rotation {
-            270 => (sy0, h - 1.0 - sx1, sy1, h - 1.0 - sx0),
-            90 => (w - 1.0 - sy1, sx0, w - 1.0 - sy0, sx1),
-            _ => (sx0, sy0, sx1, sy1),
-        };
-        RectF::new(px0.min(px1), py0.min(py1), px0.max(px1), py0.max(py1))
+        RectF::new(sx0.min(sx1), sy0.min(sy1), sx0.max(sx1), sy0.max(sy1))
     }
 
     /// Visual rect of the sub-box itself, in document units (test helper:
@@ -168,8 +153,7 @@ impl LayoutGeom {
 pub fn words_from_text_page(tp: &mupdf::TextPage, g: &LayoutGeom) -> Vec<(String, RectF)> {
     let mut words = Vec::new();
     let flush = |cur: &mut String, min_x: &mut f32, min_y: &mut f32, max_x: &mut f32,
-                     max_y: &mut f32,
-                     out: &mut Vec<(String, RectF)>| {
+                     max_y: &mut f32, out: &mut Vec<(String, RectF)>| {
         if cur.is_empty() {
             return;
         }
@@ -218,8 +202,8 @@ pub fn links_from_page(page: &mupdf::Page, g: &LayoutGeom) -> Vec<(RectF, String
     out
 }
 
-/// Rasterize (page, sub_idx) to panel-sized grayscale. Pure function over
-/// the document — unchanged in behavior, now over shared LayoutGeom.
+/// Rasterize (page, sub_idx) to visual-sized grayscale over the shared
+/// [`LayoutGeom`] math. Pure function over the document.
 pub fn render_page(
     doc: &Document,
     page_no: usize,
@@ -230,39 +214,14 @@ pub fn render_page(
 ) -> Option<Vec<u8>> {
     let page = doc.load_page(page_no as i32).ok()?;
     let bounds = page.bounds().ok()?;
-    let pw = bounds.x1 - bounds.x0;
-    let ph = bounds.y1 - bounds.y0;
-    if pw <= 0.0 || ph <= 0.0 {
-        return None;
-    }
+    let geom = LayoutGeom::new(settings, bounds, sub_idx, w, h)?;
 
     let config = &settings.split;
-    let sub_box = config
-        .sub_boxes()
-        .get(sub_idx)
-        .copied()
-        .unwrap_or(RectF::new(0.0, 0.0, 1.0, 1.0));
-
-    let bw = sub_box.width() * pw;
-    let bh = sub_box.height() * ph;
+    let sub_box = geom.sub_box;
+    let zoom = geom.zoom;
 
     let margin_pad = settings.margin_pad;
     let mut out = vec![255u8; (w as usize) * (h as usize)];
-
-    let is_landscape = config.is_landscape();
-    let (vis_w, vis_h) = if is_landscape {
-        (
-            (h - 2 * margin_pad) as f32,
-            (w - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
-        )
-    } else {
-        (
-            (w - 2 * margin_pad) as f32,
-            (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32,
-        )
-    };
-
-    let zoom = (vis_w / bw).min(vis_h / bh);
 
     let mut m = Matrix::IDENTITY;
     m.scale(zoom, zoom);
@@ -275,20 +234,24 @@ pub fn render_page(
     let stride = pm.stride() as usize;
     let samples = pm.samples();
 
-    let src_x = (sub_box.x0 * pw * zoom).round() as usize;
-    let src_y = (sub_box.y0 * ph * zoom).round() as usize;
-    let rw = ((bw * zoom).round() as usize).min(pm_w.saturating_sub(src_x));
-    let rh = ((bh * zoom).round() as usize).min(pm_h.saturating_sub(src_y));
+    let src_x = (sub_box.x0 * geom.pw * zoom).round() as usize;
+    let src_y = (sub_box.y0 * geom.ph * zoom).round() as usize;
+    let rw = ((sub_box.width() * geom.pw * zoom).round() as usize).min(pm_w.saturating_sub(src_x));
+    let rh =
+        ((sub_box.height() * geom.ph * zoom).round() as usize).min(pm_h.saturating_sub(src_y));
 
     if rw == 0 || rh == 0 {
         settings.apply_lut(&mut out);
         return Some(out);
     }
 
-    // vis_w/vis_h above are orientation-correct (swapped for landscape);
-    // offsets must be derived from THOSE, not from raw panel w/h.
-    let (vis_ox, vis_oy) =
-        LayoutGeom::offsets(vis_w as usize, vis_h as usize, margin_pad, rw, rh);
+    let (vis_ox, vis_oy) = LayoutGeom::offsets(
+        (w - 2 * margin_pad) as usize,
+        (h - 2 * margin_pad - FOOTER_H as u32 - HEADER_H as u32) as usize,
+        margin_pad,
+        rw,
+        rh,
+    );
 
     // Calculate dashed reading boundary line position (where previous sub-page ended)
     let dash_y = if sub_idx > 0 && config.sub_box_count() > 1 {
@@ -305,88 +268,26 @@ pub fn render_page(
         None
     };
 
-    match config.rotation {
-        270 => {
-            // 270° CW (USB bezel on left):
-            // Visual X (0..rw) maps to physical Y: (h - 1 - (vis_ox + vx))
-            // Visual Y (0..rh) maps to physical X: (vis_oy + vy)
-            let w_u = w as usize;
-            let h_u = h as usize;
+    let w_u = w as usize;
+    let h_u = h as usize;
 
-            for vy in 0..rh {
-                let px = vis_oy + vy;
-                if px >= w_u {
-                    continue;
-                }
-                let src_row_start = (src_y + vy) * stride + src_x;
-                let is_dash_row = dash_y == Some(vy);
-
-                for vx in 0..rw {
-                    let py = (h_u - 1).saturating_sub(vis_ox + vx);
-                    if py < h_u && src_row_start + vx < samples.len() {
-                        let mut pixel = samples[src_row_start + vx];
-                        if is_dash_row && (vx / 8) % 2 == 0 && pixel > 140 {
-                            pixel = 140; // Subtle dotted guide line
-                        }
-                        out[py * w_u + px] = pixel;
-                    }
-                }
-            }
+    for vy in 0..rh {
+        let dst_y = vis_oy + vy;
+        if dst_y >= h_u {
+            break;
         }
+        let src_start = (src_y + vy) * stride + src_x;
+        let dst_start = dst_y * w_u + vis_ox;
+        let len = rw.min(w_u.saturating_sub(vis_ox));
+        if src_start + len <= samples.len() && dst_start + len <= out.len() {
+            out[dst_start..dst_start + len].copy_from_slice(&samples[src_start..src_start + len]);
 
-        90 => {
-            // 90° CCW (USB bezel on right):
-            // Visual X (0..rw) maps to physical Y: (vis_ox + vx)
-            // Visual Y (0..rh) maps to physical X: (w - 1 - (vis_oy + vy))
-            let w_u = w as usize;
-            let h_u = h as usize;
-
-            for vy in 0..rh {
-                let px = (w_u - 1).saturating_sub(vis_oy + vy);
-                if px >= w_u {
-                    continue;
-                }
-                let src_row_start = (src_y + vy) * stride + src_x;
-                let is_dash_row = dash_y == Some(vy);
-
-                for vx in 0..rw {
-                    let py = vis_ox + vx;
-                    if py < h_u && src_row_start + vx < samples.len() {
-                        let mut pixel = samples[src_row_start + vx];
-                        if is_dash_row && (vx / 8) % 2 == 0 && pixel > 140 {
-                            pixel = 140;
-                        }
-                        out[py * w_u + px] = pixel;
-                    }
-                }
-            }
-        }
-
-        _ => {
-            // 0° Portrait:
-            let w_u = w as usize;
-            let h_u = h as usize;
-
-            for vy in 0..rh {
-                let dst_y = vis_oy + vy;
-                if dst_y >= h_u {
-                    break;
-                }
-                let src_start = (src_y + vy) * stride + src_x;
-                let dst_start = dst_y * w_u + vis_ox;
-                let len = rw.min(w_u.saturating_sub(vis_ox));
-                if src_start + len <= samples.len() && dst_start + len <= out.len() {
-                    out[dst_start..dst_start + len]
-                        .copy_from_slice(&samples[src_start..src_start + len]);
-
-                    if dash_y == Some(vy) {
-                        for vx in 0..len {
-                            if (vx / 8) % 2 == 0 {
-                                let p = &mut out[dst_start + vx];
-                                if *p > 140 {
-                                    *p = 140;
-                                }
-                            }
+            if dash_y == Some(vy) {
+                for vx in 0..len {
+                    if (vx / 8) % 2 == 0 {
+                        let p = &mut out[dst_start + vx];
+                        if *p > 140 {
+                            *p = 140;
                         }
                     }
                 }
@@ -429,10 +330,12 @@ mod tests {
         let doc = Document::open(PDF).expect("open doc");
         let mut settings = ReaderSettings::default();
         settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
-        let r0 = render_page(&doc, 20, 0, &settings, 1236, 1648);
+        // Visual dims for landscape: swapped.
+        let r0 = render_page(&doc, 20, 0, &settings, 1648, 1236);
         assert!(r0.is_some());
-        let r1 = render_page(&doc, 20, 1, &settings, 1236, 1648);
+        let r1 = render_page(&doc, 20, 1, &settings, 1648, 1236);
         assert!(r1.is_some());
+        assert_eq!(r1.unwrap().len(), 1648 * 1236);
     }
 
     #[test]
@@ -444,7 +347,7 @@ mod tests {
         let mut settings = ReaderSettings::default();
         settings.split = SplitConfig::for_preset(SplitPreset::Horizontal3);
         for sub in 0..3 {
-            let r = render_page(&doc, 20, sub, &settings, 1236, 1648);
+            let r = render_page(&doc, 20, sub, &settings, 1648, 1236);
             assert!(r.is_some());
         }
     }
@@ -468,7 +371,7 @@ mod tests {
 
             let boxes = settings.split.sub_boxes();
             for (sub_idx, b) in boxes.iter().enumerate() {
-                let rendered = render_page(&doc, page_no as usize, sub_idx, &settings, 1236, 1648);
+                let rendered = render_page(&doc, page_no as usize, sub_idx, &settings, 1648, 1236);
                 assert!(rendered.is_some());
                 println!(
                     "  Sub {}: box=[{:.4}, {:.4}, {:.4}, {:.4}] len={}",
@@ -505,15 +408,16 @@ mod tests {
             println!("  '{}' at [{:.1}, {:.1}, {:.1}, {:.1}]", w, r.x0, r.y0, r.x1, r.y1);
         }
         assert!(!words.is_empty());
-        // Visual boxes live inside the panel.
+        // Visual boxes live inside the visual buffer.
         for (_, r) in words.iter().take(50) {
             assert!(r.x0 >= -1.0 && r.x1 <= 1237.0 && r.y0 >= -1.0 && r.y1 <= 1649.0);
         }
     }
 
-    /// End-to-end: in 270° landscape (H2), extracted word boxes must sit
-    /// on painted ink — darker than the page background. A transposed or
-    /// mis-offset mapping lands on whitespace and fails this.
+    /// End-to-end: in an H2 landscape visual buffer (1648x1236), extracted
+    /// word boxes must sit on painted ink — darker than the page
+    /// background. A mis-offset mapping lands on whitespace and fails
+    /// this.
     #[test]
     fn extracted_words_land_on_painted_ink() {
         if !std::path::Path::new(PDF).exists() {
@@ -523,8 +427,9 @@ mod tests {
         let page = doc.load_page(20).expect("load page");
         let mut settings = ReaderSettings::default();
         settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
-        let gray = render_page(&doc, 20, 0, &settings, 1236, 1648).expect("render");
-        let g = LayoutGeom::new(&settings, page.bounds().unwrap(), 0, 1236, 1648).expect("geom");
+        let (vw, vh) = (1648usize, 1236usize);
+        let gray = render_page(&doc, 20, 0, &settings, 1648, 1236).expect("render");
+        let g = LayoutGeom::new(&settings, page.bounds().unwrap(), 0, 1648, 1236).expect("geom");
         let tp = page.to_text_page(TextPageFlags::empty()).expect("text page");
         let words = words_from_text_page(&tp, &g);
         assert!(!words.is_empty());
@@ -533,10 +438,10 @@ mod tests {
         let mut n = 0usize;
         for (_, r) in words.iter() {
             let (x0, y0) = (r.x0.round().max(0.0) as usize, r.y0.round().max(0.0) as usize);
-            let (x1, y1) = ((r.x1.round() as usize).min(1236), (r.y1.round() as usize).min(1648));
+            let (x1, y1) = ((r.x1.round() as usize).min(vw), (r.y1.round() as usize).min(vh));
             for y in y0..y1 {
                 for x in x0..x1 {
-                    word_mean += gray[y * 1236 + x] as f64;
+                    word_mean += gray[y * vw + x] as f64;
                     n += 1;
                 }
             }
@@ -569,37 +474,33 @@ mod tests {
         }
     }
 
-    /// Rotation mapping invariants — the transform that was previously
-    /// pasted per-call-site and untestable. Rotation 90/270 only occurs
-    /// with landscape presets (the preset owns the rotation), which is
-    /// what keeps rotated boxes on-panel.
+    /// Mapping invariants: the sub-box maps inside the visual buffer and
+    /// stays a box, in both the portrait and the landscape visual buffer
+    /// (landscape = swapped dims — LayoutGeom no longer knows or cares
+    /// which grip produced them).
     #[test]
-    fn to_visual_rotation_invariants() {
+    fn to_visual_keeps_subbox_inside_buffer() {
         let mut settings = ReaderSettings::default();
         let bounds = mupdf::Rect::new(0.0, 0.0, 600.0, 800.0);
         settings.split = SplitConfig::for_preset(SplitPreset::FitPage);
 
         // Portrait: identity mapping for a rect at the origin.
-        assert_eq!(settings.split.rotation, 0);
         let g = LayoutGeom::new(&settings, bounds, 0, 1236, 1648).unwrap();
         let r = g.to_visual(0.0, 0.0, 10.0, 10.0);
         assert!(r.x0 < r.x1 && r.y0 < r.y1);
         assert!((r.x1 - r.x0 - 10.0 * g.zoom).abs() < 1.0);
 
-        // Landscape presets in both rotations keep the rendered sub-box
-        // inside the panel and keep it a box. (Rects OUTSIDE the sub-box
-        // legitimately map off-panel — they aren't on this screen.)
-        for rot in [90u16, 270] {
+        // Landscape splits over the swapped visual dims: sub-box on-panel,
+        // still a box. (Rects OUTSIDE the sub-box legitimately map
+        // off-buffer — they aren't on this screen.)
+        for (vw, vh) in [(1648u32, 1236u32), (1236, 1648)] {
             settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
-            settings.split.rotation = rot;
-            let g = LayoutGeom::new(&settings, bounds, 0, 1236, 1648).unwrap();
-            assert_eq!(g.rotation, rot);
+            let g = LayoutGeom::new(&settings, bounds, 0, vw, vh).unwrap();
             let (a, b, c, d) = g.sub_rect_doc();
             let r = g.to_visual(a, b, c, d);
-            assert!(r.x0 >= -1.0 && r.x1 <= 1237.0, "rot {}: {:?}", rot, r);
-            assert!(r.y0 >= -1.0 && r.y1 <= 1649.0, "rot {}: {:?}", rot, r);
+            assert!(r.x0 >= -1.0 && r.x1 <= vw as f32 + 1.0, "{vw}x{vh}: {:?}", r);
+            assert!(r.y0 >= -1.0 && r.y1 <= vh as f32 + 1.0, "{vw}x{vh}: {:?}", r);
             assert!(r.x0 < r.x1 && r.y0 < r.y1);
         }
     }
 }
-

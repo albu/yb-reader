@@ -15,6 +15,7 @@ use ybdev::frontlight::Frontlight;
 use ybdev::input::{Gesture, SwipeDir};
 use ybdev::sysinfo;
 
+use crate::split::{ReaderSettings, SplitConfig};
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
@@ -50,6 +51,18 @@ const CARD_BORDER: u8 = 200;
 const PILL_BG: u8 = 242;
 const PILL_ACTIVE_BG: u8 = 30;
 
+/// Everything the ROTATE pill needs to change the orientation of the
+/// book beneath — and nothing else. Rotation is the only setting the
+/// curtain owns, and it owns it through the same `record_sub` writer as
+/// the settings dialog, so the two entry points cannot disagree.
+pub struct RotateCtx {
+    pub book: String,
+    pub page: usize,
+    pub sub: usize,
+    pub total: usize,
+    pub settings: ReaderSettings,
+}
+
 pub struct CurtainScreen {
     fl: Option<Frontlight>,
     time: String,
@@ -57,6 +70,8 @@ pub struct CurtainScreen {
     // The screen underneath, captured on first paint (the buffer still
     // holds it then) — the sheet floats over a dimmed copy.
     bg: Option<Vec<u8>>,
+    // When opened from the reader: the ROTATE pill's book context.
+    rotate: Option<RotateCtx>,
     // Cached layout geometry in visual px
     w: i32,
     h: i32,
@@ -74,6 +89,16 @@ fn draw_box_text(p: &mut Painter, r: Rect, size_pt: f32, color: u8, text: &str) 
 
 impl CurtainScreen {
     pub fn new() -> CurtainScreen {
+        Self::build(None)
+    }
+
+    /// Reader-opened curtain: adds the ROTATE pill (cycles the book's
+    /// orientation, preset/crop untouched).
+    pub fn new_with_rotation(ctx: RotateCtx) -> CurtainScreen {
+        Self::build(Some(ctx))
+    }
+
+    fn build(rotate: Option<RotateCtx>) -> CurtainScreen {
         let (time, date) = Command::new("date")
             .arg("+%H:%M|%A, %d %B")
             .output()
@@ -91,6 +116,7 @@ impl CurtainScreen {
             time,
             date,
             bg: None,
+            rotate,
             w: 1236,
             h: 1648,
             track_x0: 0,
@@ -299,19 +325,32 @@ impl Screen for CurtainScreen {
         CurtainScreen::draw_card(p, r_mem, "MEMORY", &mem_val, &mem_sub);
         draw_mem_icon(p, r_mem.x + r_mem.w - pt(20.0), r_mem.y + pt(7.0));
 
-        // 4. Bottom Action Pills: [ Sleep ] [ Full Refresh ] [ Close ]
+        // 4. Bottom Action Pills: [ Sleep ] [ Refresh ] [ Rotate? ] [ Close ]
         //    (before the frontlight section: none of these need the fl,
         //    and a frontlight-less device must not lose its Close button)
         let act_y = pt(ACTIONS_TOP_PT);
-        let act_w = (w - 2 * pad - 2 * pt(CARD_GAP_PT)) / 3;
         let act_h = pt(ACTION_H_PT);
-
-        let labels = ["Sleep Screen", "Full Refresh", "Close"];
+        let labels: Vec<&str> = match &self.rotate {
+            Some(_) => vec!["Sleep Screen", "Refresh", "Rotate", "Close"],
+            None => vec!["Sleep Screen", "Full Refresh", "Close"],
+        };
+        let act_w =
+            (w - 2 * pad - (labels.len() as i32 - 1) * pt(CARD_GAP_PT)) / labels.len() as i32;
         for (i, label) in labels.iter().enumerate() {
             let r = Rect::new(pad + i as i32 * (act_w + pt(CARD_GAP_PT)), act_y, act_w, act_h);
             if *label == "Close" {
                 p.rect(r, PILL_ACTIVE_BG);
                 draw_box_text(p, r, 8.0, 255, label);
+            } else if *label == "Rotate" {
+                p.rect(r, PILL_BG);
+                p.rect_outline_t(r, 2, INK);
+                let cur = self
+                    .rotate
+                    .as_ref()
+                    .map(|c| c.settings.split.rotation)
+                    .unwrap_or(0);
+                let dest = format!("Rotate {}°", SplitConfig::next_rotation(cur));
+                draw_box_text(p, r, 8.0, INK, &dest);
             } else {
                 p.rect(r, PILL_BG);
                 p.rect_outline_t(r, 1, CARD_BORDER);
@@ -419,10 +458,11 @@ impl Screen for CurtainScreen {
                     return Action::Redraw;
                 }
 
-                // 2. Bottom Action Buttons: [ Sleep ] [ Refresh ] [ Close ]
+                // 2. Bottom Action Pills: [ Sleep ] [ Refresh ] [ Rotate? ] [ Close ]
                 let act_y = pt(ACTIONS_TOP_PT);
                 let act_h = pt(ACTION_H_PT);
-                let act_w = (w - 2 * pad - 2 * pt(CARD_GAP_PT)) / 3;
+                let n_pills = if self.rotate.is_some() { 4 } else { 3 };
+                let act_w = (w - 2 * pad - (n_pills as i32 - 1) * pt(CARD_GAP_PT)) / n_pills;
                 if y >= act_y - 6 && y < act_y + act_h + 6 && x >= pad {
                     let idx = ((x - pad) / (act_w + pt(CARD_GAP_PT))) as usize;
                     match idx {
@@ -432,6 +472,19 @@ impl Screen for CurtainScreen {
                         1 => {
                             // Full Screen Refresh
                             return Action::RedrawFull;
+                        }
+                        2 if self.rotate.is_some() => {
+                            // Cycle the book's orientation and let the
+                            // reader apply it on resume (App flips the
+                            // panel with a full refresh). Preset, overlap
+                            // and crop margins ride along untouched.
+                            let mut ctx = self.rotate.take().expect("rotate ctx");
+                            ctx.settings.split.rotation =
+                                SplitConfig::next_rotation(ctx.settings.split.rotation);
+                            crate::dialogs::record_sub(
+                                &ctx.book, ctx.page, ctx.sub, ctx.total, ctx.settings,
+                            );
+                            return Action::Pop;
                         }
                         _ => {
                             // Close
@@ -492,8 +545,18 @@ mod tests {
         let mut buf = vec![255u8; 1248 * 1648];
         let mut c = CurtainScreen::new();
         {
-            let mut p = yui::Painter::new(&mut buf, 1236, 1648, 1248, &font);
+            let mut canvas = vec![0u8; 1236 * 1648];
+            let mut p = yui::Painter::new(
+                &mut buf,
+                1236,
+                1648,
+                1248,
+                yui::Orientation::Portrait,
+                &mut canvas,
+                &font,
+            );
             c.draw(&mut p);
+            p.flush();
         }
         let ink = |name: &str, y0: usize, y1: usize, min: usize| {
             let n = buf[y0 * 1248..y1 * 1248].iter().filter(|&&b| b < 140).count();

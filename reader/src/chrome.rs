@@ -72,43 +72,25 @@ pub fn footer_str(
     }
 }
 
-/// Status header: clock + truncated title + battery, horizontal in
-/// portrait, rotated along the long edge in landscape.
-pub fn draw_header(p: &mut Painter, time_str: &str, book: &str, settings: &ReaderSettings, is_night: bool) {
+/// Status header: clock + truncated title + battery along the visual top
+/// edge — one code path for every orientation (Painter handles the grip).
+pub fn draw_header(p: &mut Painter, time_str: &str, book: &str, is_night: bool) {
     let (w, _h) = p.size();
     let fg_color = if is_night { 200 } else { 90 };
     let (bat_cap, _) = sysinfo::battery();
     let bat_str = format!("{}%", bat_cap);
     let title_trunc = p.truncate(7.0, book, p.width_pt() - 70.0);
-
-    if settings.split.is_landscape() {
-        let rot = settings.split.rotation;
-        let header_text = format!("{} · {} · {}", time_str, title_trunc, bat_str);
-        let cx = if rot == 270 { pt(10.0) } else { w - pt(10.0) };
-        p.text_center_rotated(cx, _h / 2, 6.5, fg_color, &header_text, rot);
-    } else {
-        p.text(pt(16.0), pt(14.0), 7.0, fg_color, time_str);
-        p.text_center(pt(14.0), 7.0, fg_color, &title_trunc);
-        p.text_right(w - pt(16.0), pt(14.0), 7.0, fg_color, &bat_str);
-        p.hline_t(pt(20.0), pt(16.0), w - pt(16.0), 1, if is_night { 60 } else { 225 });
-    }
+    p.text(pt(16.0), pt(14.0), 7.0, fg_color, time_str);
+    p.text_center(pt(14.0), 7.0, fg_color, &title_trunc);
+    p.text_right(w - pt(16.0), pt(14.0), 7.0, fg_color, &bat_str);
+    p.hline_t(pt(20.0), pt(16.0), w - pt(16.0), 1, if is_night { 60 } else { 225 });
 }
 
-/// Progress footer, rotated along the reading edge in landscape.
-pub fn draw_footer(p: &mut Painter, footer: &str, rotation: u16, is_night: bool) {
-    let (w, h) = p.size();
+/// Progress footer along the visual bottom edge.
+pub fn draw_footer(p: &mut Painter, footer: &str, is_night: bool) {
+    let (_w, h) = p.size();
     let fg_color = if is_night { 200 } else { 90 };
-    match rotation {
-        270 => {
-            p.text_center_rotated(w - pt(10.0), h / 2, 7.0, fg_color, footer, 270);
-        }
-        90 => {
-            p.text_center_rotated(pt(10.0), h / 2, 7.0, fg_color, footer, 90);
-        }
-        _ => {
-            p.text_center(h - pt(10.0), 7.0, fg_color, footer);
-        }
-    }
+    p.text_center(h - pt(10.0), 7.0, fg_color, footer);
 }
 
 /// Selection-mode bookmark: a ribbon hanging from the top edge, left of

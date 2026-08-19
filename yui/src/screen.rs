@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use ybdev::input::Gesture;
 
+use crate::orientation::Orientation;
 use crate::painter::Painter;
 
 pub trait Screen {
@@ -13,7 +14,17 @@ pub trait Screen {
     /// cleared for you). Called by App only when a redraw was earned.
     fn draw(&mut self, p: &mut Painter);
 
-    /// A complete gesture (tap / swipe / two-finger tap) in panel px.
+    /// The orientation this screen renders and hit-tests in. `None` (the
+    /// default) inherits whatever the App currently shows — overlays above
+    /// a landscape reader render landscape, like a phone. Screens with an
+    /// opinion return it outright: the reader derives it from its split
+    /// settings, portrait-designed screens pin `Some(Portrait)`.
+    fn orientation(&self) -> Option<Orientation> {
+        None
+    }
+
+    /// A complete gesture (tap / swipe / two-finger tap) in VISUAL px
+    /// (App has already un-rotated panel input into this screen's space).
     fn on_gesture(&mut self, g: Gesture) -> Action {
         let _ = g;
         Action::Keep

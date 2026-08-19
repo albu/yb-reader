@@ -13,8 +13,19 @@ use crate::positions;
 use crate::render::render_page;
 use crate::split::ReaderSettings;
 
+/// Jump-to-a-fresh-place record: sub-box 0 (a TOC/scrubber jump lands at
+/// the top of the target view).
 fn record(path: &str, page: usize, total: usize, settings: ReaderSettings) {
     positions::record_pos(path, page, total, 0, Some(settings));
+}
+
+/// Settings-change record: preserves the CURRENT sub-box so adjusting
+/// rotation or crops never yanks the reader back to the top of the page.
+/// The single writer both settings entry points (the dialog's on_change
+/// and the curtain's ROTATE card) go through — one persistence path, no
+/// way for them to disagree.
+pub fn record_sub(path: &str, page: usize, sub: usize, total: usize, settings: ReaderSettings) {
+    positions::record_pos(path, page, total, sub, Some(settings));
 }
 
 pub fn toc_dialog(
@@ -174,6 +185,7 @@ pub fn footnote_dialog(
 pub fn settings_dialog(
     doc: Option<&Rc<Document>>,
     page_no: usize,
+    sub_idx: usize,
     settings: ReaderSettings,
     is_pdf: bool,
     path_name: String,
@@ -196,7 +208,7 @@ pub fn settings_dialog(
         is_pdf,
         samples,
         move |new_settings| {
-            record(&path_name, page_no, total, new_settings);
+            record_sub(&path_name, page_no, sub_idx, total, new_settings);
             Action::Pop
         },
     )))

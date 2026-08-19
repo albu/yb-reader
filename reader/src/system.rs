@@ -308,8 +308,18 @@ mod tests {
         let mut buf = vec![255u8; 1248 * 1648];
         let mut s = SystemScreen::new();
         {
-            let mut p = yui::Painter::new(&mut buf, 1236, 1648, 1248, &font);
+            let mut canvas = vec![0u8; 1236 * 1648];
+            let mut p = yui::Painter::new(
+                &mut buf,
+                1236,
+                1648,
+                1248,
+                yui::Orientation::Portrait,
+                &mut canvas,
+                &font,
+            );
             s.draw(&mut p);
+            p.flush();
         }
         let ink = |name: &str, y0: usize, y1: usize, min: usize| {
             let n = buf[y0 * 1248..y1 * 1248].iter().filter(|&&b| b < 140).count();

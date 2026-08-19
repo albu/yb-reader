@@ -24,11 +24,15 @@ use crate::render::render_page;
 
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
+use yui::Orientation;
 
 pub struct ReaderScreen {
     path: PathBuf,
-    w: u32,
-    h: u32,
+    /// Panel dims (orientation-independent). Visual dims derive on demand
+    /// from the split rotation — every render/cache interaction speaks
+    /// visual space.
+    pw: u32,
+    ph: u32,
     loading: Option<std::sync::mpsc::Receiver<Result<BookReady, String>>>,
     doc: Option<Rc<Document>>,
     err: Option<String>,
@@ -69,8 +73,11 @@ impl ReaderScreen {
         let settings = pos.settings.unwrap_or_default();
         let sub_idx = if pos.page == resume { pos.sub_idx } else { 0 };
 
-        // Attempt instant frame 0 snapshot load from disk cache
-        let cached_snap = crate::cache::load_snapshot(&name, resume, sub_idx, &settings, w, h);
+        // Visual dims under the book's persisted orientation — snapshots,
+        // layouts and the warm cache all key on these, so they must be
+        // computed AFTER the settings load, never from the raw panel dims.
+        let (vw, vh) = Orientation::from_rotation(settings.split.rotation).visual_dims(w, h);
+        let cached_snap = crate::cache::load_snapshot(&name, resume, sub_idx, &settings, vw, vh);
         if cached_snap.is_some() {
             plog(&format!("loaded instant page snapshot for {}", name));
         }
@@ -80,8 +87,8 @@ impl ReaderScreen {
 
         ReaderScreen {
             path,
-            w,
-            h,
+            pw: w,
+            ph: h,
             loading: None,
             doc: None,
             err: None,
@@ -113,6 +120,11 @@ impl ReaderScreen {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
+    }
+
+    /// Visual dims under the current split rotation.
+    fn visual_dims(&self) -> (u32, u32) {
+        Orientation::from_rotation(self.settings.split.rotation).visual_dims(self.pw, self.ph)
     }
 
     fn is_pdf(&self) -> bool {
@@ -160,14 +172,10 @@ impl ReaderScreen {
         if self.doc.is_none() {
             // If background-loading, check if the neighbor page is already in snapshot
             // Cache hit: instant page swap!
-            if let Some(snap) = crate::cache::load_snapshot(
-                &self.book_name(),
-                new_page,
-                new_sub,
-                &self.settings,
-                self.w,
-                self.h,
-            ) {
+            let (vw, vh) = self.visual_dims();
+            if let Some(snap) =
+                crate::cache::load_snapshot(&self.book_name(), new_page, new_sub, &self.settings, vw, vh)
+            {
                 self.page_no = new_page;
                 self.sub_idx = new_sub;
                 self.page_gray = Some(snap);
@@ -241,6 +249,10 @@ impl ReaderScreen {
 
     fn open_scrubber_dialog(&mut self) -> Action {
         let Some(doc) = &self.doc else { return Action::Keep };
+        // The scrubber is a proportional bottom card — it inherits the
+        // reader's orientation, so backdrop and previews render at the
+        // current visual dims.
+        let (vw, vh) = self.visual_dims();
         dialogs::scrubber_dialog(
             doc,
             self.page_no,
@@ -248,8 +260,8 @@ impl ReaderScreen {
             self.page_gray.clone(),
             self.book_name(),
             self.settings,
-            self.w,
-            self.h,
+            vw,
+            vh,
         )
     }
 
@@ -269,6 +281,7 @@ impl ReaderScreen {
         dialogs::settings_dialog(
             self.doc.as_ref(),
             self.page_no,
+            self.sub_idx,
             self.settings,
             self.is_pdf(),
             self.book_name(),
@@ -277,51 +290,15 @@ impl ReaderScreen {
     }
 
     fn open_curtain(&mut self) -> Action {
-        Action::Push(Box::new(CurtainScreen::new()))
-    }
-
-    /// Map physical touch/swipe event to visual orientation coordinates.
-    /// Returns (visual_x, visual_y, visual_swipe_dir).
-    fn map_gesture(&self, g: Gesture) -> (i32, i32, Option<SwipeDir>) {
-        let (w, h) = self.dims; // w=1236, h=1648
-        match g {
-            Gesture::Tap { x, y } | Gesture::LongPress { x, y } | Gesture::Drag { x, y } => {
-                let (px, py) = (x as i32, y as i32);
-                match self.settings.split.rotation {
-                    270 => {
-                        let vx = (h - 1).saturating_sub(py);
-                        let vy = px;
-                        (vx, vy, None)
-                    }
-                    90 => {
-                        let vx = py;
-                        let vy = (w - 1).saturating_sub(px);
-                        (vx, vy, None)
-                    }
-                    _ => (px, py, None),
-                }
-            }
-            Gesture::Swipe { dir, x, y, .. } => {
-                let (vx, vy, _) = self.map_gesture(Gesture::Tap { x, y });
-                let v_dir = match self.settings.split.rotation {
-                    270 => match dir {
-                        SwipeDir::North => SwipeDir::West,
-                        SwipeDir::South => SwipeDir::East,
-                        SwipeDir::East => SwipeDir::South,
-                        SwipeDir::West => SwipeDir::North,
-                    },
-                    90 => match dir {
-                        SwipeDir::North => SwipeDir::East,
-                        SwipeDir::South => SwipeDir::West,
-                        SwipeDir::East => SwipeDir::North,
-                        SwipeDir::West => SwipeDir::South,
-                    },
-                    _ => dir,
-                };
-                (vx, vy, Some(v_dir))
-            }
-            _ => (0, 0, None),
-        }
+        Action::Push(Box::new(CurtainScreen::new_with_rotation(
+            crate::curtain::RotateCtx {
+                book: self.book_name(),
+                page: self.page_no,
+                sub: self.sub_idx,
+                total: self.total,
+                settings: self.settings,
+            },
+        )))
     }
 
     fn pre_cache_neighbors(&mut self, w: u32, h: u32) {
@@ -359,12 +336,13 @@ impl ReaderScreen {
 
         let Some(doc) = &self.doc else { return };
         let Ok(page) = doc.load_page(self.page_no as i32) else { return };
+        let (vw, vh) = self.visual_dims();
         let Some(geom) = crate::render::LayoutGeom::new(
             &self.settings,
             page.bounds().unwrap_or_default(),
             self.sub_idx,
-            self.w,
-            self.h,
+            vw,
+            vh,
         ) else {
             return;
         };
@@ -440,6 +418,12 @@ impl Screen for ReaderScreen {
         false
     }
 
+    /// The grip this book renders in, straight from its split settings —
+    /// App flips the panel accordingly (with a full refresh).
+    fn orientation(&self) -> Option<Orientation> {
+        Some(Orientation::from_rotation(self.settings.split.rotation))
+    }
+
     fn on_enter(&mut self) -> Action {
         // Deliberately no keep_awake hold: input-idle suspend while
         // reading is the approved policy (page turns reset powerd's
@@ -457,10 +441,17 @@ impl Screen for ReaderScreen {
             }
         }
 
-        // Warm cache check
+        // Warm cache check: the document was laid out for exactly these
+        // visual dims and font — anything else (e.g. a rotation change
+        // while away) needs a cold open.
+        let (vw, vh) = self.visual_dims();
         if let Ok(mut warm) = WARM.lock() {
-            if let Some((p, SendDoc(doc), total, font_sz)) = warm.take() {
-                if p == self.path && (font_sz - self.settings.font_size).abs() < 0.01 {
+            if let Some((p, SendDoc(doc), total, font_sz, warm_w, warm_h)) = warm.take() {
+                if p == self.path
+                    && (font_sz - self.settings.font_size).abs() < 0.01
+                    && warm_w == vw
+                    && warm_h == vh
+                {
                     plog(&format!(
                         "book warm: instant open (rss={})",
                         doc_store::rss_mib()
@@ -476,8 +467,8 @@ impl Screen for ReaderScreen {
         }
         self.loading = Some(doc_store::open_async(
             self.path.clone(),
-            self.w,
-            self.h,
+            vw,
+            vh,
             self.settings.font_size,
             self.settings.margin_pad,
         ));
@@ -488,11 +479,14 @@ impl Screen for ReaderScreen {
         if let Some(doc_rc) = self.doc.take() {
             if let Ok(doc) = Rc::try_unwrap(doc_rc) {
                 if let Ok(mut warm) = WARM.lock() {
+                    let (vw, vh) = self.visual_dims();
                     *warm = Some((
                         self.path.clone(),
                         SendDoc(doc),
                         self.total,
                         self.settings.font_size,
+                        vw,
+                        vh,
                     ));
                 }
             }
@@ -520,46 +514,60 @@ impl Screen for ReaderScreen {
         }
 
         if let Some(s) = pos.settings {
-            let font_changed = (s.font_size - self.settings.font_size).abs() > 0.01
-                || s.margin_pad != self.settings.margin_pad;
-            if font_changed {
+            // Any layout-affecting change — font, margin, or the split
+            // config (rotation, preset, overlap, crop margins) —
+            // invalidates the current render; reflowables must re-layout.
+            let layout_changed = (s.font_size - self.settings.font_size).abs() > 0.01
+                || s.margin_pad != self.settings.margin_pad
+                || s.split != self.settings.split;
+            self.settings = s;
+            // A preset with fewer sub-boxes: keep the position valid.
+            self.sub_idx = self
+                .sub_idx
+                .min(self.settings.split.sub_box_count().saturating_sub(1));
+
+            if layout_changed {
                 self.page_words.clear();
                 self.page_annotations.clear();
-            }
-            self.settings = s;
 
-            if font_changed && !self.is_pdf() {
-                self.sub_idx = 0;
-                self.page_gray = None;
-                // In-memory instant reflow without re-reading/re-parsing ZIP archive from disk
-                if let Some(doc_rc) = self.doc.take() {
-                    if let Ok(doc) = Rc::try_unwrap(doc_rc) {
-                        self.loading = Some(doc_store::reflow_async(
-                            SendDoc(doc),
-                            self.w,
-                            self.h,
-                            self.settings.font_size,
-                            self.settings.margin_pad,
-                        ));
+                if !self.is_pdf() {
+                    self.sub_idx = 0;
+                    self.page_gray = None;
+                    let (vw, vh) = self.visual_dims();
+                    // In-memory instant reflow without re-reading/re-parsing ZIP archive from disk
+                    if let Some(doc_rc) = self.doc.take() {
+                        if let Ok(doc) = Rc::try_unwrap(doc_rc) {
+                            self.loading = Some(doc_store::reflow_async(
+                                SendDoc(doc),
+                                vw,
+                                vh,
+                                self.settings.font_size,
+                                self.settings.margin_pad,
+                            ));
+                        } else {
+                            self.loading = Some(doc_store::open_async(
+                                self.path.clone(),
+                                vw,
+                                vh,
+                                self.settings.font_size,
+                                self.settings.margin_pad,
+                            ));
+                        }
                     } else {
                         self.loading = Some(doc_store::open_async(
                             self.path.clone(),
-                            self.w,
-                            self.h,
+                            vw,
+                            vh,
                             self.settings.font_size,
                             self.settings.margin_pad,
                         ));
                     }
-                } else {
-                    self.loading = Some(doc_store::open_async(
-                        self.path.clone(),
-                        self.w,
-                        self.h,
-                        self.settings.font_size,
-                        self.settings.margin_pad,
-                    ));
+                    return Action::Redraw;
                 }
-                return Action::Redraw;
+                // PDF: the render derives from settings each draw —
+                // dropping the stale snapshot re-renders in the new
+                // orientation/crop immediately.
+                self.page_gray = None;
             }
         }
         if page_changed {
@@ -702,7 +710,7 @@ impl Screen for ReaderScreen {
 
         // Header status line + progress footer
         if self.settings.show_header {
-            chrome::draw_header(p, &self.time_str, &self.book_name(), &self.settings, is_night);
+            chrome::draw_header(p, &self.time_str, &self.book_name(), is_night);
         }
         let time_left = chrome::time_left_str(
             self.total,
@@ -718,7 +726,7 @@ impl Screen for ReaderScreen {
             &self.settings,
             &time_left,
         );
-        chrome::draw_footer(p, &footer, self.settings.split.rotation, is_night);
+        chrome::draw_footer(p, &footer, is_night);
 
         // Saved highlights: solid light underlines, page-gated and matched
         // by word sequence within the page. (A span that crosses a
@@ -753,15 +761,17 @@ impl Screen for ReaderScreen {
             return Action::Pop;
         }
 
-        let is_landscape = self.settings.split.is_landscape();
+        // Gestures arrive already in visual space (App un-rotates input);
+        // self.dims is the visual canvas cached at draw.
+        let (vis_w, vis_h) = self.dims;
 
-        let (vis_w, vis_h) = if is_landscape {
-            (self.dims.1, self.dims.0) // 1648 x 1236
-        } else {
-            (self.dims.0, self.dims.1) // 1236 x 1648
+        let (vx, vy, v_dir) = match g {
+            Gesture::Tap { x, y } | Gesture::LongPress { x, y } | Gesture::Drag { x, y } => {
+                (x as i32, y as i32, None)
+            }
+            Gesture::Swipe { dir, x, y, .. } => (x as i32, y as i32, Some(dir)),
+            _ => (0, 0, None),
         };
-
-        let (vx, vy, v_dir) = self.map_gesture(g);
 
         if let Some(dir) = v_dir {
             // Any swipe cancels a pending selection (mode stays on).

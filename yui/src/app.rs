@@ -2,12 +2,17 @@
 //! loop, routes the edge gestures, applies screen actions, and enforces
 //! the e-ink refresh discipline (an update only ever follows a `Redraw*`
 //! action or a stack transition — never a bare tick).
+//!
+//! App is also one of the two orientation boundaries: raw panel input is
+//! un-rotated into visual space here before any screen or edge policy
+//! sees it (Painter::flush is the other direction, pixels out).
 
 use ybdev::input::{Gesture, Input};
 use ybdev::panel::Panel;
 
 use crate::font::Font;
 use crate::frontlight::FrontlightScreen;
+use crate::orientation::Orientation;
 use crate::painter::Painter;
 use crate::screen::{Action, Screen};
 
@@ -16,6 +21,12 @@ pub struct App {
     input: Input,
     font: Font,
     stack: Vec<Box<dyn Screen>>,
+    /// Reused visual-space scratch canvas handed to every Painter — one
+    /// allocation for the process, both orientations fit (same area).
+    canvas: Vec<u8>,
+    /// The orientation currently on glass; re-resolved from the stack on
+    /// every transition (first Some() from the top wins).
+    orientation: Orientation,
     /// Custom screen for the top-edge/two-finger overlay (the default is
     /// yui's FrontlightScreen; apps with a richer control center — clock,
     /// battery, wifi — install their own factory here).
@@ -38,11 +49,14 @@ impl App {
     /// Loads the shared font; panel and input are handed over for good.
     pub fn new(panel: Panel, input: Input) -> Result<App, String> {
         let font = Font::load()?;
+        let canvas = vec![0u8; (panel.width * panel.height) as usize];
         Ok(App {
             panel,
             input,
             font,
             stack: Vec::new(),
+            canvas,
+            orientation: Orientation::Portrait,
             overlay: None,
             resume: None,
         })
@@ -78,7 +92,15 @@ impl App {
                 .map(|s| s.tick_interval())
                 .unwrap_or_else(|| std::time::Duration::from_secs(1));
             let before = std::time::SystemTime::now();
-            let gesture = self.input.next_gesture(interval);
+            // Raw panel input becomes visual-space input here — the only
+            // un-rotation touch ever sees; screens and the edge policy
+            // below all speak visual coordinates.
+            let (pw, ph) = (self.panel.width, self.panel.height);
+            let orient = self.orientation;
+            let gesture = self
+                .input
+                .next_gesture(interval)
+                .map(|g| orient.gesture_to_visual(pw, ph, g));
             let wall = before.elapsed().unwrap_or_default();
             // powerd (or the sleep screen) suspended us under the loop.
             // Hand the app its resume hook and repaint, then still
@@ -154,24 +176,55 @@ impl App {
 
     fn apply(&mut self, a: Action) -> bool {
         let (cont, redraw_full) = transition(&mut self.stack, a);
-        if let Some(full) = redraw_full {
-            self.draw_top(full);
+        // Re-resolve orientation after the stack change; a flip forces the
+        // refresh to full (rotating without the flash ghosts badly).
+        let flipped = self.resolve_orientation();
+        match redraw_full {
+            Some(full) => self.draw_top(full || flipped),
+            None if flipped => self.draw_top(true),
+            _ => {}
         }
         cont
     }
 
+    /// First screen from the top with an orientation opinion wins; no
+    /// opinion anywhere keeps the current one (overlays inherit).
+    fn resolve_orientation(&mut self) -> bool {
+        match self.stack.iter().rev().find_map(|s| s.orientation()) {
+            Some(o) if o != self.orientation => {
+                self.orientation = o;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn draw_top(&mut self, full: bool) {
         let App {
-            panel, font, stack, ..
+            panel,
+            font,
+            stack,
+            canvas,
+            orientation,
+            ..
         } = self;
         let w = panel.width;
         let h = panel.height;
         let stride = panel.stride as usize;
         {
-            let mut p = Painter::new(panel.buf_mut(), w, h, stride, font);
+            let mut p = Painter::new(
+                panel.buf_mut(),
+                w,
+                h,
+                stride,
+                *orientation,
+                canvas,
+                font,
+            );
             if let Some(s) = stack.last_mut() {
                 s.draw(&mut p);
             }
+            p.flush();
         }
         if full {
             panel.refresh_full();

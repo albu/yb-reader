@@ -17,6 +17,7 @@ use crate::mirror::MirrorScreen;
 use crate::positions::{self, Pos};
 use yui::nav::{self, Icon, NavTab};
 use yui::painter::{pt, Painter, Rect};
+use yui::Orientation;
 use yui::screen::{Action, Screen};
 
 const TABS: [NavTab; 2] = [
@@ -278,6 +279,12 @@ impl HomeScreen {
 impl Screen for HomeScreen {
     fn default_edges(&self) -> bool {
         true
+    }
+
+    /// The launcher is authored portrait — coming back from a landscape
+    /// book must reset the grip, not inherit it.
+    fn orientation(&self) -> Option<Orientation> {
+        Some(Orientation::Portrait)
     }
 
     fn on_enter(&mut self) -> Action {
