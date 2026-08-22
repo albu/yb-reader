@@ -1,5 +1,5 @@
 [workspace]
-members = ["ybdev", "yui", "reader", "probe", "tools/rendertest"]
+members = ["ybdev", "yui", "yread", "reader", "probe", "tools/rendertest"]
 resolver = "2"
 
 [workspace.package]

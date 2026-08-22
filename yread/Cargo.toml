@@ -1,0 +1,22 @@
+[package]
+name = "yread"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+quick-xml = { version = "0.37", features = ["encoding"] }
+rustybuzz = "0.20"
+swash = "0.1"
+hypher = "0.1"
+unicode-linebreak = "0.1"
+flate2 = "1.0"
+base64 = "0.22"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "engine_bench"
+harness = false
