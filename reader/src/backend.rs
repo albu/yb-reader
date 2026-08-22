@@ -16,6 +16,17 @@ pub struct RenderOutput {
     pub is_loading: bool,
 }
 
+/// What the engine is still doing TO THE SHOWN PAGE — None once the page
+/// is final. Distinct from `has_pending_work` (which also covers
+/// invisible neighbor-chapter prefetch and only drives tick pacing):
+/// this is the user-facing truth for the footer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BusyPhase {
+    Opening,
+    LayingOut,
+    Turning,
+}
+
 pub trait ReaderBackend {
     fn is_pdf(&self) -> bool;
 
@@ -36,6 +47,10 @@ pub trait ReaderBackend {
     /// land promptly and no loading screen gets stuck.
     fn has_pending_work(&self) -> bool {
         false
+    }
+
+    fn busy_phase(&self) -> Option<BusyPhase> {
+        None
     }
 
     fn poll(&mut self, vw: u32, vh: u32, settings: &ReaderSettings) -> bool;

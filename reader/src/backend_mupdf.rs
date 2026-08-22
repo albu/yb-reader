@@ -82,6 +82,14 @@ impl ReaderBackend for PdfBackend {
         self.doc.is_some()
     }
 
+    fn busy_phase(&self) -> Option<crate::backend::BusyPhase> {
+        if self.doc.is_none() {
+            Some(crate::backend::BusyPhase::Opening)
+        } else {
+            None
+        }
+    }
+
     fn error(&self) -> Option<&str> {
         self.err.as_deref()
     }

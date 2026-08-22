@@ -364,6 +364,23 @@ impl ReaderBackend for YreadBackend {
             || self.yqueued_turns != 0
     }
 
+    fn busy_phase(&self) -> Option<crate::backend::BusyPhase> {
+        use crate::backend::BusyPhase;
+        if self.ybook.is_none() {
+            return Some(BusyPhase::Opening);
+        }
+        if self.yqueued_turns != 0 {
+            return Some(BusyPhase::Turning);
+        }
+        // Neighbor prefetch (ybg_rx with the current chapter already
+        // displayed) is deliberately NOT a busy phase — the shown page
+        // is final and the footer must not claim otherwise.
+        if self.yreflow || !self.ychap_cache.contains_key(&self.ychap_idx) {
+            return Some(BusyPhase::LayingOut);
+        }
+        None
+    }
+
     fn error(&self) -> Option<&str> {
         self.err.as_deref()
     }

@@ -5,7 +5,7 @@ use std::rc::Rc;
 use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
 
-use crate::backend::{create_backend, PageTurnResult, ReaderBackend};
+use crate::backend::{create_backend, BusyPhase, PageTurnResult, ReaderBackend};
 use crate::chrome;
 use crate::curtain::CurtainScreen;
 use crate::dialogs;
@@ -528,13 +528,15 @@ impl Screen for ReaderScreen {
 
         // Header & Footer Chrome
         let (mut footer_text, footer_page, footer_total) = backend.footer_info();
-        // While the engine catches up behind a shown snapshot, say so in
-        // the footer instead of blanking the page to a loading screen.
-        if backend.has_pending_work() {
-            footer_text.push_str(if backend.is_ready() {
-                " · Laying out…"
-            } else {
-                " · Opening…"
+        // While the engine catches up on the SHOWN page, say so in the
+        // footer instead of blanking to a loading screen. Neighbor
+        // prefetch doesn't count — the page is final (busy_phase, not
+        // has_pending_work).
+        if let Some(phase) = backend.busy_phase() {
+            footer_text.push_str(match phase {
+                BusyPhase::Opening => " · Opening…",
+                BusyPhase::LayingOut => " · Laying out…",
+                BusyPhase::Turning => " · Turning…",
             });
         }
         let chap_title = backend.chapter_title();
