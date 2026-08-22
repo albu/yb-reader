@@ -55,6 +55,10 @@ impl ReaderBackend for PdfBackend {
         true
     }
 
+    fn mupdf_doc(&self) -> Option<Rc<Document>> {
+        self.doc.clone()
+    }
+
     fn book_name(&self) -> String {
         self.path
             .file_name()
@@ -101,8 +105,11 @@ impl ReaderBackend for PdfBackend {
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // The worker died without sending (panic past catch_unwind,
+                // abort): surface it instead of "Opening…" forever.
+                self.err = Some("open worker died".to_string());
                 self.loading = None;
-                false
+                true
             }
         }
     }
@@ -141,19 +148,20 @@ impl ReaderBackend for PdfBackend {
         }
     }
 
-    fn jump_to_sub(&mut self, sub_idx: usize, _vw: u32, _vh: u32, _settings: &ReaderSettings) {
+    fn jump_to_sub(&mut self, sub_idx: usize, _vw: u32, _vh: u32, settings: &ReaderSettings) {
         if self.sub_idx_is_mupdf() {
-            self.sub_idx = sub_idx.min(self.sub_box_count.saturating_sub(1));
+            // Clamp against the settings-derived box count: the render-state
+            // `sub_box_count` is still the constructor default (1) until the
+            // first turn_page/render_page, and clamping against it zeroed
+            // every restored split position on reopen.
+            let count = settings.split.sub_boxes().len().max(1);
+            self.sub_idx = sub_idx.min(count.saturating_sub(1));
         }
     }
 
     fn jump_to_page(&mut self, page: usize, _vw: u32, _vh: u32, _settings: &ReaderSettings) {
         self.page_no = page.min(self.total.saturating_sub(1));
         self.sub_idx = 0;
-    }
-
-    fn jump_to_yread(&mut self, _chapter_idx: usize, _char_offset: usize, _vw: u32, _vh: u32, _settings: &ReaderSettings) {
-        // PDF does not use yread chapter/char offsets
     }
 
     fn render_page(&mut self, vw: u32, vh: u32, settings: &ReaderSettings) -> RenderOutput {
@@ -198,6 +206,18 @@ impl ReaderBackend for PdfBackend {
 
     fn chapter_title(&self) -> Option<String> {
         None
+    }
+
+    fn toc_chapter_pages(&self) -> Vec<usize> {
+        let mut pages = Vec::new();
+        if let Some(doc) = &self.doc {
+            if let Ok(outlines) = doc.outlines() {
+                Self::collect_outline_pages(&outlines, &mut pages);
+            }
+        }
+        pages.sort_unstable();
+        pages.dedup();
+        pages
     }
 
     fn resolve_link_or_footnote(
@@ -258,6 +278,17 @@ impl ReaderBackend for PdfBackend {
 }
 
 impl PdfBackend {
+    fn collect_outline_pages(outlines: &[mupdf::Outline], out: &mut Vec<usize>) {
+        for o in outlines {
+            if let Some(dest) = &o.dest {
+                out.push(dest.loc.page_number as usize);
+            }
+            if !o.down.is_empty() {
+                Self::collect_outline_pages(&o.down, out);
+            }
+        }
+    }
+
     fn sub_idx_is_mupdf(&self) -> bool {
         self.sub_idx < 100
     }
