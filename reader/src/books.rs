@@ -1303,9 +1303,17 @@ impl Screen for ReaderScreen {
                 || s.split != self.settings.split;
             self.settings = s;
             // A preset with fewer sub-boxes: keep the position valid.
-            self.sub_idx = self
-                .sub_idx
-                .min(self.settings.split.sub_box_count().saturating_sub(1));
+            // NEVER for yread: its sub_idx packs (chapter*1e6 + char
+            // offset) — min(sub_box_count-1) zeroed it after any dialog
+            // pop, and a jump-history entry later recorded that 0 as the
+            // position ("Back to p.N" landed at the book start).
+            if !(self.settings.engine == crate::split::ReaderEngine::YRead
+                && !self.is_pdf())
+            {
+                self.sub_idx = self
+                    .sub_idx
+                    .min(self.settings.split.sub_box_count().saturating_sub(1));
+            }
 
             if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
                 if layout_changed {
