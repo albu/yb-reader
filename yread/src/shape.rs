@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use rustybuzz::UnicodeBuffer;
 
-use crate::font::{FontFace, FontSystem};
+use crate::font::FontSystem;
 use crate::model::FontStyle;
 
 #[derive(Debug, Clone, Copy)]

@@ -114,10 +114,20 @@ impl ReaderScreen {
 
         // Visual dims under the book's persisted orientation
         let (vw, vh) = Orientation::from_rotation(settings.split.rotation).visual_dims(w, h);
-        // Snapshot for instant open — yread included: sub_idx is the exact
-        // (chapter, char) identity, so a hit shows the precise page while
-        // parse + pagination catch up in the background.
-        let cached_snap = crate::cache::load_snapshot(&name, resume, sub_idx, &settings, vw, vh);
+        let is_pdf = path
+            .extension()
+            .map(|e| e.to_string_lossy().eq_ignore_ascii_case("pdf"))
+            .unwrap_or(false);
+        // Snapshot for instant open (mupdf path only — a big PDF's cold
+        // open is genuinely slow). yread skips it: a cold open is parse +
+        // sub-second layout under the Opening/Laying out screens, and the
+        // snapshot flow's hidden warm-up caused more confusion than it
+        // saved ("fake cache": page visible, taps queued, engine cold).
+        let cached_snap = if settings.engine == crate::split::ReaderEngine::YRead && !is_pdf {
+            None
+        } else {
+            crate::cache::load_snapshot(&name, resume, sub_idx, &settings, vw, vh)
+        };
         if cached_snap.is_some() {
             plog(&format!("loaded instant page snapshot for {}", name));
         }
@@ -1184,16 +1194,9 @@ impl Screen for ReaderScreen {
         if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
             self.ensure_yread_loaded();
             self.yread_land_at_sub(pos.sub_idx);
-            // Keep the snapshot when it shows exactly the target position
-            // (instant-open path; layout continues in the background and
-            // resolves the landing silently). Anything else is stale.
-            let snap_matches =
-                self.page_gray.is_some() && self.page_no == pos.page && self.sub_idx == pos.sub_idx;
             self.page_no = pos.page;
             self.sub_idx = pos.sub_idx;
-            if !snap_matches {
-                self.page_gray = None;
-            }
+            self.page_gray = None;
             return Action::RedrawFull;
         }
 
@@ -1442,22 +1445,11 @@ impl Screen for ReaderScreen {
                         if !self.ychap_cache.contains_key(&ch_idx) {
                             self.ychap_cache.insert(ch_idx, (pt, layouts));
                         }
-                        // A cold-chapter layout landed: clear the wait. If
-                        // a snapshot already shows the page, resolve the
-                        // armed landing silently (no flash of what's being
-                        // read); otherwise fall through to the redraw that
-                        // renders the now-cached chapter. A queued page
-                        // turn drops the snapshot instead, so the redraw
-                        // renders the landing PLUS the queued turns.
+                        // A cold-chapter layout landed: clear the wait and
+                        // let the redraw below render the now-cached
+                        // chapter (landing + any queued turns apply there).
                         if self.ylayout_wait && ch_idx == self.ychap_idx {
                             self.ylayout_wait = false;
-                            if self.page_gray.is_some() {
-                                if self.yqueued_turns != 0 {
-                                    self.page_gray = None;
-                                } else {
-                                    self.yread_resolve_landing();
-                                }
-                            }
                             plog("yread: cold chapter ready (async, no freeze)");
                         }
                         received_any = true;
@@ -1616,17 +1608,6 @@ impl Screen for ReaderScreen {
                         t0.elapsed().as_millis(),
                         doc_store::rss_mib(),
                     ));
-                    // Persist snapshot for instant resume (same policy as
-                    // the mupdf path; sub_idx is the exact page identity).
-                    crate::cache::save_snapshot(
-                        &self.book_name(),
-                        self.page_no,
-                        self.sub_idx,
-                        &self.settings,
-                        w as u32,
-                        h as u32,
-                        &gray,
-                    );
                     self.page_gray = Some(gray);
                     self.save_progress();
                 } else if self.ylayout_wait {
