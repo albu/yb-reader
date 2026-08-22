@@ -50,6 +50,31 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
         }
     }
 
+    pub fn from_chapters(chapters: &[yread::model::Chapter], current_chap: usize, on_action: F) -> Self {
+        let mut items = Vec::new();
+        for (idx, ch) in chapters.iter().enumerate() {
+            let title = if ch.title.trim().is_empty() {
+                format!("Chapter {}", idx + 1)
+            } else {
+                ch.title.trim().to_string()
+            };
+            items.push(TocItem {
+                title,
+                page: idx,
+                level: 0,
+            });
+        }
+        let initial_offset = current_chap.saturating_sub(2);
+        TocDialog {
+            items,
+            current_page: current_chap,
+            offset: initial_offset,
+            per_page: 8,
+            dims: (1236, 1648),
+            on_action,
+        }
+    }
+
     fn flatten_outlines(outlines: &[Outline], level: usize, out: &mut Vec<TocItem>) {
         for o in outlines {
             let page_num = if let Some(dest) = &o.dest {

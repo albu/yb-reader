@@ -48,6 +48,26 @@ pub fn toc_dialog(
     )))
 }
 
+pub fn yread_toc_dialog(
+    chapters: &[yread::model::Chapter],
+    cur_chap: usize,
+    path_name: String,
+    total: usize,
+    settings: ReaderSettings,
+) -> Action {
+    Action::Push(Box::new(crate::toc_dialog::TocDialog::from_chapters(
+        chapters,
+        cur_chap,
+        move |act| match act {
+            crate::toc_dialog::TocAction::JumpTo(target) => {
+                record(&path_name, target, total, settings);
+                Action::Pop
+            }
+            crate::toc_dialog::TocAction::Close => Action::Pop,
+        },
+    )))
+}
+
 pub fn scrubber_dialog(
     doc: &Rc<Document>,
     cur_page: usize,

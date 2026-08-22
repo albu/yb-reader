@@ -72,8 +72,7 @@ pub struct ReaderScreen {
     yraster: yread::raster::Rasterizer,
     ychap_idx: usize,
     ychap_page: usize,
-    ychap_layouts: Option<Vec<yread::paginate::PageLayout>>,
-    ychap_page_table: Option<yread::model::ChapterPageTable>,
+    ychap_cache: std::collections::HashMap<usize, (yread::model::ChapterPageTable, Vec<yread::paginate::PageLayout>)>,
     y_char_offset: usize,
 }
 
@@ -87,17 +86,35 @@ impl ReaderScreen {
         let settings = pos.settings.unwrap_or_default();
         let sub_idx = if pos.page == resume { pos.sub_idx } else { 0 };
 
-        // Visual dims under the book's persisted orientation — snapshots,
-        // layouts and the warm cache all key on these, so they must be
-        // computed AFTER the settings load, never from the raw panel dims.
+        let is_pdf = path
+            .extension()
+            .map(|e| e.to_string_lossy().eq_ignore_ascii_case("pdf"))
+            .unwrap_or(false);
+
+        // Visual dims under the book's persisted orientation
         let (vw, vh) = Orientation::from_rotation(settings.split.rotation).visual_dims(w, h);
-        let cached_snap = crate::cache::load_snapshot(&name, resume, sub_idx, &settings, vw, vh);
+        let cached_snap = if settings.engine == crate::split::ReaderEngine::YRead && !is_pdf {
+            None
+        } else {
+            crate::cache::load_snapshot(&name, resume, sub_idx, &settings, vw, vh)
+        };
         if cached_snap.is_some() {
             plog(&format!("loaded instant page snapshot for {}", name));
         }
 
         let vocab_db = crate::vocab::VocabDb::open();
         let vocab_prof = crate::vocab::VocabProfile::load();
+
+        let ychap_idx = if settings.engine == crate::split::ReaderEngine::YRead && !is_pdf {
+            resume
+        } else {
+            0
+        };
+        let ychap_page = if settings.engine == crate::split::ReaderEngine::YRead && !is_pdf {
+            sub_idx
+        } else {
+            0
+        };
 
         ReaderScreen {
             path,
@@ -131,10 +148,9 @@ impl ReaderScreen {
             yfonts: None,
             ycache: yread::shape::ShapeCache::new(),
             yraster: yread::raster::Rasterizer::new(),
-            ychap_idx: 0,
-            ychap_page: 0,
-            ychap_layouts: None,
-            ychap_page_table: None,
+            ychap_idx,
+            ychap_page,
+            ychap_cache: std::collections::HashMap::new(),
             y_char_offset: 0,
         }
     }
@@ -159,13 +175,23 @@ impl ReaderScreen {
     }
 
     fn save_progress(&self) {
-        positions::record_pos(
-            &self.book_name(),
-            self.page_no,
-            self.total,
-            self.sub_idx,
-            Some(self.settings),
-        );
+        if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+            positions::record_pos(
+                &self.book_name(),
+                self.ychap_idx,
+                self.total,
+                self.ychap_page,
+                Some(self.settings),
+            );
+        } else {
+            positions::record_pos(
+                &self.book_name(),
+                self.page_no,
+                self.total,
+                self.sub_idx,
+                Some(self.settings),
+            );
+        }
     }
 
     fn ensure_yread_loaded(&mut self) {
@@ -186,12 +212,36 @@ impl ReaderScreen {
             };
             if let Ok(b) = book_res {
                 self.total = b.chapters.len().max(1);
+                if self.ychap_idx >= b.chapters.len() {
+                    self.ychap_idx = self.ychap_idx % b.chapters.len();
+                }
                 self.ybook = Some(Rc::new(b));
                 if self.yfonts.is_none() {
                     self.yfonts = Some(Rc::new(yread::font::FontSystem::default()));
                 }
             }
         }
+    }
+
+    fn paginate_yread_chapter(&mut self, chap_idx: usize, cfg: &yread::paginate::LayoutConfig) {
+        if self.ychap_cache.contains_key(&chap_idx) {
+            return;
+        }
+        let Some(ref ybook) = self.ybook else { return };
+        let Some(ref yfonts) = self.yfonts else { return };
+        if chap_idx >= ybook.chapters.len() {
+            return;
+        }
+        let chapter = &ybook.chapters[chap_idx];
+        let (pt, layouts) = yread::paginate::paginate_chapter_with_images(
+            chapter,
+            Some(&ybook.image_sizes),
+            cfg,
+            yfonts,
+            &mut self.ycache,
+            Some(hypher::Lang::English),
+        );
+        self.ychap_cache.insert(chap_idx, (pt, layouts));
     }
 
     fn render_yread_page(&mut self) -> Option<Vec<u8>> {
@@ -220,32 +270,35 @@ impl ReaderScreen {
             hyphenate: true,
         };
 
-        if self.ychap_layouts.is_none() {
-            let chapter = &ybook.chapters[self.ychap_idx];
-            let (pt, layouts) = yread::paginate::paginate_chapter_with_images(
-                chapter,
-                Some(&ybook.image_sizes),
-                &cfg,
-                &yfonts,
-                &mut self.ycache,
-                Some(hypher::Lang::English),
-            );
-            let p_idx = if self.y_char_offset == usize::MAX {
-                layouts.len().saturating_sub(1)
-            } else {
-                pt.page_for_char(self.y_char_offset).min(layouts.len().saturating_sub(1))
-            };
-            self.ychap_page = p_idx;
-            self.ychap_page_table = Some(pt);
-            self.ychap_layouts = Some(layouts);
+        // 1. Paginate current chapter
+        self.paginate_yread_chapter(self.ychap_idx, &cfg);
+
+        // 2. Opportunistic Pre-pagination of adjacent chapters (ahead / behind)
+        let cur_layout_len = self.ychap_cache.get(&self.ychap_idx).map(|(_, l)| l.len()).unwrap_or(0);
+        if (self.ychap_page + 2 >= cur_layout_len) && (self.ychap_idx + 1 < ybook.chapters.len()) {
+            self.paginate_yread_chapter(self.ychap_idx + 1, &cfg);
+        }
+        if self.ychap_page <= 1 && self.ychap_idx > 0 {
+            self.paginate_yread_chapter(self.ychap_idx - 1, &cfg);
         }
 
-        let layouts = self.ychap_layouts.as_ref()?;
+        let Some((pt, layouts)) = self.ychap_cache.get(&self.ychap_idx) else {
+            return None;
+        };
         if layouts.is_empty() {
             return None;
         }
-        let cur_layout = &layouts[self.ychap_page.min(layouts.len().saturating_sub(1))];
+
+        if self.y_char_offset == usize::MAX {
+            self.ychap_page = layouts.len().saturating_sub(1);
+        } else if self.y_char_offset > 0 && self.ychap_page == 0 {
+            self.ychap_page = pt.page_for_char(self.y_char_offset).min(layouts.len().saturating_sub(1));
+        }
+        self.ychap_page = self.ychap_page.min(layouts.len().saturating_sub(1));
+        let cur_layout = &layouts[self.ychap_page];
         self.y_char_offset = cur_layout.start_char;
+        self.page_no = self.ychap_idx;
+        self.sub_idx = self.ychap_page;
 
         let mut fb = vec![255u8; (vw * vh) as usize];
         self.yraster.render_page(
@@ -306,33 +359,31 @@ impl ReaderScreen {
         if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
             self.ensure_yread_loaded();
             if let Some(ref yb) = self.ybook {
+                let cur_len = self.ychap_cache.get(&self.ychap_idx).map(|(_, l)| l.len()).unwrap_or(1);
                 if forward {
-                    let cur_len = self.ychap_layouts.as_ref().map(|l| l.len()).unwrap_or(1);
                     if self.ychap_page + 1 < cur_len {
                         self.ychap_page += 1;
-                        if let Some(ref layouts) = self.ychap_layouts {
+                        if let Some((_, layouts)) = self.ychap_cache.get(&self.ychap_idx) {
                             self.y_char_offset = layouts[self.ychap_page].start_char;
                         }
                     } else if self.ychap_idx + 1 < yb.chapters.len() {
                         self.ychap_idx += 1;
                         self.ychap_page = 0;
                         self.y_char_offset = 0;
-                        self.ychap_layouts = None;
-                        self.ychap_page_table = None;
                     }
                 } else {
                     if self.ychap_page > 0 {
                         self.ychap_page -= 1;
-                        if let Some(ref layouts) = self.ychap_layouts {
+                        if let Some((_, layouts)) = self.ychap_cache.get(&self.ychap_idx) {
                             self.y_char_offset = layouts[self.ychap_page].start_char;
                         }
                     } else if self.ychap_idx > 0 {
                         self.ychap_idx -= 1;
                         self.y_char_offset = usize::MAX;
-                        self.ychap_layouts = None;
-                        self.ychap_page_table = None;
                     }
                 }
+                self.page_no = self.ychap_idx;
+                self.sub_idx = self.ychap_page;
                 self.page_gray = None;
                 self.save_progress();
                 self.turns_since_full += 1;
@@ -437,6 +488,23 @@ impl ReaderScreen {
     }
 
     fn open_toc_dialog(&mut self) -> Action {
+        if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+            self.ensure_yread_loaded();
+            if let Some(ref yb) = self.ybook {
+                let chapters = yb.chapters.clone();
+                let cur_chap = self.ychap_idx;
+                let path_name = self.book_name();
+                let total = yb.chapters.len();
+                let settings = self.settings;
+                return dialogs::yread_toc_dialog(
+                    &chapters,
+                    cur_chap,
+                    path_name,
+                    total,
+                    settings,
+                );
+            }
+        }
         let Some(doc) = &self.doc else { return Action::Keep };
         let Some(outlines) = doc.outlines().ok() else { return Action::Keep };
         dialogs::toc_dialog(
@@ -721,10 +789,23 @@ impl Screen for ReaderScreen {
         self.vocab_prof = crate::vocab::VocabProfile::load();
 
         let pos = positions::resume_pos(&self.book_name());
-        let page_changed = pos.page != self.page_no || pos.sub_idx != self.sub_idx;
+        let page_changed = if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+            pos.page != self.ychap_idx || pos.sub_idx != self.ychap_page
+        } else {
+            pos.page != self.page_no || pos.sub_idx != self.sub_idx
+        };
+
         if page_changed {
-            self.page_no = pos.page;
-            self.sub_idx = pos.sub_idx;
+            if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+                self.ychap_idx = pos.page;
+                self.ychap_page = pos.sub_idx;
+                self.y_char_offset = 0;
+                self.page_no = self.ychap_idx;
+                self.sub_idx = self.ychap_page;
+            } else {
+                self.page_no = pos.page;
+                self.sub_idx = pos.sub_idx;
+            }
             self.page_gray = None;
             self.page_words.clear();
             self.page_annotations.clear();
@@ -738,6 +819,7 @@ impl Screen for ReaderScreen {
             let layout_changed = (s.font_size - self.settings.font_size).abs() > 0.01
                 || (s.line_spacing - self.settings.line_spacing).abs() > 0.01
                 || s.margin_pad != self.settings.margin_pad
+                || s.engine != self.settings.engine
                 || s.split != self.settings.split;
             self.settings = s;
             // A preset with fewer sub-boxes: keep the position valid.
@@ -750,8 +832,7 @@ impl Screen for ReaderScreen {
                 self.page_annotations.clear();
 
                 if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
-                    self.ychap_layouts = None;
-                    self.ychap_page_table = None;
+                    self.ychap_cache.clear();
                     self.page_gray = None;
                     return Action::Redraw;
                 }
@@ -988,25 +1069,40 @@ impl Screen for ReaderScreen {
         if self.settings.show_header {
             chrome::draw_header(p, &self.time_str, &self.book_name(), is_night);
         }
-        let time_left = chrome::time_left_str(
-            self.total,
-            self.page_no,
-            &self.toc_chapters,
-            self.avg_secs_per_page,
-        );
-        let footer = chrome::footer_str(
-            self.loading.is_some(),
-            self.page_no,
-            self.sub_idx,
-            self.total,
-            &self.settings,
-            &time_left,
-        );
+
+        let (footer, footer_page, footer_total) = if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+            let cur_chap_pages = self.ychap_cache.get(&self.ychap_idx).map(|(_, l)| l.len()).unwrap_or(1);
+            let chap_title = self.ybook.as_ref().and_then(|b| b.chapters.get(self.ychap_idx)).map(|c| c.title.trim()).unwrap_or("");
+            let text = if chap_title.is_empty() {
+                format!("Chapter {} / {} · p. {} / {}", self.ychap_idx + 1, self.total, self.ychap_page + 1, cur_chap_pages)
+            } else {
+                let trunc_title = p.truncate(7.5, chap_title, 140.0);
+                format!("{} · p. {} / {} (ch. {}/{})", trunc_title, self.ychap_page + 1, cur_chap_pages, self.ychap_idx + 1, self.total)
+            };
+            (text, self.ychap_idx, self.total)
+        } else {
+            let time_left = chrome::time_left_str(
+                self.total,
+                self.page_no,
+                &self.toc_chapters,
+                self.avg_secs_per_page,
+            );
+            let text = chrome::footer_str(
+                self.loading.is_some(),
+                self.page_no,
+                self.sub_idx,
+                self.total,
+                &self.settings,
+                &time_left,
+            );
+            (text, self.page_no, self.total)
+        };
+
         chrome::draw_footer(
             p,
             &footer,
-            self.page_no,
-            self.total,
+            footer_page,
+            footer_total,
             &self.toc_chapters,
             is_night,
         );
