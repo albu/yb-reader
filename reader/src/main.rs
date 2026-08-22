@@ -68,6 +68,7 @@ fn main() {
     // From here on, any panic or TERM/INT leaves a reason in the log and
     // the hardware (frontlight, Wi-Fi, firewall) in a sane state.
     guard::install();
+    ybdev::sysinfo::set_cpu_governor("ondemand");
 
     let panel = match Panel::open() {
         Ok(p) => p,

@@ -105,19 +105,35 @@ impl VocabDb {
         }
 
         // 1. Direct lookup
-        if let Some(entry) = self.lookup_exact(&clean) {
-            return Some(entry);
-        }
+        let mut entry = self.lookup_exact(&clean);
 
-        // 2. Lemmatization fallbacks (plural -s, past -ed, participle -ing, adverb -ly)
-        for lemma in generate_lemmas(&clean) {
-            if let Some(mut entry) = self.lookup_exact(&lemma) {
-                entry.word = clean.to_string(); // Keep queried surface form
-                return Some(entry);
+        // If we found an entry but it lacks definitions (or we didn't find an entry),
+        // search candidate lemmas to populate or find definitions.
+        if entry.as_ref().map_or(true, |e| e.gloss_en.is_empty() || e.gloss_ru.is_empty()) {
+            for lemma in generate_lemmas(&clean) {
+                if let Some(lem_entry) = self.lookup_exact(&lemma) {
+                    if let Some(ref mut e) = entry {
+                        if e.gloss_en.is_empty() && !lem_entry.gloss_en.is_empty() {
+                            e.gloss_en = lem_entry.gloss_en;
+                        }
+                        if e.gloss_ru.is_empty() && !lem_entry.gloss_ru.is_empty() {
+                            e.gloss_ru = lem_entry.gloss_ru;
+                        }
+                        if !e.gloss_en.is_empty() && !e.gloss_ru.is_empty() {
+                            break;
+                        }
+                    } else if !lem_entry.gloss_en.is_empty() || !lem_entry.gloss_ru.is_empty() {
+                        let mut e = lem_entry;
+                        e.word = clean.to_string();
+                        entry = Some(e);
+                        break;
+                    }
+                }
             }
         }
 
-        None
+        // Only return an entry if at least one definition/gloss exists
+        entry.filter(|e| !e.gloss_en.is_empty() || !e.gloss_ru.is_empty())
     }
 
     fn lookup_exact(&self, target: &str) -> Option<WordEntry> {
@@ -534,6 +550,16 @@ mod tests {
         let entry_inflected = db.lookup("ephemerally").expect("lookup ephemerally");
         assert_eq!(entry_inflected.word, "ephemerally");
         assert!(entry_inflected.difficulty >= 70);
+
+        // Inflected words whose direct entry had empty glosses must inherit lemma definitions
+        let entry_switches = db.lookup("switches").expect("lookup switches");
+        assert_eq!(entry_switches.word, "switches");
+        assert!(!entry_switches.gloss_en.is_empty());
+        assert!(!entry_switches.gloss_ru.is_empty());
+
+        let entry_databases = db.lookup("databases").expect("lookup databases");
+        assert_eq!(entry_databases.word, "databases");
+        assert!(!entry_databases.gloss_en.is_empty());
     }
 
     #[test]

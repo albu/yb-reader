@@ -113,6 +113,18 @@ pub fn vbus() -> bool {
     battery().1
 }
 
+/// Set CPU frequency scaling governor for all CPU cores (e.g. "ondemand" or "interactive").
+/// Falls back gracefully on desktop or if a governor is unsupported.
+pub fn set_cpu_governor(governor: &str) {
+    for i in 0..4 {
+        let p = format!("/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_governor");
+        if std::path::Path::new(&p).exists() {
+            let _ = fs::write(&p, governor);
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

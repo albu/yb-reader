@@ -69,7 +69,12 @@ echo "$fails" > "$STATE/fails"
 killall -STOP awesome webreader kfxreader kfxview KPPMainApp pillowd \
     kb scanner-main JunoStatusBarDr 2>/dev/null
 
-# 4. Run the reader. TERM (job stop / shutdown) is forwarded so the
+# 4. Put CPU governor in ondemand mode so frequencies downclock when idle
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -f "$gov" ] && echo ondemand > "$gov" 2>/dev/null || true
+done
+
+# 5. Run the reader. TERM (job stop / shutdown) is forwarded so the
 #    in-app guard can restore frontlight/wifi/firewall on the way out.
 "$DIR/reader" &
 rpid=$!

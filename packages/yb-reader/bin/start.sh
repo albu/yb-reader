@@ -43,6 +43,11 @@ killall -STOP awesome cvm 2>/dev/null
 # launched (and it reacts to taps); freeze it too, restore on exit.
 killall -STOP webreader kfxreader 2>/dev/null
 
+# Put CPU governor in ondemand mode so frequencies downclock when idle
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -f "$gov" ] && echo ondemand > "$gov" 2>/dev/null || true
+done
+
 ./reader
 rc=$?
 
