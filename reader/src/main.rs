@@ -3,6 +3,9 @@
 //! edge gestures live in yui::App.
 
 mod awake;
+mod backend;
+mod backend_mupdf;
+mod backend_yread;
 mod books;
 mod cache;
 mod chrome;

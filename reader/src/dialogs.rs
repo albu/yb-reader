@@ -312,6 +312,30 @@ pub fn settings_dialog(
     )))
 }
 
+pub fn quick_settings_sheet(
+    book: String,
+    page_no: usize,
+    sub_idx: usize,
+    total: usize,
+    settings: ReaderSettings,
+    is_pdf: bool,
+    doc: Option<std::rc::Rc<mupdf::Document>>,
+    page_gray: Option<Vec<u8>>,
+    on_change: impl FnMut(ReaderSettings) -> Option<Vec<u8>> + 'static,
+) -> Action {
+    Action::Push(Box::new(crate::quick_settings::QuickSettingsSheet::new(
+        book,
+        page_no,
+        sub_idx,
+        total,
+        settings,
+        is_pdf,
+        doc,
+        page_gray,
+        on_change,
+    )))
+}
+
 pub fn word_dialog(
     entry: crate::vocab::WordEntry,
     mut prof: crate::vocab::VocabProfile,

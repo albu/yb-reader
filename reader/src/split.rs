@@ -289,18 +289,6 @@ impl SplitConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReaderEngine {
-    MuPdf,
-    YRead,
-}
-
-impl Default for ReaderEngine {
-    fn default() -> Self {
-        ReaderEngine::MuPdf
-    }
-}
-
 /// Comprehensive Reader Settings (persisted per book or global defaults).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReaderSettings {
@@ -323,8 +311,6 @@ pub struct ReaderSettings {
     pub refresh_interval: usize,
     /// Show top status header (Clock + Battery + Book title)
     pub show_header: bool,
-    /// Rendering engine (MuPdf vs high-performance yRead)
-    pub engine: ReaderEngine,
 }
 
 impl Default for ReaderSettings {
@@ -339,7 +325,6 @@ impl Default for ReaderSettings {
             invert: false,
             refresh_interval: 10,
             show_header: true,
-            engine: ReaderEngine::MuPdf,
         }
     }
 }
