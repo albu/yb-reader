@@ -1,5 +1,7 @@
+use yread::epub::parse_epub;
 use yread::fb2::parse_fb2;
 use yread::font::FontSystem;
+use yread::model::Block;
 use yread::paginate::{paginate_chapter, LayoutConfig};
 use yread::raster::Rasterizer;
 use yread::shape::ShapeCache;
@@ -257,6 +259,43 @@ fn test_fb2_footnotes_and_toc_extraction() {
     assert_eq!(book.toc.len(), 1);
     assert_eq!(book.toc[0].title, "Chapter One: Beginning");
     assert!(book.footnotes.contains_key("note_1"));
+    let note_text = book.footnotes.get("note_1").unwrap();
+    assert!(note_text.contains("explanation of note 1"));
+
+    // Test resolving footnote
+    let res = book.resolve_footnote_or_link(0, "#note_1");
+    assert!(res.text.contains("explanation of note 1"));
+    assert_eq!(res.title, "Footnote [note_1]");
+}
+
+#[test]
+fn test_epub_footnote_and_link_resolution() {
+    let body = r##"<p>Text referencing <a href="#fn1" epub:type="noteref">[1]</a> and external <a href="notes.xhtml#n2">note 2</a>.</p>
+<div id="fn1"><p>Footnote 1 text: This is detailed local footnote content.</p></div>"##;
+    let book = parse_epub(&epub_with_body(body)).expect("parse epub");
+    assert_eq!(book.chapters.len(), 1);
+    let ch = &book.chapters[0];
+    assert!(ch.anchors.contains_key("fn1"));
+
+    // Check that footnote_ref is populated in paragraph runs
+    if let Block::Paragraph { runs, .. } = &ch.blocks[0] {
+        let fn1_run = runs.iter().find(|r| r.style.footnote_ref.as_deref() == Some("#fn1"));
+        assert!(fn1_run.is_some());
+        assert!(fn1_run.unwrap().style.is_sup);
+
+        let ext_run = runs.iter().find(|r| r.style.footnote_ref.as_deref() == Some("notes.xhtml#n2"));
+        assert!(ext_run.is_some());
+    } else {
+        panic!("Expected paragraph");
+    }
+
+    // Resolve local anchor footnote
+    let res = book.resolve_footnote_or_link(0, "#fn1");
+    assert!(res.text.contains("Footnote 1 text"));
+    assert!(res.target.is_some());
+    let (target_ch, target_off) = res.target.unwrap();
+    assert_eq!(target_ch, 0);
+    assert_eq!(target_off, *ch.anchors.get("fn1").unwrap());
 }
 
 /// In-memory EPUB with arbitrary body XHTML (for parser-level tests).
@@ -458,3 +497,48 @@ fn test_page_starts_are_set_consistent_and_monotonic() {
         "char {} should be inside page {} [{}, {})",
         probe, page, layouts[page].start_char, upper);
 }
+
+#[test]
+fn test_orphan_punctuation_never_breaks_alone_on_next_line() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // Construct a paragraph where an italicized phrase is immediately followed by a comma
+    let html = "<p>This is a paragraph with <em>italic text</em>, and more words following.</p>";
+    let book = yread::epub::parse_epub(&epub_with_body(html)).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+
+    // Test a variety of narrow widths to find wrapping boundary
+    for width in (150..500).step_by(10) {
+        let lines = break_paragraph_lines(
+            &ch.text,
+            runs,
+            0.0,
+            width as f32,
+            12.0,
+            1.2,
+            TextAlign::Left,
+            &fonts,
+            &mut cache,
+            None,
+        );
+
+        for line in &lines {
+            if let Some(first_item) = line.items.first() {
+                if let yread::line::LineItem::Word { byte_start, byte_end, .. } = first_item {
+                    let first_word = &ch.text[*byte_start..*byte_end];
+                    assert_ne!(first_word, ",", "comma should never start a line alone!");
+                    assert_ne!(first_word, ".", "period should never start a line alone!");
+                }
+            }
+        }
+    }
+}
+

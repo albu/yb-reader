@@ -83,6 +83,39 @@ pub struct LayoutLine {
     pub end_char: usize,
 }
 
+fn is_orphan_punctuation(text: &str, item: &LineItem) -> bool {
+    match item {
+        LineItem::Word { byte_start, byte_end, .. } => {
+            if let Some(s) = text.get(*byte_start..*byte_end) {
+                let trimmed = s.trim();
+                !trimmed.is_empty()
+                    && trimmed.chars().all(|c| {
+                        matches!(
+                            c,
+                            ',' | '.'
+                                | '!'
+                                | '?'
+                                | ';'
+                                | ':'
+                                | ')'
+                                | ']'
+                                | '}'
+                                | '”'
+                                | '’'
+                                | '»'
+                                | '…'
+                                | '%'
+                                | '°'
+                        )
+                    })
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Tokenize and wrap runs into lines fitting `max_width`.
 pub fn break_paragraph_lines(
     text: &str,
@@ -96,18 +129,45 @@ pub fn break_paragraph_lines(
     cache: &mut ShapeCache,
     lang: Option<Lang>,
 ) -> Vec<LayoutLine> {
+    let mut cur_byte = 0;
+    let mut cur_char = 0;
+    break_paragraph_lines_streaming(
+        text,
+        runs,
+        first_line_indent_px,
+        max_width,
+        base_font_size,
+        line_spacing_mult,
+        align,
+        fonts,
+        cache,
+        lang,
+        &mut cur_byte,
+        &mut cur_char,
+    )
+}
+
+/// Tokenize and wrap runs with monotonic offset tracking across chapter blocks.
+pub fn break_paragraph_lines_streaming(
+    text: &str,
+    runs: &[Run],
+    first_line_indent_px: f32,
+    max_width: f32,
+    base_font_size: f32,
+    line_spacing_mult: f32,
+    align: TextAlign,
+    fonts: &FontSystem,
+    cache: &mut ShapeCache,
+    lang: Option<Lang>,
+    cur_byte_offset: &mut usize,
+    cur_char_offset: &mut usize,
+) -> Vec<LayoutLine> {
     if runs.is_empty() {
         return Vec::new();
     }
 
     // Step 1: Flatten runs into token list (words and spaces)
     let mut tokens = Vec::new();
-    let mut cur_char_idx = if let Some(first_run) = runs.first() {
-        text[..first_run.start].chars().count()
-    } else {
-        0
-    };
-    let mut last_byte_offset = runs.first().map(|r| r.start).unwrap_or(0);
 
     for run in runs {
         let run_text = match text.get(run.start..run.end) {
@@ -115,10 +175,10 @@ pub fn break_paragraph_lines(
             None => continue,
         };
 
-        if run.start > last_byte_offset {
-            cur_char_idx += text[last_byte_offset..run.start].chars().count();
+        if run.start > *cur_byte_offset {
+            *cur_char_offset += text[*cur_byte_offset..run.start].chars().count();
+            *cur_byte_offset = run.start;
         }
-        last_byte_offset = run.end;
 
         let run_size = base_font_size * run.style.size_mult;
         let mut byte_offset = run.start;
@@ -135,7 +195,7 @@ pub fn break_paragraph_lines(
             let word_byte_start = byte_offset;
             let word_byte_end = word_byte_start + word_str.len();
             let word_char_count = word_str.chars().count();
-            let word_char_start = cur_char_idx;
+            let word_char_start = *cur_char_offset;
             let word_char_end = word_char_start + word_char_count;
 
             if !word_str.is_empty() {
@@ -150,12 +210,12 @@ pub fn break_paragraph_lines(
                 });
             }
 
-            cur_char_idx += word_char_count;
+            *cur_char_offset += word_char_count;
             byte_offset += word_str.len();
 
             if trailing_nl {
                 tokens.push(LineItem::HardBreak);
-                cur_char_idx += 1;
+                *cur_char_offset += 1;
                 byte_offset += 1;
             } else if has_trailing_space {
                 // Runs whose text nodes each normalize to edge spaces produce
@@ -169,10 +229,11 @@ pub fn break_paragraph_lines(
                         style: run.style.clone(),
                     });
                 }
-                cur_char_idx += 1;
+                *cur_char_offset += 1;
                 byte_offset += 1;
             }
         }
+        *cur_byte_offset = run.end;
     }
 
     if tokens.is_empty() {
@@ -233,6 +294,44 @@ pub fn break_paragraph_lines(
         if current_line_width + item_adv <= allowed_width || current_line_items.is_empty() {
             current_line_width += item_adv;
             current_line_items.push(item);
+        } else if is_orphan_punctuation(text, &item) && !current_line_items.is_empty() {
+            // Punctuation (comma, period, etc.) should not be orphaned onto a new line alone.
+            // Option A: Slight hanging punctuation into right margin (up to 24px).
+            if current_line_width + item_adv <= allowed_width + 24.0 {
+                current_line_width += item_adv;
+                current_line_items.push(item);
+            } else {
+                // Option B: Pull the preceding word onto the new line together with the punctuation.
+                while current_line_items.last().map(|it| it.is_space()).unwrap_or(false) {
+                    current_line_items.pop();
+                }
+                let prev_word = current_line_items.pop();
+                while current_line_items.last().map(|it| it.is_space()).unwrap_or(false) {
+                    current_line_items.pop();
+                }
+
+                if let Some(prev) = prev_word {
+                    let prev_adv = prev.advance();
+                    let line = build_line(
+                        std::mem::take(&mut current_line_items),
+                        allowed_width,
+                        align,
+                        false,
+                        base_font_size,
+                        line_spacing_mult,
+                        fonts,
+                    );
+                    lines.push(line);
+                    is_first_line = false;
+
+                    current_line_items.push(prev);
+                    current_line_items.push(item);
+                    current_line_width = prev_adv + item_adv;
+                } else {
+                    current_line_width += item_adv;
+                    current_line_items.push(item);
+                }
+            }
         } else {
             // Check if we can hyphenate the word before breaking
             let mut hyphenated = false;

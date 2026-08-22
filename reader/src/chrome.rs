@@ -51,6 +51,7 @@ pub fn time_left_str(
 /// The footer line: page progress (split-mode aware) + time left.
 pub fn footer_str(
     loading: bool,
+    turning: bool,
     page_no: usize,
     sub_idx: usize,
     total: usize,
@@ -58,7 +59,11 @@ pub fn footer_str(
     time_left: &str,
 ) -> String {
     if loading {
-        format!("page {} · Loading book…", page_no + 1)
+        if turning {
+            format!("page {} · Turning…", page_no + 1)
+        } else {
+            format!("page {} · Loading book…", page_no + 1)
+        }
     } else if settings.split.total_steps(total) > total {
         format!(
             "page {} ({}/{}) · {}",
@@ -173,11 +178,16 @@ mod tests {
         let mut settings = ReaderSettings::default();
         settings.split = SplitConfig::for_preset(crate::split::SplitPreset::Horizontal2);
         // H2 doubles the steps, so the footer carries the sub-index.
-        let s = footer_str(false, 5, 1, 10, &settings, "X");
+        let s = footer_str(false, false, 5, 1, 10, &settings, "X");
         assert!(s.contains("page 6 (2/2)"), "{}", s);
         assert!(s.ends_with("· X"));
 
-        let loading = footer_str(true, 5, 0, 10, &settings, "X");
+        let loading = footer_str(true, false, 5, 0, 10, &settings, "X");
         assert_eq!(loading, "page 6 · Loading book…");
+
+        // A queued page turn while the document is still loading gets its
+        // own honest label — the tap wasn't lost, it's pending.
+        let turning = footer_str(true, true, 5, 0, 10, &settings, "X");
+        assert_eq!(turning, "page 6 · Turning…");
     }
 }

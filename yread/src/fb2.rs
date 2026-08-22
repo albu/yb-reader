@@ -48,7 +48,7 @@ pub struct Fb2Parser<R: BufRead> {
     section_depth: usize,
     in_notes: bool,
     current_note_id: Option<String>,
-    current_note_blocks: Vec<Block>,
+    current_note_text: String,
 }
 
 impl<R: BufRead> Fb2Parser<R> {
@@ -75,7 +75,7 @@ impl<R: BufRead> Fb2Parser<R> {
             section_depth: 0,
             in_notes: false,
             current_note_id: None,
-            current_note_blocks: Vec::new(),
+            current_note_text: String::new(),
         }
     }
 
@@ -168,21 +168,35 @@ impl<R: BufRead> Fb2Parser<R> {
             }
             "section" => {
                 self.section_depth += 1;
+                let mut section_id = None;
+                for attr in e.attributes().flatten() {
+                    let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
+                    if k == "id" {
+                        section_id = Some(String::from_utf8_lossy(&attr.value).to_string());
+                    }
+                }
+
                 if !self.in_notes {
                     // Top-level sections start a new chapter if current one has content
                     if self.section_depth == 1 {
                         self.finish_chapter();
                     }
                     self.ensure_chapter(None);
+                    if let (Some(id), Some(ref mut chap)) = (section_id, &mut self.current_chapter) {
+                        let char_cnt = chap.char_count();
+                        chap.anchors.insert(id, char_cnt);
+                    }
                 } else {
                     // In notes, section might have an id attribute for footnote link
-                    for attr in e.attributes().flatten() {
-                        let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
-                        if k == "id" {
-                            let v = String::from_utf8_lossy(&attr.value).to_string();
-                            self.current_note_id = Some(v);
-                            self.current_note_blocks.clear();
+                    if let Some(id) = section_id {
+                        if let Some(prev_id) = self.current_note_id.take() {
+                            let trimmed = self.current_note_text.trim().to_string();
+                            if !trimmed.is_empty() {
+                                self.book.footnotes.insert(prev_id, trimmed);
+                            }
+                            self.current_note_text.clear();
                         }
+                        self.current_note_id = Some(id);
                     }
                 }
             }
@@ -194,6 +208,30 @@ impl<R: BufRead> Fb2Parser<R> {
                 self.in_paragraph = true;
                 self.current_runs.clear();
                 self.style_stack.clear();
+
+                for attr in e.attributes().flatten() {
+                    let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
+                    if k == "id" {
+                        let id_val = String::from_utf8_lossy(&attr.value).to_string();
+                        if self.in_notes {
+                            if let Some(prev_id) = self.current_note_id.take() {
+                                let trimmed = self.current_note_text.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    self.book.footnotes.insert(prev_id, trimmed);
+                                }
+                                self.current_note_text.clear();
+                            }
+                            self.current_note_id = Some(id_val);
+                        } else {
+                            let char_cnt = self.current_chapter.as_ref().map(|c| c.char_count()).unwrap_or(0);
+                            self.ensure_chapter(None);
+                            if let Some(ref mut chap) = self.current_chapter {
+                                chap.anchors.insert(id_val, char_cnt);
+                            }
+                        }
+                    }
+                }
+
                 let mut style = Style::default();
                 if tag_name == "subtitle" {
                     style.size_mult = 1.2;
@@ -231,14 +269,14 @@ impl<R: BufRead> Fb2Parser<R> {
                     let v = String::from_utf8_lossy(&attr.value).to_string();
                     if k.ends_with("href") {
                         target = Some(v.trim_start_matches('#').to_string());
-                    } else if k == "type" && v == "note" {
+                    } else if k == "type" && (v == "note" || v == "footnote" || v == "comment") {
                         is_note = true;
                     }
                 }
                 if let Some(t) = target {
                     // Note references render as small superscript markers;
                     // the conventional "n…" id covers books omitting type.
-                    if is_note || t.starts_with('n') {
+                    if is_note || t.starts_with('n') || t.starts_with("note") {
                         self.current_style.is_sup = true;
                         self.current_style.size_mult *= 0.75;
                     }
@@ -304,16 +342,27 @@ impl<R: BufRead> Fb2Parser<R> {
                 self.pop_state();
             }
             "body" => {
-                self.in_notes = false;
+                if self.in_notes {
+                    if let Some(note_id) = self.current_note_id.take() {
+                        let trimmed = self.current_note_text.trim().to_string();
+                        if !trimmed.is_empty() {
+                            self.book.footnotes.insert(note_id, trimmed);
+                        }
+                        self.current_note_text.clear();
+                    }
+                    self.in_notes = false;
+                }
                 self.pop_state();
             }
             "section" => {
                 self.section_depth = self.section_depth.saturating_sub(1);
                 if self.in_notes {
                     if let Some(note_id) = self.current_note_id.take() {
-                        if !self.current_note_blocks.is_empty() {
-                            self.book.footnotes.insert(note_id, std::mem::take(&mut self.current_note_blocks));
+                        let trimmed = self.current_note_text.trim().to_string();
+                        if !trimmed.is_empty() {
+                            self.book.footnotes.insert(note_id, trimmed);
                         }
+                        self.current_note_text.clear();
                     }
                 }
             }
@@ -341,7 +390,11 @@ impl<R: BufRead> Fb2Parser<R> {
             }
             "p" | "v" | "subtitle" | "text-author" => {
                 self.in_paragraph = false;
-                if !self.current_runs.is_empty() {
+                if self.in_notes {
+                    if !self.current_note_text.is_empty() && !self.current_note_text.ends_with('\n') {
+                        self.current_note_text.push('\n');
+                    }
+                } else if !self.current_runs.is_empty() {
                     let runs = std::mem::take(&mut self.current_runs);
                     let block = if tag_name == "subtitle" {
                         Block::Heading { level: 2, runs }
@@ -361,8 +414,6 @@ impl<R: BufRead> Fb2Parser<R> {
                             Block::Paragraph { runs, .. } | Block::Heading { runs, .. } => runs,
                             _ => Vec::new(),
                         });
-                    } else if self.in_notes {
-                        self.current_note_blocks.push(block);
                     } else {
                         self.ensure_chapter(None);
                         if let Some(ref mut chap) = self.current_chapter {
@@ -411,22 +462,16 @@ impl<R: BufRead> Fb2Parser<R> {
             _ => {
                 // Only collect text when actively inside a paragraph, title, or note
                 if self.in_paragraph || self.in_title {
-                    if self.in_notes {
-                        let normalized = normalize_spaces(raw_text);
-                        if !normalized.is_empty() {
-                            let start = 0;
-                            let end = normalized.len();
-                            self.current_runs.push(Run {
-                                start,
-                                end,
-                                style: self.current_style.clone(),
-                            });
-                        }
-                    } else {
-                        self.ensure_chapter(None);
-                        if let Some(ref mut chap) = self.current_chapter {
-                            let normalized = normalize_spaces(raw_text);
-                            if !normalized.is_empty() {
+                    let normalized = normalize_spaces(raw_text);
+                    if !normalized.is_empty() {
+                        if self.in_notes {
+                            if !self.current_note_text.is_empty() && !self.current_note_text.ends_with(' ') && !self.current_note_text.ends_with('\n') {
+                                self.current_note_text.push(' ');
+                            }
+                            self.current_note_text.push_str(&normalized);
+                        } else {
+                            self.ensure_chapter(None);
+                            if let Some(ref mut chap) = self.current_chapter {
                                 let start = chap.text.len();
                                 chap.text.push_str(&normalized);
                                 let end = chap.text.len();
@@ -509,7 +554,7 @@ pub fn parse_fb2_path(path: &std::path::Path) -> Result<Book, String> {
         let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Zip error: {:?}", e))?;
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i).map_err(|e| format!("Zip file error: {:?}", e))?;
+            let file = archive.by_index(i).map_err(|e| format!("Zip file error: {:?}", e))?;
             if file.name().ends_with(".fb2") || file.name().ends_with(".xml") {
                 let parser = Fb2Parser::new(std::io::BufReader::new(file));
                 return parser.parse();

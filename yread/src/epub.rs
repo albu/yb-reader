@@ -300,7 +300,7 @@ impl<R: Read + Seek> EpubParser<R> {
                 Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                     for attr in e.attributes().flatten() {
                         let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
-                        if k == "id" {
+                        if k == "id" || k == "name" {
                             let id_val = String::from_utf8_lossy(&attr.value).to_string();
                             chapter.anchors.insert(id_val, current_char_count);
                         }
@@ -446,14 +446,25 @@ impl<R: Read + Seek> EpubParser<R> {
                         }
                         "a" => {
                             style_stack.push(current_style.clone());
+                            let mut target_href: Option<String> = None;
+                            let mut is_note_ref = false;
                             for attr in e.attributes().flatten() {
                                 let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
-                                if k == "href" {
-                                    let href_val = String::from_utf8_lossy(&attr.value).to_string();
-                                    if href_val.starts_with('#') {
-                                        current_style.footnote_ref = Some(href_val.trim_start_matches('#').to_string());
-                                    }
+                                let v = String::from_utf8_lossy(&attr.value).to_string();
+                                if k == "href" || k.ends_with("href") {
+                                    target_href = Some(v);
+                                } else if (k == "epub:type" || k == "type" || k == "class" || k == "rel")
+                                    && (v.contains("noteref") || v.contains("footnote") || v.contains("note"))
+                                {
+                                    is_note_ref = true;
                                 }
+                            }
+                            if let Some(href) = target_href {
+                                if is_note_ref {
+                                    current_style.is_sup = true;
+                                    current_style.size_mult *= 0.75;
+                                }
+                                current_style.footnote_ref = Some(href);
                             }
                         }
                         "hr" => {

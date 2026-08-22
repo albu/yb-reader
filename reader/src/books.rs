@@ -49,6 +49,10 @@ pub struct ReaderScreen {
     dims: (i32, i32),
     turns_since_full: usize,
     pending_turns: i32,
+    /// Page turns requested while the yread engine was busy (cold chapter
+    /// layout, reflow, or book still parsing). Applied once the current
+    /// chapter's layout lands — the tap was never silently dropped.
+    yqueued_turns: i32,
     time_str: String,
     /// &'static: the 14 MB dictionary is read once per process
     /// (vocab::open caches it) and shared by every ReaderScreen.
@@ -87,9 +91,15 @@ pub struct ReaderScreen {
     /// A settings-change re-layout is running on a worker; the old page
     /// stays on screen until the current chapter's new layout arrives.
     yreflow: bool,
+    /// The current chapter is being paginated on a worker (cold landing:
+    /// TOC jump, scrub, or fresh open without a snapshot) — the draw path
+    /// shows "Laying out…" instead of freezing for seconds.
+    ylayout_wait: bool,
     /// Async book parse (the "Opening…" screen covers it).
     yopen_rx: Option<std::sync::mpsc::Receiver<Result<yread::Book, String>>>,
+    /// Background pagination channel for cold chapter landings.
     ybg_rx: Option<std::sync::mpsc::Receiver<(usize, yread::model::ChapterPageTable, Vec<yread::paginate::PageLayout>)>>,
+    jump_history: Vec<(usize, usize)>,
 }
 
 impl ReaderScreen {
@@ -102,18 +112,12 @@ impl ReaderScreen {
         let settings = pos.settings.unwrap_or_default();
         let sub_idx = if pos.page == resume { pos.sub_idx } else { 0 };
 
-        let is_pdf = path
-            .extension()
-            .map(|e| e.to_string_lossy().eq_ignore_ascii_case("pdf"))
-            .unwrap_or(false);
-
         // Visual dims under the book's persisted orientation
         let (vw, vh) = Orientation::from_rotation(settings.split.rotation).visual_dims(w, h);
-        let cached_snap = if settings.engine == crate::split::ReaderEngine::YRead && !is_pdf {
-            None
-        } else {
-            crate::cache::load_snapshot(&name, resume, sub_idx, &settings, vw, vh)
-        };
+        // Snapshot for instant open — yread included: sub_idx is the exact
+        // (chapter, char) identity, so a hit shows the precise page while
+        // parse + pagination catch up in the background.
+        let cached_snap = crate::cache::load_snapshot(&name, resume, sub_idx, &settings, vw, vh);
         if cached_snap.is_some() {
             plog(&format!("loaded instant page snapshot for {}", name));
         }
@@ -136,6 +140,7 @@ impl ReaderScreen {
             dims: (w as i32, h as i32),
             turns_since_full: 0,
             pending_turns: 0,
+            yqueued_turns: 0,
             time_str: chrome::current_time_str(),
             vocab_db,
             vocab_prof,
@@ -162,8 +167,10 @@ impl ReaderScreen {
             y_char_offset: 0,
             landing_char: None,
             yreflow: false,
+            ylayout_wait: false,
             yopen_rx: None,
             ybg_rx: None,
+            jump_history: Vec::new(),
         }
     }
 
@@ -210,7 +217,19 @@ impl ReaderScreen {
             .map(|b| b.chapters.len())
             .unwrap_or(1)
             .saturating_sub(1);
-        self.ychap_idx = chapter.min(max_ch);
+        let target_ch = chapter.min(max_ch);
+        if target_ch != self.ychap_idx && !self.ychap_cache.contains_key(&target_ch) {
+            // Drop in-flight prefetch for old window so the new chapter starts immediately
+            self.ybg_rx = None;
+            self.ylayout_wait = true;
+            if self.ybook.is_some() {
+                self.ychap_idx = target_ch;
+                let (vw, vh) = self.visual_dims();
+                let cfg = self.yread_layout_config(vw, vh);
+                self.spawn_yread_background_paginator(&cfg);
+            }
+        }
+        self.ychap_idx = target_ch;
         self.ychap_page = 0;
         self.landing_char = Some(char_offset);
         self.y_char_offset = if char_offset == usize::MAX {
@@ -228,6 +247,127 @@ impl ReaderScreen {
     fn yread_land_at_sub(&mut self, sub: usize) {
         let (ch, char_off) = Self::decode_yread_sub(sub);
         self.yread_land_at(ch, char_off);
+    }
+
+    /// Resolve an armed `landing_char` against the current chapter's page
+    /// table. Called at render AND when a background layout arrives while
+    /// a snapshot already shows the page (silent fix-up: no re-render
+    /// flash of what the user is reading — but ychap_page/y_char_offset
+    /// become true so turns work).
+    fn yread_resolve_landing(&mut self) {
+        let Some(target) = self.landing_char.take() else {
+            return;
+        };
+        let Some((pt, layouts)) = self.ychap_cache.get(&self.ychap_idx) else {
+            return;
+        };
+        self.ychap_page = if target == usize::MAX {
+            layouts.len().saturating_sub(1)
+        } else {
+            pt.page_for_char(target).min(layouts.len().saturating_sub(1))
+        };
+        if let Some(l) = layouts.get(self.ychap_page) {
+            self.y_char_offset = l.start_char;
+        }
+    }
+
+    /// Apply page turns queued while the engine was busy, moving across
+    /// chapter boundaries when the neighbor layout is cached. Called from
+    /// render right after the landing resolves; a cold neighbor re-arms
+    /// `ylayout_wait` and the remaining turns stay queued until its layout
+    /// arrives (the "Laying out…" screen covers the wait).
+    fn yread_apply_queued_turns(&mut self) {
+        let mut delta = self.yqueued_turns;
+        if delta == 0 {
+            return;
+        }
+        let Some((_, layouts)) = self.ychap_cache.get(&self.ychap_idx) else {
+            return;
+        };
+        if layouts.is_empty() {
+            return;
+        }
+        let n_chap = self
+            .ybook
+            .as_ref()
+            .map(|b| b.chapters.len())
+            .unwrap_or(1);
+
+        let mut chap = self.ychap_idx;
+        let mut page = self.ychap_page;
+        let mut cur_len = layouts.len();
+        let mut guard = 0;
+        while delta != 0 && guard < 128 {
+            guard += 1;
+            if delta > 0 {
+                if page + 1 < cur_len {
+                    page += 1;
+                    delta -= 1;
+                } else if chap + 1 < n_chap {
+                    match self.ychap_cache.get(&(chap + 1)) {
+                        Some((_, l2)) => {
+                            chap += 1;
+                            page = 0;
+                            cur_len = l2.len().max(1);
+                            delta -= 1;
+                        }
+                        None => {
+                            // Neighbor still cold: land on it and re-arm
+                            // the wait — without the flag, render returns
+                            // None with every state clear and the draw
+                            // triage reads it as a render FAILURE (err is
+                            // sticky). The crossing turn stays queued
+                            // until its layout lands.
+                            self.yqueued_turns = delta;
+                            self.ychap_idx = chap;
+                            self.ychap_page = page;
+                            self.ylayout_wait = true;
+                            self.yread_land_at(chap + 1, 0);
+                            return;
+                        }
+                    }
+                } else {
+                    // End of the book: nothing more to turn to.
+                    self.yqueued_turns = 0;
+                    break;
+                }
+            } else if page > 0 {
+                page -= 1;
+                delta += 1;
+            } else if chap > 0 {
+                match self.ychap_cache.get(&(chap - 1)) {
+                    Some((_, l2)) => {
+                        chap -= 1;
+                        page = l2.len().saturating_sub(1);
+                        cur_len = l2.len().max(1);
+                        delta += 1;
+                    }
+                    None => {
+                        // Mirror of the forward cold-cross: re-arm the
+                        // wait so the None reads as "Laying out…", not a
+                        // sticky render failure.
+                        self.yqueued_turns = delta;
+                        self.ychap_idx = chap;
+                        self.ychap_page = page;
+                        self.ylayout_wait = true;
+                        self.yread_land_at(chap - 1, usize::MAX);
+                        return;
+                    }
+                }
+            } else {
+                // Start of the book.
+                self.yqueued_turns = 0;
+                break;
+            }
+        }
+        self.yqueued_turns = delta;
+        self.ychap_idx = chap;
+        self.ychap_page = page;
+        if let Some((_, layouts)) = self.ychap_cache.get(&self.ychap_idx) {
+            if let Some(l) = layouts.get(self.ychap_page) {
+                self.y_char_offset = l.start_char;
+            }
+        }
     }
 
     /// Hyphenation language from the book's declared metadata. Used by both
@@ -314,6 +454,11 @@ impl ReaderScreen {
                 // position), so apply (chapter, char) at delivery.
                 let pos = positions::resume_pos(&self.book_name());
                 self.yread_land_at_sub(pos.sub_idx);
+                if !self.ychap_cache.contains_key(&self.ychap_idx) && self.ybg_rx.is_none() {
+                    let (vw, vh) = self.visual_dims();
+                    let cfg = self.yread_layout_config(vw, vh);
+                    self.spawn_yread_background_paginator(&cfg);
+                }
                 true
             }
             Ok(Err(e)) => {
@@ -337,6 +482,12 @@ impl ReaderScreen {
     /// 6MB book — for page numbers that estimates + char-fraction cover.
     fn spawn_yread_background_paginator(&mut self, cfg: &yread::paginate::LayoutConfig) {
         let Some(ref yb) = self.ybook else { return };
+        if self.yworker_fonts.is_none() {
+            self.yworker_fonts = Some(Arc::new(yread::font::FontSystem::default()));
+        }
+        if self.yfonts.is_none() {
+            self.yfonts = Some(Rc::new(yread::font::FontSystem::default()));
+        }
         let Some(ref worker_fonts) = self.yworker_fonts else { return };
         let book_arc = Arc::clone(yb);
         let fonts = Arc::clone(worker_fonts);
@@ -493,12 +644,9 @@ impl ReaderScreen {
             self.ychap_idx = 0;
         }
 
-        // 1. Paginate ONLY current chapter (instant < 15ms)
-        self.paginate_yread_chapter(self.ychap_idx, &cfg);
-
-        // 2. Evict layouts outside the reading window (hysteresis ±4) —
+        // 1. Evict layouts outside the reading window (hysteresis ±4) —
         //    cached layouts were the biggest RSS line item — and prefetch
-        //    the ±2 window in the background.
+        //    the ±2 window in the background (current chapter FIRST).
         let n = ybook.chapters.len();
         let lo = self.ychap_idx.saturating_sub(4);
         let hi = (self.ychap_idx + 4).min(n.saturating_sub(1));
@@ -511,25 +659,33 @@ impl ReaderScreen {
             self.spawn_yread_background_paginator(&cfg);
         }
 
+        // 2. Cold current chapter (deep TOC jump, scrub, fresh landing):
+        //    paginate on the worker under the "Laying out…" screen — never
+        //    a multi-second freeze on the draw path. The spawn above already
+        //    queued a current-first window with ybg_rx.
+        if !self.ychap_cache.contains_key(&self.ychap_idx) {
+            self.ylayout_wait = true;
+            return None;
+        }
+
         // 3. Compute instant book-wide page offsets from character distribution (< 0.001 ms)
         let cur_chars = ybook.chapters[self.ychap_idx].char_count().max(100);
         let cur_layout_len = self.ychap_cache.get(&self.ychap_idx).map(|(_, l)| l.len()).unwrap_or(1);
         let chars_per_page = (cur_chars as f32 / cur_layout_len.max(1) as f32).max(200.0);
         self.compute_chapter_page_offsets(chars_per_page);
 
-        let Some((pt, layouts)) = self.ychap_cache.get(&self.ychap_idx) else {
+        // An armed landing resolves against the current table — shared
+        // with the background-arrival path in on_tick.
+        self.yread_resolve_landing();
+        // Queued turns apply now that the landing is known; a cold cross
+        // re-arms ylayout_wait and the remainder stays queued.
+        self.yread_apply_queued_turns();
+
+        let Some((_, layouts)) = self.ychap_cache.get(&self.ychap_idx) else {
             return None;
         };
         if layouts.is_empty() {
             return None;
-        }
-
-        if let Some(target_char) = self.landing_char.take() {
-            if target_char == usize::MAX {
-                self.ychap_page = layouts.len().saturating_sub(1);
-            } else {
-                self.ychap_page = pt.page_for_char(target_char).min(layouts.len().saturating_sub(1));
-            }
         }
         self.ychap_page = self.ychap_page.min(layouts.len().saturating_sub(1));
         let cur_layout = &layouts[self.ychap_page];
@@ -549,8 +705,9 @@ impl ReaderScreen {
             vw as usize,
         );
 
-        // Word extraction for dictionary lookups
+        // Word and link extraction for dictionary and footnote lookups
         self.page_words.clear();
+        self.page_links.clear();
         let chapter = &ybook.chapters[self.ychap_idx];
         let origin_x = cfg.margin_left as f32;
         let origin_y = cfg.margin_top as f32;
@@ -559,7 +716,7 @@ impl ReaderScreen {
                 let mut cur_x = origin_x + x;
                 for item in &line.items {
                     match item {
-                        yread::line::LineItem::Word { byte_start, byte_end, shaped, .. } => {
+                        yread::line::LineItem::Word { byte_start, byte_end, shaped, style, .. } => {
                             if let Some(w_str) = chapter.text.get(*byte_start..*byte_end) {
                                 let rect = RectF::new(
                                     cur_x,
@@ -568,10 +725,13 @@ impl ReaderScreen {
                                     origin_y + y - line.ascender + line.height,
                                 );
                                 self.page_words.push((w_str.to_string(), rect));
+                                if let Some(target) = &style.footnote_ref {
+                                    self.page_links.push((rect, target.clone()));
+                                }
                             }
                             cur_x += shaped.advance;
                         }
-                        yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, prefix_shaped, hyphen_adv, .. } => {
+                        yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, prefix_shaped, hyphen_adv, style, .. } => {
                             if let Some(w_str) = chapter.text.get(*byte_start..*byte_end) {
                                 let rect = RectF::new(
                                     cur_x,
@@ -580,6 +740,9 @@ impl ReaderScreen {
                                     origin_y + y - line.ascender + line.height,
                                 );
                                 self.page_words.push((w_str.to_string(), rect));
+                                if let Some(target) = &style.footnote_ref {
+                                    self.page_links.push((rect, target.clone()));
+                                }
                             }
                             cur_x += prefix_shaped.advance + hyphen_adv;
                         }
@@ -597,14 +760,24 @@ impl ReaderScreen {
 
     fn turn(&mut self, forward: bool) -> Action {
         if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
-            // During an async re-layout the "Reflowing…" screen is up and
-            // the landing will restore position — turning now would act on
-            // a cache mid-swap. Swallow taps; the message keeps it honest.
-            if self.yreflow {
-                return Action::Keep;
+            // During an async re-layout ("Reflowing…") or a cold-chapter
+            // layout ("Laying out…") the layout isn't ready to turn in.
+            // Queue the turn instead of swallowing it — the footer shows
+            // the pending state and it lands when the layout arrives.
+            if self.yreflow || self.ylayout_wait {
+                self.yqueued_turns += if forward { 1 } else { -1 };
+                return Action::Redraw;
             }
             self.ensure_yread_loaded();
-            if let Some(ref yb) = self.ybook {
+            let Some(ref yb) = self.ybook else {
+                // Parse still running ("Opening…"): queue the turn. Never
+                // fall through to the mupdf page math below — it
+                // recomputes sub_idx in split steps and save_progress()
+                // would clobber the stored yread position with garbage.
+                self.yqueued_turns += if forward { 1 } else { -1 };
+                return Action::Redraw;
+            };
+            {
                 let cur_len = self.ychap_cache.get(&self.ychap_idx).map(|(_, l)| l.len()).unwrap_or(1);
                 if forward {
                     if self.ychap_page + 1 < cur_len {
@@ -736,6 +909,7 @@ impl ReaderScreen {
     }
 
     fn open_toc_dialog(&mut self) -> Action {
+        let back = self.jump_history.last().copied();
         if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
             self.ensure_yread_loaded();
             let yb_opt = self.ybook.clone();
@@ -756,6 +930,7 @@ impl ReaderScreen {
                     &offsets,
                     chars_per_page,
                     cur_page,
+                    back,
                     path_name,
                     total,
                     settings,
@@ -767,6 +942,7 @@ impl ReaderScreen {
         dialogs::toc_dialog(
             &outlines,
             self.page_no,
+            back,
             self.book_name(),
             self.total,
             self.settings,
@@ -784,6 +960,7 @@ impl ReaderScreen {
             self.page_no,
             self.total,
             self.page_gray.clone(),
+            self.jump_history.last().copied(),
             self.book_name(),
             self.settings,
             vw,
@@ -792,6 +969,27 @@ impl ReaderScreen {
     }
 
     fn open_footnote_or_link(&mut self, uri: &str) -> Action {
+        if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+            self.ensure_yread_loaded();
+            let yb_opt = self.ybook.clone();
+            if let Some(yb) = yb_opt {
+                let cur_chars = yb.chapters.get(self.ychap_idx).map(|c| c.char_count()).unwrap_or(1500);
+                let cur_pages = self.ychap_cache.get(&self.ychap_idx).map(|(_, l)| l.len()).unwrap_or(1).max(1);
+                let chars_per_page = (cur_chars as f32 / cur_pages as f32).max(200.0);
+                return dialogs::footnote_dialog_yread(
+                    &yb,
+                    self.ychap_idx,
+                    uri,
+                    self.page_gray.clone(),
+                    self.book_name(),
+                    self.total,
+                    self.settings,
+                    &self.ychap_offsets,
+                    chars_per_page,
+                );
+            }
+            return Action::Keep;
+        }
         let Some(doc) = &self.doc else { return Action::Keep };
         dialogs::footnote_dialog(
             doc,
@@ -986,9 +1184,16 @@ impl Screen for ReaderScreen {
         if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
             self.ensure_yread_loaded();
             self.yread_land_at_sub(pos.sub_idx);
+            // Keep the snapshot when it shows exactly the target position
+            // (instant-open path; layout continues in the background and
+            // resolves the landing silently). Anything else is stale.
+            let snap_matches =
+                self.page_gray.is_some() && self.page_no == pos.page && self.sub_idx == pos.sub_idx;
             self.page_no = pos.page;
             self.sub_idx = pos.sub_idx;
-            self.page_gray = None;
+            if !snap_matches {
+                self.page_gray = None;
+            }
             return Action::RedrawFull;
         }
 
@@ -1059,6 +1264,19 @@ impl Screen for ReaderScreen {
         let page_changed = pos.page != self.page_no || pos.sub_idx != self.sub_idx;
 
         if page_changed {
+            if self.jump_history.last() == Some(&(pos.page, pos.sub_idx)) {
+                // The TOC dialog's "Back" wrote the previous reading
+                // position to the store. Consume the entry we're landing
+                // on instead of pushing — the undo chain unwinds (one
+                // Back per jump) rather than toggling forever between the
+                // same two pages.
+                self.jump_history.pop();
+            } else {
+                self.jump_history.push((self.page_no, self.sub_idx));
+                if self.jump_history.len() > 16 {
+                    self.jump_history.remove(0);
+                }
+            }
             self.page_no = pos.page;
             self.sub_idx = pos.sub_idx;
             if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
@@ -1187,7 +1405,11 @@ impl Screen for ReaderScreen {
     }
 
     fn tick_interval(&self) -> std::time::Duration {
-        if self.loading.is_some() || self.ybg_rx.is_some() || self.yopen_rx.is_some() {
+        if self.loading.is_some()
+            || self.ybg_rx.is_some()
+            || self.yopen_rx.is_some()
+            || self.ylayout_wait
+        {
             std::time::Duration::from_millis(150)
         } else {
             std::time::Duration::from_secs(10)
@@ -1220,6 +1442,24 @@ impl Screen for ReaderScreen {
                         if !self.ychap_cache.contains_key(&ch_idx) {
                             self.ychap_cache.insert(ch_idx, (pt, layouts));
                         }
+                        // A cold-chapter layout landed: clear the wait. If
+                        // a snapshot already shows the page, resolve the
+                        // armed landing silently (no flash of what's being
+                        // read); otherwise fall through to the redraw that
+                        // renders the now-cached chapter. A queued page
+                        // turn drops the snapshot instead, so the redraw
+                        // renders the landing PLUS the queued turns.
+                        if self.ylayout_wait && ch_idx == self.ychap_idx {
+                            self.ylayout_wait = false;
+                            if self.page_gray.is_some() {
+                                if self.yqueued_turns != 0 {
+                                    self.page_gray = None;
+                                } else {
+                                    self.yread_resolve_landing();
+                                }
+                            }
+                            plog("yread: cold chapter ready (async, no freeze)");
+                        }
                         received_any = true;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -1239,6 +1479,17 @@ impl Screen for ReaderScreen {
                 self.ychap_cache.clear();
                 self.ychap_offsets.clear();
                 self.page_gray = None;
+                received_any = true; // force the redraw below
+            } else if self.ylayout_wait && self.ybook.is_some() && self.yfonts.is_some() {
+                // Same recovery for a cold-chapter wait: build the current
+                // chapter's layout synchronously once; the redraw below
+                // then renders it (page_gray stays None — message was up).
+                self.ylayout_wait = false;
+                let (vw, vh) = self.visual_dims();
+                let cfg = self.yread_layout_config(vw, vh);
+                self.paginate_yread_chapter(self.ychap_idx, &cfg);
+                self.yread_resolve_landing();
+                received_any = true; // force the redraw below
             }
             if received_any {
                 let cur_chars = self.ybook.as_ref().and_then(|b| b.chapters.get(self.ychap_idx)).map(|c| c.char_count()).unwrap_or(1500);
@@ -1315,9 +1566,14 @@ impl Screen for ReaderScreen {
         let (w, h) = p.size();
         self.dims = (w, h);
         // Kick the async parse on first draw so the "Opening…" screen has a
-        // worker to wait for.
+        // worker to wait for. Also kick the background paginator if chapter is cold.
         if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
             self.ensure_yread_loaded();
+            if self.ybook.is_some() && self.ybg_rx.is_none() && !self.ychap_cache.contains_key(&self.ychap_idx) {
+                let (vw, vh) = self.visual_dims();
+                let cfg = self.yread_layout_config(vw, vh);
+                self.spawn_yread_background_paginator(&cfg);
+            }
         }
         let is_night = self.settings.invert;
         let bg_color = if is_night { 0 } else { 255 };
@@ -1329,9 +1585,20 @@ impl Screen for ReaderScreen {
             return;
         }
 
-        // If doc is loading / opening / reflowing:
-        if (self.loading.is_some() || self.yreflow || self.yopen_rx.is_some()) && self.page_gray.is_none() {
-            let msg = if self.yreflow { "Reflowing…" } else { "Opening…" };
+        // If doc is loading / opening / reflowing / laying out:
+        if (self.loading.is_some()
+            || self.yreflow
+            || self.ylayout_wait
+            || self.yopen_rx.is_some())
+            && self.page_gray.is_none()
+        {
+            let msg = if self.yreflow {
+                "Reflowing…"
+            } else if self.ylayout_wait {
+                "Laying out…"
+            } else {
+                "Opening…"
+            };
             p.text_center(h / 2, 10.0, fg_color, msg);
             let name = p.truncate(8.0, &self.book_name(), p.width_pt() - 24.0);
             p.text_center(h / 2 + pt(16.0), 8.0, fg_color, &name);
@@ -1339,7 +1606,7 @@ impl Screen for ReaderScreen {
         }
 
         if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
-            if self.page_gray.is_none() && !self.yreflow {
+            if self.page_gray.is_none() && !self.yreflow && !self.ylayout_wait {
                 let t0 = Instant::now();
                 if let Some(gray) = self.render_yread_page() {
                     plog(&format!(
@@ -1349,7 +1616,34 @@ impl Screen for ReaderScreen {
                         t0.elapsed().as_millis(),
                         doc_store::rss_mib(),
                     ));
+                    // Persist snapshot for instant resume (same policy as
+                    // the mupdf path; sub_idx is the exact page identity).
+                    crate::cache::save_snapshot(
+                        &self.book_name(),
+                        self.page_no,
+                        self.sub_idx,
+                        &self.settings,
+                        w as u32,
+                        h as u32,
+                        &gray,
+                    );
                     self.page_gray = Some(gray);
+                    self.save_progress();
+                } else if self.ylayout_wait {
+                    p.text_center(h / 2, 10.0, fg_color, "Laying out…");
+                    let name = p.truncate(8.0, &self.book_name(), p.width_pt() - 24.0);
+                    p.text_center(h / 2 + pt(16.0), 8.0, fg_color, &name);
+                    return;
+                } else if self.yopen_rx.is_some() || self.ybook.is_none() {
+                    p.text_center(h / 2, 10.0, fg_color, "Opening…");
+                    let name = p.truncate(8.0, &self.book_name(), p.width_pt() - 24.0);
+                    p.text_center(h / 2 + pt(16.0), 8.0, fg_color, &name);
+                    return;
+                } else if self.yreflow {
+                    p.text_center(h / 2, 10.0, fg_color, "Reflowing…");
+                    let name = p.truncate(8.0, &self.book_name(), p.width_pt() - 24.0);
+                    p.text_center(h / 2 + pt(16.0), 8.0, fg_color, &name);
+                    return;
                 } else {
                     self.err = Some("yRead render failed".to_string());
                     p.text_center(h / 2, 10.0, fg_color, "yRead render failed");
@@ -1420,12 +1714,29 @@ impl Screen for ReaderScreen {
                 + self.y_char_offset.min(self.ychap_chars.get(self.ychap_idx).copied().unwrap_or(0));
             let whole: usize = self.ychap_chars.iter().sum();
             let pct = if whole > 0 { (done as f32 / whole as f32 * 100.0).round() as usize } else { 0 };
-            let suffix = if self.yreflow { " ⋯" } else { "" };
-            let text = if chap_title.is_empty() {
-                format!("{}%{}", pct, suffix)
+            // Busy suffix: the snapshot can already show a page while the
+            // parse/paginator/reflow still runs in the background — say so
+            // instead of letting the reader look idle (and taps "dead").
+            let busy = if self.yopen_rx.is_some() {
+                " · Opening…"
+            } else if self.ylayout_wait {
+                " · Laying out…"
+            } else if self.yreflow {
+                " ⋯"
+            } else if self.yqueued_turns != 0 {
+                " · Turning…"
+            } else {
+                ""
+            };
+            let text = if self.ybook.is_none() {
+                // Book still parsing: the char-fraction isn't meaningful
+                // yet (empty chapter table reads as 0%).
+                busy.trim_start().to_string()
+            } else if chap_title.is_empty() {
+                format!("{}%{}", pct, busy)
             } else {
                 let trunc_title = p.truncate(7.5, chap_title, 140.0);
-                format!("{}% · {}{}", pct, trunc_title, suffix)
+                format!("{}% · {}{}", pct, trunc_title, busy)
             };
             (text, self.page_no, self.total)
         } else {
@@ -1437,6 +1748,7 @@ impl Screen for ReaderScreen {
             );
             let text = chrome::footer_str(
                 self.loading.is_some(),
+                self.pending_turns != 0,
                 self.page_no,
                 self.sub_idx,
                 self.total,
@@ -1619,7 +1931,7 @@ impl Screen for ReaderScreen {
                     return Action::Keep;
                 }
 
-                // 1. Visual Top-Left corner -> Back to Library
+                // Visual Top-Left corner -> Back to Library
                 if vx < 240 && vy < 160 {
                     return Action::Pop;
                 }

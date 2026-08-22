@@ -252,10 +252,17 @@ pub struct Book {
     pub images: HashMap<String, Vec<u8>>,
     /// Precalculated pixel dimensions (width, height) for each image ID
     pub image_sizes: HashMap<String, (u32, u32)>,
-    /// Footnotes/notes keyed by target ID -> blocks
-    pub footnotes: HashMap<String, Vec<Block>>,
+    /// Footnotes/notes keyed by target ID -> note text
+    pub footnotes: HashMap<String, String>,
     /// On-demand image source (file-backed epubs).
     pub lazy_images: std::sync::Arc<LazyImages>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FootnoteResolution {
+    pub title: String,
+    pub text: String,
+    pub target: Option<(usize, usize)>, // (chapter_idx, char_offset)
 }
 
 impl std::fmt::Debug for Book {
@@ -275,6 +282,115 @@ impl std::fmt::Debug for Book {
 impl Book {
     pub fn total_chars(&self) -> usize {
         self.chapters.iter().map(|c| c.char_count()).sum()
+    }
+
+    /// Resolve a footnote or link target URI to a snippet text and destination.
+    pub fn resolve_footnote_or_link(&self, cur_chap_idx: usize, uri: &str) -> FootnoteResolution {
+        let uri_clean = uri.trim();
+        let stripped_anchor = uri_clean.trim_start_matches('#');
+
+        // 1. Direct lookup in book.footnotes (FB2 notes body / embedded notes)
+        if let Some(text) = self.footnotes.get(stripped_anchor).or_else(|| self.footnotes.get(uri_clean)) {
+            let title = if stripped_anchor.is_empty() {
+                "Footnote".to_string()
+            } else {
+                format!("Footnote [{}]", stripped_anchor)
+            };
+            return FootnoteResolution {
+                title,
+                text: text.clone(),
+                target: None,
+            };
+        }
+
+        // 2. Parse URI into (file_part, anchor_part)
+        let (file_part, anchor_part) = if let Some(pos) = uri_clean.find('#') {
+            (&uri_clean[..pos], Some(&uri_clean[pos + 1..]))
+        } else {
+            (uri_clean, None)
+        };
+
+        if file_part.is_empty() {
+            if let Some(anchor) = anchor_part {
+                // Check current chapter anchors first
+                if let Some(ch) = self.chapters.get(cur_chap_idx) {
+                    if let Some(&char_off) = ch.anchors.get(anchor) {
+                        let text = extract_snippet_at(&ch.text, char_off);
+                        return FootnoteResolution {
+                            title: format!("Note [{}]", anchor),
+                            text,
+                            target: Some((cur_chap_idx, char_off)),
+                        };
+                    }
+                }
+                // Check all other chapters
+                for (idx, ch) in self.chapters.iter().enumerate() {
+                    if let Some(&char_off) = ch.anchors.get(anchor) {
+                        let text = extract_snippet_at(&ch.text, char_off);
+                        return FootnoteResolution {
+                            title: format!("Note [{}]", anchor),
+                            text,
+                            target: Some((idx, char_off)),
+                        };
+                    }
+                }
+            }
+        } else {
+            let target_fname = std::path::Path::new(file_part)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(file_part);
+
+            let matched_idx = self.chapters.iter().position(|c| {
+                let ch_fname = std::path::Path::new(&c.href)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(&c.href);
+                ch_fname.eq_ignore_ascii_case(target_fname) || c.href.eq_ignore_ascii_case(file_part)
+            });
+
+            if let Some(target_idx) = matched_idx {
+                let ch = &self.chapters[target_idx];
+                let char_off = if let Some(anchor) = anchor_part {
+                    ch.anchors.get(anchor).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                let text = extract_snippet_at(&ch.text, char_off);
+                let title = if let Some(anchor) = anchor_part {
+                    format!("Note [{}]", anchor)
+                } else if !ch.title.is_empty() {
+                    ch.title.clone()
+                } else {
+                    format!("Chapter {}", target_idx + 1)
+                };
+                return FootnoteResolution {
+                    title,
+                    text,
+                    target: Some((target_idx, char_off)),
+                };
+            }
+        }
+
+        // 3. Fallback: if stripped_anchor matches any chapter anchor
+        if let Some(anchor) = anchor_part.or(if !stripped_anchor.is_empty() { Some(stripped_anchor) } else { None }) {
+            for (idx, ch) in self.chapters.iter().enumerate() {
+                if let Some(&char_off) = ch.anchors.get(anchor) {
+                    let text = extract_snippet_at(&ch.text, char_off);
+                    return FootnoteResolution {
+                        title: format!("Note [{}]", anchor),
+                        text,
+                        target: Some((idx, char_off)),
+                    };
+                }
+            }
+        }
+
+        FootnoteResolution {
+            title: "Link Target".to_string(),
+            text: format!("Link: {}", uri_clean),
+            target: None,
+        }
     }
 
     /// Register an image and record its true pixel dimensions.
@@ -304,6 +420,19 @@ impl Book {
             return Some(std::sync::Arc::new(bytes.clone()));
         }
         self.lazy_images.load(fname)
+    }
+}
+
+fn extract_snippet_at(text: &str, char_offset: usize) -> String {
+    let byte_start = text.char_indices().nth(char_offset).map(|(b, _)| b).unwrap_or(0);
+    let slice = &text[byte_start..];
+    let max_chars = 1500;
+    let snippet: String = slice.chars().take(max_chars).collect();
+    let trimmed = snippet.trim();
+    if trimmed.is_empty() {
+        "Note content".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 

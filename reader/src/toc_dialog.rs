@@ -19,6 +19,12 @@ pub enum TocAction {
         char_offset: usize,
         page: usize,
     },
+    /// Return to the previous reading location (jump-history undo). The
+    /// reader applies it on resume — this dialog only reports it.
+    Back {
+        page: usize,
+        sub: usize,
+    },
     Close,
 }
 
@@ -33,6 +39,9 @@ pub struct TocDialog<F: FnMut(TocAction) -> Action> {
     offset: usize,
     per_page: usize,
     dims: (i32, i32),
+    /// Previous reading position from the jump history, when one exists —
+    /// rendered as a pinned "Back" row above the chapter list.
+    back_target: Option<(usize, usize)>,
     on_action: F,
 }
 
@@ -41,6 +50,13 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
         let mut items = Vec::new();
         Self::flatten_outlines(outlines, 0, &mut items);
         Self::with_items(items, current_page, on_action)
+    }
+
+    /// Arm the "Back to p.N" row (previous position from the reader's jump
+    /// history). Hidden when the history is empty.
+    pub fn with_back(mut self, page: usize, sub: usize) -> Self {
+        self.back_target = Some((page, sub));
+        self
     }
 
     pub fn from_yread_toc(
@@ -122,6 +138,7 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             offset: 0,
             per_page: 8,
             dims: (1236, 1648),
+            back_target: None,
             on_action,
         };
         let vis = dlg.visible_indices();
@@ -139,6 +156,17 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             .get(idx + 1)
             .map(|next| next.level > self.items[idx].level)
             .unwrap_or(false)
+    }
+
+    /// The pinned "Back to p.N" row just under the header bar, when jump
+    /// history exists. Same geometry in draw and tap handling.
+    fn back_row_rect(&self) -> Option<Rect> {
+        self.back_target.map(|_| {
+            let (w, _h) = self.dims;
+            let bar_h = pt(40.0);
+            let pad = pt(14.0);
+            Rect::new(pad, bar_h + pt(6.0), w - 2 * pad, pt(34.0))
+        })
     }
 
     /// Indices of rows currently visible: an entry shows only while every
@@ -234,15 +262,35 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
         p.rect_outline_t(close_rect, 1, 100);
         p.text_center_in(close_x, close_x + close_w, close_y + pt(16.0), 8.5, 0, "Close");
 
+        // Back row — pinned above the list, only when the reader has a
+        // previous jump to return to. The arrow is DRAWN (two lines + a
+        // stem), same policy as the tree chevrons: no glyph-coverage
+        // gamble on exotic arrow codepoints.
+        let pad = pt(14.0);
+        let back_h = pt(34.0);
+        if let Some((back_page, _)) = self.back_target {
+            let back_rect = self.back_row_rect().unwrap();
+            p.rect(back_rect, 244);
+            p.rect_outline_t(back_rect, 1, 120);
+            // ← arrow: tip at (ax, cy), stem to (ax + s*2, cy)
+            let cy = back_rect.y + back_rect.h / 2;
+            let ax = pad + pt(3.0);
+            let s = pt(4.0);
+            p.line_w(ax, cy, ax + 2 * s, cy, 2, 0);
+            p.line_w(ax, cy, ax + s, cy - s, 2, 0);
+            p.line_w(ax, cy, ax + s, cy + s, 2, 0);
+            let back_text = format!("Back to p.{}", back_page + 1);
+            p.text(pad + pt(20.0), back_rect.y + pt(20.0), 9.0, 0, &back_text);
+        }
+
         if self.items.is_empty() {
             p.text_center(h / 2, 11.0, 0, "No Table of Contents available in this book");
             return;
         }
 
         // List of Chapters
-        let list_top = bar_h + pt(10.0);
+        let list_top = bar_h + pt(10.0) + if self.back_target.is_some() { back_h + pt(4.0) } else { 0 };
         let row_h = pt(42.0);
-        let pad = pt(14.0);
         let content_h = h - list_top - pt(35.0);
         self.per_page = ((content_h / row_h) as usize).max(1);
 
@@ -334,13 +382,34 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
                     return (self.on_action)(TocAction::Close);
                 }
 
+                // Back row tap — checked before the empty-list guard so a
+                // book without a TOC can still return from a jump.
+                if let Some((back_page, back_sub)) = self.back_target {
+                    if self
+                        .back_row_rect()
+                        .map(|r| r.contains(px, py))
+                        .unwrap_or(false)
+                    {
+                        return (self.on_action)(TocAction::Back {
+                            page: back_page,
+                            sub: back_sub,
+                        });
+                    }
+                }
+
                 if self.items.is_empty() {
                     return (self.on_action)(TocAction::Close);
                 }
 
                 // Row tap
                 let bar_h = pt(40.0);
-                let list_top = bar_h + pt(10.0);
+                let list_top = bar_h
+                    + pt(10.0)
+                    + if self.back_target.is_some() {
+                        pt(34.0) + pt(4.0)
+                    } else {
+                        0
+                    };
                 let row_h = pt(42.0);
                 let pad = pt(14.0);
 
@@ -476,5 +545,18 @@ mod tests {
         let flat: Vec<yread::model::TocEntry> = (0..5).map(|i| entry(&format!("Ch {i}"), i * 10, 0)).collect();
         let d = TocDialog::from_yread_toc(&flat, &[0], 1000.0, 3, |_| Action::Keep);
         assert_eq!(d.visible_indices().len(), 5);
+    }
+
+    #[test]
+    fn back_row_appears_only_when_armed() {
+        // No jump history: no Back row.
+        let d = dialog(6);
+        assert!(d.back_target.is_none());
+        assert!(d.back_row_rect().is_none());
+
+        // The reader arms it with the previous (page, sub).
+        let d = d.with_back(5, 2);
+        assert_eq!(d.back_target, Some((5, 2)));
+        assert!(d.back_row_rect().is_some());
     }
 }

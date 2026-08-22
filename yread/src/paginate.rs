@@ -2,7 +2,7 @@
 
 use hypher::Lang;
 use crate::font::FontSystem;
-use crate::line::{break_paragraph_lines, LayoutLine};
+use crate::line::{break_paragraph_lines_streaming, LayoutLine};
 use crate::model::{Block, Chapter, ChapterPageTable, PageBreak, TextAlign};
 use crate::shape::ShapeCache;
 
@@ -161,6 +161,8 @@ pub fn paginate_chapter_with_images(
     // and end_chars for pages that end at non-text blocks.
     let mut last_char_pos = 0usize;
     let mut last_byte_pos = 0usize;
+    let mut cur_byte_offset = 0usize;
+    let mut cur_char_offset = 0usize;
 
     let target_lang = if config.hyphenate { lang } else { None };
 
@@ -185,7 +187,7 @@ pub fn paginate_chapter_with_images(
                 let avail_w = (content_w - left_margin_px - bullet_adv).max(100.0);
                 let first_indent = if *indent && bullet_prefix.is_none() { indent_px } else { 0.0 };
 
-                let lines = break_paragraph_lines(
+                let lines = break_paragraph_lines_streaming(
                     &chapter.text,
                     runs,
                     first_indent,
@@ -196,6 +198,8 @@ pub fn paginate_chapter_with_images(
                     fonts,
                     cache,
                     target_lang,
+                    &mut cur_byte_offset,
+                    &mut cur_char_offset,
                 );
 
                 let block_start_y = cur_y;
@@ -319,7 +323,7 @@ pub fn paginate_chapter_with_images(
                     2 => 1.20,
                     _ => 1.10,
                 };
-                let lines = break_paragraph_lines(
+                let lines = break_paragraph_lines_streaming(
                     &chapter.text,
                     runs,
                     0.0,
@@ -330,6 +334,8 @@ pub fn paginate_chapter_with_images(
                     fonts,
                     cache,
                     None,
+                    &mut cur_byte_offset,
+                    &mut cur_char_offset,
                 );
 
                 let heading_h: f32 = lines.iter().map(|l| l.height).sum::<f32>() + config.font_size * 1.0;

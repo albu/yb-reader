@@ -22,6 +22,15 @@ fn preset_code(p: &crate::split::SplitPreset) -> u8 {
     }
 }
 
+/// Byte code for the reader engine — part of the snapshot's identity.
+/// 0 is the pre-engine-byte legacy value, which only mupdf ever wrote.
+fn engine_code(e: &crate::split::ReaderEngine) -> u8 {
+    match e {
+        crate::split::ReaderEngine::MuPdf => 0,
+        crate::split::ReaderEngine::YRead => 1,
+    }
+}
+
 /// Floats came through the positions store as decimals — compare with a
 /// tolerance finer than any UI step (0.02) but coarser than f32 noise.
 fn near(a: f32, b: f32) -> bool {
@@ -84,6 +93,7 @@ pub fn load_snapshot_from(
     let snap_invert = bytes[33] != 0;
     // XOR so a mismatch shows up as nonzero in one integer compare path.
     let snap_preset = preset_code(&settings.split.preset) ^ bytes[34];
+    let snap_engine = engine_code(&settings.engine) ^ bytes[35];
     let snap_rotation = u16::from_le_bytes(bytes[36..38].try_into().ok()?) ^ settings.split.rotation;
     let snap_overlap = f32::from_le_bytes(bytes[38..42].try_into().ok()?);
     let snap_ml = f32::from_le_bytes(bytes[42..46].try_into().ok()?);
@@ -105,6 +115,7 @@ pub fn load_snapshot_from(
         || snap_contrast != (settings.contrast as u8)
         || snap_invert != settings.invert
         || snap_preset != 0
+        || snap_engine != 0
         || snap_rotation != 0
         || !near(snap_overlap, settings.split.overlap)
         || !near(snap_ml, settings.split.margin_left)
@@ -163,7 +174,7 @@ pub fn save_snapshot_to(
     buf.push(settings.contrast as u8);
     buf.push(if settings.invert { 1 } else { 0 });
     buf.push(preset_code(&settings.split.preset));
-    buf.push(0u8); // padding: rotation below is u16-aligned
+    buf.push(engine_code(&settings.engine)); // engine byte (was padding 0)
     buf.extend_from_slice(&settings.split.rotation.to_le_bytes());
     let sc = settings.split;
     buf.extend_from_slice(&sc.overlap.to_le_bytes());

@@ -31,11 +31,12 @@ pub fn record_sub(path: &str, page: usize, sub: usize, total: usize, settings: R
 pub fn toc_dialog(
     outlines: &[mupdf::Outline],
     cur_page: usize,
+    back: Option<(usize, usize)>,
     path_name: String,
     total: usize,
     settings: ReaderSettings,
 ) -> Action {
-    Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
+    let mut dlg = crate::toc_dialog::TocDialog::from_outlines(
         outlines,
         cur_page,
         move |act| match act {
@@ -47,9 +48,17 @@ pub fn toc_dialog(
                 record(&path_name, page, total, settings);
                 Action::Pop
             }
+            crate::toc_dialog::TocAction::Back { page, sub } => {
+                positions::record_pos(&path_name, page, total, sub, Some(settings));
+                Action::Pop
+            }
             crate::toc_dialog::TocAction::Close => Action::Pop,
         },
-    )))
+    );
+    if let Some((page, sub)) = back {
+        dlg = dlg.with_back(page, sub);
+    }
+    Action::Push(Box::new(dlg))
 }
 
 pub fn yread_toc_dialog(
@@ -57,11 +66,12 @@ pub fn yread_toc_dialog(
     offsets: &[usize],
     chars_per_page: f32,
     cur_page: usize,
+    back: Option<(usize, usize)>,
     path_name: String,
     total_pages: usize,
     settings: ReaderSettings,
 ) -> Action {
-    Action::Push(Box::new(crate::toc_dialog::TocDialog::from_yread_toc(
+    let mut dlg = crate::toc_dialog::TocDialog::from_yread_toc(
         toc,
         offsets,
         chars_per_page,
@@ -76,9 +86,17 @@ pub fn yread_toc_dialog(
                 positions::record_pos(&path_name, page, total_pages, encoded_sub, Some(settings));
                 Action::Pop
             }
+            crate::toc_dialog::TocAction::Back { page, sub } => {
+                positions::record_pos(&path_name, page, total_pages, sub, Some(settings));
+                Action::Pop
+            }
             crate::toc_dialog::TocAction::Close => Action::Pop,
         },
-    )))
+    );
+    if let Some((page, sub)) = back {
+        dlg = dlg.with_back(page, sub);
+    }
+    Action::Push(Box::new(dlg))
 }
 
 pub fn scrubber_dialog(
@@ -86,6 +104,7 @@ pub fn scrubber_dialog(
     cur_page: usize,
     total: usize,
     bg: Option<Vec<u8>>,
+    back: Option<(usize, usize)>,
     path_name: String,
     settings: ReaderSettings,
     w: u32,
@@ -101,55 +120,63 @@ pub fn scrubber_dialog(
         move |target_page| {
             render_page(doc_for_renderer.as_ref(), target_page, 0, &settings, w, h)
         },
-        move |act| {
-            match act {
-                crate::scrubber_dialog::ScrubberAction::Done(target) => {
-                    record(&path_name, target, total, settings);
-                    Action::Pop
-                }
-                crate::scrubber_dialog::ScrubberAction::OpenToc(target) => {
-                    if let Ok(ol) = doc_for_toc.outlines() {
-                        let path_cl = path_name.clone();
-                        return Action::Push(Box::new(crate::toc_dialog::TocDialog::from_outlines(
-                            &ol,
-                            target,
-                            move |act| {
-                                match act {
-                                    crate::toc_dialog::TocAction::JumpTo(t) => {
-                                        record(&path_cl, t, total, settings);
-                                        Action::PopN(2)
-                                    }
-                                    crate::toc_dialog::TocAction::JumpToYRead { page, .. } => {
-                                        record(&path_cl, page, total, settings);
-                                        Action::PopN(2)
-                                    }
-                                    crate::toc_dialog::TocAction::Close => Action::Pop,
-                                }
-                            },
-                        )));
-                    }
-                    Action::Pop
-                }
-                crate::scrubber_dialog::ScrubberAction::OpenHighlights(target) => {
-                    let path_hl = path_name.clone();
-                    let path_jump = path_hl.clone();
-                    Action::Push(Box::new(crate::highlights_dialog::HighlightsDialog::from_book(
-                        &path_hl,
+        move |act| match act {
+            crate::scrubber_dialog::ScrubberAction::Done(target) => {
+                record(&path_name, target, total, settings);
+                Action::Pop
+            }
+            crate::scrubber_dialog::ScrubberAction::OpenToc(target) => {
+                if let Ok(ol) = doc_for_toc.outlines() {
+                    let path_cl = path_name.clone();
+                    let mut dlg = crate::toc_dialog::TocDialog::from_outlines(
+                        &ol,
                         target,
-                        move |act| {
-                            match act {
-                                crate::highlights_dialog::HighlightsAction::JumpTo(p) => {
-                                    // The stored page can predate a reflow — clamp.
-                                    let page = p.min(total.saturating_sub(1));
-                                    record(&path_jump, page, total, settings);
-                                    // Same unwind as the TOC jump: pop list + scrubber.
-                                    Action::PopN(2)
-                                }
-                                crate::highlights_dialog::HighlightsAction::Close => Action::Pop,
+                        move |act| match act {
+                            crate::toc_dialog::TocAction::JumpTo(t) => {
+                                record(&path_cl, t, total, settings);
+                                Action::PopN(2)
                             }
+                            crate::toc_dialog::TocAction::JumpToYRead { page, .. } => {
+                                record(&path_cl, page, total, settings);
+                                Action::PopN(2)
+                            }
+                            crate::toc_dialog::TocAction::Back { page, sub } => {
+                                positions::record_pos(
+                                    &path_cl,
+                                    page,
+                                    total,
+                                    sub,
+                                    Some(settings),
+                                );
+                                Action::PopN(2)
+                            }
+                            crate::toc_dialog::TocAction::Close => Action::Pop,
                         },
-                    )))
+                    );
+                    if let Some((page, sub)) = back {
+                        dlg = dlg.with_back(page, sub);
+                    }
+                    return Action::Push(Box::new(dlg));
                 }
+                Action::Pop
+            }
+            crate::scrubber_dialog::ScrubberAction::OpenHighlights(target) => {
+                let path_hl = path_name.clone();
+                let path_jump = path_hl.clone();
+                Action::Push(Box::new(crate::highlights_dialog::HighlightsDialog::from_book(
+                    &path_hl,
+                    target,
+                    move |act| match act {
+                        crate::highlights_dialog::HighlightsAction::JumpTo(p) => {
+                            // The stored page can predate a reflow — clamp.
+                            let page = p.min(total.saturating_sub(1));
+                            record(&path_jump, page, total, settings);
+                            // Same unwind as the TOC jump: pop list + scrubber.
+                            Action::PopN(2)
+                        }
+                        crate::highlights_dialog::HighlightsAction::Close => Action::Pop,
+                    },
+                )))
             }
         },
     )))
@@ -183,15 +210,9 @@ pub fn footnote_dialog(
                         if !text.is_empty() {
                             lines.push(text);
                         }
-                        if lines.len() >= 6 {
-                            break;
-                        }
-                    }
-                    if lines.len() >= 6 {
-                        break;
                     }
                 }
-                snippet = lines.join(" ");
+                snippet = lines.join("\n");
             }
         }
     }
@@ -208,6 +229,50 @@ pub fn footnote_dialog(
         move |act| match act {
             crate::footnote_dialog::FootnoteAction::JumpTo(target) => {
                 record(&path_name, target, total, settings);
+                Action::Pop
+            }
+            crate::footnote_dialog::FootnoteAction::JumpToYRead { chapter_idx, char_offset, page } => {
+                let encoded_sub = chapter_idx * 1_000_000 + (char_offset % 1_000_000);
+                positions::record_pos(&path_name, page, total, encoded_sub, Some(settings));
+                Action::Pop
+            }
+            crate::footnote_dialog::FootnoteAction::Close => Action::Pop,
+        },
+    )))
+}
+
+pub fn footnote_dialog_yread(
+    book: &yread::Book,
+    cur_chap_idx: usize,
+    uri: &str,
+    bg: Option<Vec<u8>>,
+    path_name: String,
+    total: usize,
+    settings: ReaderSettings,
+    chap_offsets: &[usize],
+    chars_per_page: f32,
+) -> Action {
+    let res = book.resolve_footnote_or_link(cur_chap_idx, uri);
+    let target_yread = res.target.map(|(ch, off)| {
+        let base_page = chap_offsets.get(ch).copied().unwrap_or(0);
+        let sec_page = (off as f32 / chars_per_page.max(100.0)).floor() as usize;
+        let page = base_page + sec_page;
+        (ch, off, page)
+    });
+
+    Action::Push(Box::new(crate::footnote_dialog::FootnoteDialog::new_yread(
+        &res.title,
+        &res.text,
+        target_yread,
+        bg,
+        move |act| match act {
+            crate::footnote_dialog::FootnoteAction::JumpTo(target) => {
+                record(&path_name, target, total, settings);
+                Action::Pop
+            }
+            crate::footnote_dialog::FootnoteAction::JumpToYRead { chapter_idx, char_offset, page } => {
+                let encoded_sub = chapter_idx * 1_000_000 + (char_offset % 1_000_000);
+                positions::record_pos(&path_name, page, total, encoded_sub, Some(settings));
                 Action::Pop
             }
             crate::footnote_dialog::FootnoteAction::Close => Action::Pop,
