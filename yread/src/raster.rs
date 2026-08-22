@@ -141,6 +141,21 @@ impl Rasterizer {
                         p_height,
                     );
                 }
+                PageElement::CodeLine { shaped, x, y, size_pt } => {
+                    let face = fonts.code_face();
+                    self.render_shaped_word(
+                        shaped,
+                        origin_x + x,
+                        origin_y + y,
+                        *size_pt,
+                        crate::model::FontStyle::Regular,
+                        face,
+                        fb,
+                        stride,
+                        p_width,
+                        p_height,
+                    );
+                }
                 PageElement::CircleBullet { x, y, radius } => {
                     let cx = (origin_x + x).round() as i32;
                     let cy = (origin_y + y).round() as i32;

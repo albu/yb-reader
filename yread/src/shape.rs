@@ -86,6 +86,31 @@ impl ShapeCache {
         shaped
     }
 
+    /// Shape a code string using the dedicated code font (Noto Sans).
+    pub fn shape_code_word(
+        &mut self,
+        word: &str,
+        size_pt: f32,
+        fonts: &FontSystem,
+    ) -> Arc<ShapedWord> {
+        let size_scaled = (size_pt * 10.0).round() as u16;
+        let h = hash_word(word, FontStyle::Regular, size_scaled ^ 0x79b9);
+
+        if let Some((w, _s, sz, shaped)) = self.cache.get(&h) {
+            if *sz == size_scaled && w == word {
+                return Arc::clone(shaped);
+            }
+        }
+
+        let rb_face = fonts.rustybuzz_code_face();
+        let shaped = Arc::new(shape_string_with_face(word, rb_face, size_pt));
+        if self.cache.len() >= 65536 {
+            self.cache.clear();
+        }
+        self.cache.insert(h, (word.to_string(), FontStyle::Regular, size_scaled, Arc::clone(&shaped)));
+        shaped
+    }
+
     /// Fast lookup for single space advance width in pixels.
     pub fn space_advance(
         &mut self,

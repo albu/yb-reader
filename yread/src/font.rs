@@ -38,6 +38,7 @@ pub struct FontSystem {
     pub bold: FontFace,
     pub italic: FontFace,
     pub bold_italic: FontFace,
+    pub code: FontFace,
     pub fallback: FontFace,
 }
 
@@ -48,6 +49,7 @@ impl Default for FontSystem {
             bold: FontFace::from_bytes(LITERATA_BOLD_BYTES),
             italic: FontFace::from_bytes(LITERATA_ITALIC_BYTES),
             bold_italic: FontFace::from_bytes(LITERATA_BOLD_ITALIC_BYTES),
+            code: FontFace::from_bytes(NOTO_SANS_BYTES),
             fallback: FontFace::from_bytes(NOTO_SANS_BYTES),
         }
     }
@@ -93,6 +95,7 @@ static RB_REGULAR: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
 static RB_BOLD: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
 static RB_ITALIC: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
 static RB_BOLD_ITALIC: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
+static RB_CODE: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
 
 impl FontSystem {
     pub fn face_for_style(&self, style: FontStyle) -> &FontFace {
@@ -102,6 +105,10 @@ impl FontSystem {
             FontStyle::Italic => &self.italic,
             FontStyle::BoldItalic => &self.bold_italic,
         }
+    }
+
+    pub fn code_face(&self) -> &FontFace {
+        &self.code
     }
 
     /// A parsed rustybuzz face for shaping — built once from the embedded
@@ -116,6 +123,11 @@ impl FontSystem {
             FontStyle::Italic => RB_ITALIC.get_or_init(|| build(LITERATA_ITALIC_BYTES)),
             FontStyle::BoldItalic => RB_BOLD_ITALIC.get_or_init(|| build(LITERATA_BOLD_ITALIC_BYTES)),
         }
+    }
+
+    pub fn rustybuzz_code_face(&self) -> &'static rustybuzz::Face<'static> {
+        let build = |bytes: &'static [u8]| rustybuzz::Face::from_slice(bytes, 0).expect("embedded font parses");
+        RB_CODE.get_or_init(|| build(NOTO_SANS_BYTES))
     }
 
     pub fn fallback_face(&self) -> &FontFace {

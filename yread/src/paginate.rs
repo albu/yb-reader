@@ -62,6 +62,12 @@ pub enum PageElement {
         y: f32,
         size_pt: f32,
     },
+    CodeLine {
+        shaped: std::sync::Arc<crate::shape::ShapedWord>,
+        x: f32,
+        y: f32,
+        size_pt: f32,
+    },
     CircleBullet {
         x: f32,
         y: f32,
@@ -309,10 +315,13 @@ pub fn paginate_chapter_with_images(
                 cur_y += config.font_size * config.paragraph_spacing;
             }
             Block::CodeBlock { code } => {
-                // Code block formatting
                 let em_px = config.font_size * (300.0 / 72.0);
-                let left_margin_px = em_px * 1.0;
-                let line_h = config.font_size * (300.0 / 72.0) * 1.1;
+                let left_margin_px = em_px * 0.8;
+                let code_size = config.font_size * 0.82;
+                let line_h = code_size * (300.0 / 72.0) * 1.25;
+                let block_start_y = cur_y;
+
+                cur_y += config.font_size * 0.3; // Space before code block
 
                 for c_line in code.lines() {
                     if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
@@ -335,16 +344,28 @@ pub fn paginate_chapter_with_images(
                         cur_block_idx = b_idx;
                     }
 
-                    let shaped = cache.shape_word(c_line, FontStyle::Regular, config.font_size * 0.9, fonts);
-                    cur_page.elements.push(PageElement::Bullet {
-                        shaped,
-                        x: left_margin_px,
-                        y: cur_y + line_h * 0.8,
-                        size_pt: config.font_size * 0.9,
-                    });
+                    if !c_line.trim().is_empty() {
+                        let shaped = cache.shape_code_word(c_line, code_size, fonts);
+                        cur_page.elements.push(PageElement::CodeLine {
+                            shaped,
+                            x: left_margin_px + 8.0,
+                            y: cur_y + line_h * 0.75,
+                            size_pt: code_size,
+                        });
+                    }
                     cur_y += line_h;
                 }
-                cur_y += config.font_size * config.paragraph_spacing;
+
+                // Add subtle left vertical line to delineate code block cleanly
+                if cur_y > block_start_y {
+                    cur_page.elements.push(PageElement::QuoteBar {
+                        x: (left_margin_px - 2.0).max(0.0),
+                        y0: block_start_y + 4.0,
+                        y1: cur_y - 2.0,
+                    });
+                }
+
+                cur_y += config.font_size * 0.5; // Space after code block
             }
             Block::Heading { level: _, runs } => {
                 let lines = break_paragraph_lines_streaming(

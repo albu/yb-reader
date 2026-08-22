@@ -527,6 +527,9 @@ fn knuth_plass(
                 &break_points,
                 act.break_idx,
                 b_idx,
+                base_font_size,
+                fonts,
+                cache,
             );
 
             if !valid {
@@ -706,6 +709,9 @@ fn measure_slice(
     break_points: &[BreakPoint],
     from_break: usize,
     to_break: usize,
+    base_font_size: f32,
+    fonts: &FontSystem,
+    cache: &mut ShapeCache,
 ) -> (f32, usize, bool, bool) {
     let (start_word, start_prefix_adv) = if from_break == 0 {
         (0, 0.0f32)
@@ -758,6 +764,11 @@ fn measure_slice(
         }
 
         if w_idx + 1 < end_word {
+            if let LineItem::Word { style, .. } = &words[w_idx] {
+                let run_size = base_font_size * style.size_mult;
+                let sp_adv = cache.space_advance(style.font_style, run_size, fonts);
+                total_w += sp_adv;
+            }
             spaces += 1;
         }
     }
