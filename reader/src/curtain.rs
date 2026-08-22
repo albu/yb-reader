@@ -48,6 +48,34 @@ const KNOB_R_PX: i32 = 8;
 
 const SHEET_H_PT: f32 = 230.0;
 
+/// The user's own frontlight point, remembered across sessions — only
+/// written while the light sits OFF every preset (custom mode); preset
+/// taps never touch it. Format: "b w" (slider space, 4 decimals).
+const CUSTOM_FL_PATH: &str = "/var/local/yb-reader/frontlight";
+
+fn load_custom() -> Option<(f32, f32)> {
+    let s = std::fs::read_to_string(CUSTOM_FL_PATH).ok()?;
+    let (b, w) = s.split_once(' ')?;
+    Some((b.trim().parse().ok()?, w.trim().parse().ok()?))
+}
+
+fn save_custom(b: f32, w: f32) {
+    let _ = std::fs::create_dir_all("/var/local/yb-reader");
+    let _ = std::fs::write(CUSTOM_FL_PATH, format!("{b:.4} {w:.4}\n"));
+}
+
+/// Apply slider-space levels and remember them when the result is OFF
+/// every preset (custom mode). Preset tiles apply exact preset values
+/// and never save. The hardware read-back (not the requested fraction)
+/// is what gets saved, so re-applying reproduces identical registers.
+fn apply_and_remember(fl: &mut Frontlight, b: f32, w: f32) {
+    fl.apply_levels(b, w);
+    let (lb, lw) = fl.levels();
+    if ybdev::frontlight::nearest_preset(lb, lw).is_none() {
+        save_custom(lb, lw);
+    }
+}
+
 // --- grays on white ---
 const DIM: u8 = 110;
 const INK: u8 = 0;
@@ -351,19 +379,32 @@ impl Screen for CurtainScreen {
             );
         }
 
-        // 4b. Composite light presets: Day | Warm | Night
+        // 4b. Composite light points: the four presets plus the user's
+        // Custom slot (remembers the last off-preset light). The active
+        // segment is whichever the light currently matches; an
+        // off-preset light highlights Custom.
         let (lb, lw) = fl.levels();
         let active = ybdev::frontlight::nearest_preset(lb, lw);
-        let n_presets = ybdev::frontlight::PRESETS.len();
+        let n_seg = ybdev::frontlight::PRESETS.len() + 1;
         let seg_w = w - 2 * pad;
-        let sw = seg_w / n_presets as i32;
+        let sw = seg_w / n_seg as i32;
         let track = Rect::new(pad, pt(SEG_TOP_PT), seg_w, pt(SEG_H_PT));
         p.rect(track, CARD_BG);
         p.rect_outline_t(track, 1, CARD_BORDER);
 
-        for (i, (name, _, _)) in ybdev::frontlight::PRESETS.iter().enumerate() {
+        let mut prev_on = false;
+        for i in 0..n_seg {
+            let name = if i < ybdev::frontlight::PRESETS.len() {
+                ybdev::frontlight::PRESETS[i].0
+            } else {
+                "Custom"
+            };
+            let on = if i < ybdev::frontlight::PRESETS.len() {
+                active == Some(i)
+            } else {
+                active.is_none()
+            };
             let r = Rect::new(pad + i as i32 * sw, track.y, sw, track.h);
-            let on = active == Some(i);
             if on {
                 p.rect(r, PILL_ACTIVE_BG);
                 p.text_center_in(r.x, r.x + r.w, r.y + pt(14.5), 7.5, 255, name);
@@ -371,9 +412,10 @@ impl Screen for CurtainScreen {
                 p.text_center_in(r.x, r.x + r.w, r.y + pt(14.5), 7.5, INK, name);
             }
             if i > 0 {
-                let beside_fill = on || active == Some(i - 1);
+                let beside_fill = on || prev_on;
                 p.line_w(r.x, r.y + 2, r.x, r.y + r.h - 2, 1, if beside_fill { 255 } else { CARD_BORDER });
             }
+            prev_on = on;
         }
     }
 
@@ -434,11 +476,20 @@ impl Screen for CurtainScreen {
                     return Action::Pop;
                 }
 
-                // 0b. Preset segments: Day | Warm | Night
+                // 0b. Light points: presets apply their fixed pair; the
+                // Custom slot applies the remembered off-preset light,
+                // claiming the current light on its first ever tap.
                 if y >= pt(SEG_TOP_PT) && y < pt(SEG_TOP_PT) + pt(SEG_H_PT) {
                     if let Some(i) = seg_at(x, w) {
-                        let (_, pb, pw) = ybdev::frontlight::PRESETS[i];
-                        fl.apply_levels(pb, pw);
+                        if i < ybdev::frontlight::PRESETS.len() {
+                            let (_, pb, pw) = ybdev::frontlight::PRESETS[i];
+                            fl.apply_levels(pb, pw);
+                        } else if let Some((cb, cw)) = load_custom() {
+                            fl.apply_levels(cb, cw);
+                        } else {
+                            let (cb, cw) = fl.levels();
+                            save_custom(cb, cw);
+                        }
                         return Action::Redraw;
                     }
                 }
@@ -447,13 +498,13 @@ impl Screen for CurtainScreen {
                 if (y - bright_cy).abs() <= 16 && x >= x0 && x <= x1 {
                     let frac = ((x - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
                     let (_, w) = fl.levels();
-                    fl.apply_levels(frac, w);
+                    apply_and_remember(fl, frac, w);
                     return Action::Redraw;
                 }
                 if tmax > 0 && (y - tone_cy).abs() <= 16 && x >= x0 && x <= x1 {
                     let frac = ((x - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
                     let (b, _) = fl.levels();
-                    fl.apply_levels(b, frac);
+                    apply_and_remember(fl, b, frac);
                     return Action::Redraw;
                 }
 
@@ -471,13 +522,13 @@ impl Screen for CurtainScreen {
                 if (y - bright_cy).abs() <= 16 && ex >= x0 && ex <= x1 {
                     let frac = ((ex - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
                     let (_, w) = fl.levels();
-                    fl.apply_levels(frac, w);
+                    apply_and_remember(fl, frac, w);
                     return Action::Redraw;
                 }
                 if tmax > 0 && (y - tone_cy).abs() <= 16 && ex >= x0 && ex <= x1 {
                     let frac = ((ex - x0) as f32 / (x1 - x0) as f32).clamp(0.0, 1.0);
                     let (b, _) = fl.levels();
-                    fl.apply_levels(b, frac);
+                    apply_and_remember(fl, b, frac);
                     return Action::Redraw;
                 }
                 if matches!(dir, SwipeDir::North | SwipeDir::South) {
@@ -496,10 +547,11 @@ impl Screen for CurtainScreen {
     }
 }
 
-/// Segment under an x inside the preset track (y is checked by the caller).
+/// Segment under an x inside the light-point track (y is checked by the
+/// caller). Index PRESETS.len() is the Custom slot.
 fn seg_at(x: i32, w: i32) -> Option<usize> {
     let pad = pt(PAD_PT);
-    let n = ybdev::frontlight::PRESETS.len();
+    let n = ybdev::frontlight::PRESETS.len() + 1;
     if x < pad || x >= w - pad || n == 0 {
         return None;
     }
@@ -534,8 +586,8 @@ mod tests {
     #[test]
     fn preset_segments_hit_cleanly() {
         let w = 1236;
-        let n = ybdev::frontlight::PRESETS.len();
-        assert_eq!(n, 4);
+        let n = ybdev::frontlight::PRESETS.len() + 1;
+        assert_eq!(n, 5);
         let pad = pt(PAD_PT);
         let sw = (w - 2 * pad) / n as i32;
         for i in 0..n {

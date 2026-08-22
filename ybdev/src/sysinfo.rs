@@ -18,13 +18,22 @@ pub fn battery() -> (u8, bool) {
     (cap, plugged)
 }
 
+/// wlan0's link is actually carrying (operstate "up" is the kernel's
+/// verdict; "down"/"dormant" mean unreachable even when wifid still
+/// says enabled). The awake policy holds the device out of suspend
+/// exactly while this is true: reachable ⇒ awake.
+pub fn wifi_up() -> bool {
+    fs::read_to_string("/sys/class/net/wlan0/operstate")
+        .map(|s| s.trim() == "up")
+        .unwrap_or(false)
+}
+
 /// wlan0 IPv4 via SIOCGIFADDR (no fork, no /proc parsing).
 pub fn wifi_ip() -> Option<String> {
     // The ioctl below returns a STALE address after the radio drops —
     // the curtain kept showing the IP while wifi was actually off
     // (2026-08-17). Gate on the interface's live operstate.
-    let oper = fs::read_to_string("/sys/class/net/wlan0/operstate").ok()?;
-    if oper.trim() != "up" {
+    if !wifi_up() {
         return None;
     }
     #[repr(C)]

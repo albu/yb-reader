@@ -33,9 +33,12 @@ use crate::wifi;
 
 static AWAKE_WANTED: AtomicBool = AtomicBool::new(false);
 
-/// Pure decision, host-testable: a screen's live reason plus USB power.
-pub fn desired_awake(screen_wants: bool, vbus: bool) -> bool {
-    screen_wants || vbus
+/// Pure decision, host-testable: a screen's live reason, USB power, or
+/// the Wi-Fi link being up (reachable ⇒ awake — a sleeping device
+/// can't be deployed to, and it shouldn't silently drop off the network
+/// mid-session; turn Wi-Fi off in the curtain to let it sleep).
+pub fn desired_awake(screen_wants: bool, vbus: bool, wifi_up: bool) -> bool {
+    screen_wants || vbus || wifi_up
 }
 
 /// Screens with a live reason not to suspend call this on enter/leave
@@ -86,7 +89,11 @@ pub fn spawn() {
 
 fn loop_fn() {
     loop {
-        let want = desired_awake(AWAKE_WANTED.load(Ordering::SeqCst), sysinfo::vbus());
+        let want = desired_awake(
+            AWAKE_WANTED.load(Ordering::SeqCst),
+            sysinfo::vbus(),
+            sysinfo::wifi_up(),
+        );
         wifi::keep_awake(want);
         // Wi-Fi healing is gated to live-session screens only: the sleep
         // screen turns the radio off deliberately, and healing there
@@ -106,9 +113,10 @@ mod tests {
 
     #[test]
     fn awake_truth_table() {
-        assert!(!desired_awake(false, false));
-        assert!(desired_awake(true, false));
-        assert!(desired_awake(false, true));
-        assert!(desired_awake(true, true));
+        assert!(!desired_awake(false, false, false));
+        assert!(desired_awake(true, false, false));
+        assert!(desired_awake(false, true, false));
+        assert!(desired_awake(false, false, true));
+        assert!(desired_awake(true, true, true));
     }
 }
