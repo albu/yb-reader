@@ -133,13 +133,12 @@ impl YreadBackend {
     }
 
     fn yread_land_at(&mut self, chapter: usize, char_offset: usize, vw: u32, vh: u32, settings: &ReaderSettings) {
-        let max_ch = self
-            .ybook
-            .as_ref()
-            .map(|b| b.chapters.len())
-            .unwrap_or(1)
-            .saturating_sub(1);
-        let target_ch = chapter.min(max_ch);
+        let target_ch = if let Some(b) = &self.ybook {
+            let max_ch = b.chapters.len().saturating_sub(1);
+            chapter.min(max_ch)
+        } else {
+            chapter
+        };
         if target_ch != self.ychap_idx && !self.ychap_cache.contains_key(&target_ch) {
             self.ybg_rx = None;
             self.ylayout_wait = true;
