@@ -22,6 +22,24 @@ use crate::split::{RectF, ReaderSettings};
 pub const HEADER_H: u32 = 92; // px (covers clock/battery status header)
 pub const FOOTER_H: u32 = 50; // px (covers progress track and footer)
 
+/// Crisp-text knobs (2026-08-21). The epub body font is mupdf's built-in
+/// light serif rendered with a linear AA ramp; the Boox text users
+/// compare against is a heavier weight and/or binary glyphs. Two
+/// independent variables, one-word flips — A/B on glass, not in theory.
+/// BOLD applies user CSS before layout (it changes metrics, hence
+/// pagination); AA_LEVEL applies at rasterize time on the calling
+/// thread's context (0 = no text anti-aliasing at all, graphics keep
+/// their own setting).
+pub const BOLD_EPUB_BODY: bool = false; // tried 2026-08-21: "too bold, don't like it at all"
+pub const TEXT_AA_LEVEL: i32 = 8; // 8 = full AA (0 tried 2026-08-21: "binary glyphs are also terrible")
+/// mupdf's default epub serif (Charis SIL) is a light literary cut that
+/// reads thin on e-ink; the built-in sans is a sturdy regular — the
+/// modern e-reader look (host-lab verified on the Publisher book,
+/// 2026-08-21: 3.3× the ink at the same size, smooth AA, not bold).
+/// Superseded the same night by the bundled Literata (doc_css
+/// font-patch — see document.rs): sturdy AND bookish.
+pub const SANS_EPUB_BODY: bool = false;
+
 /// The available text area in points for a reflow layout — shared by the
 /// async open/reflow paths so a warm document and a cold one lay out
 /// identically. Callers pass VISUAL dims (Orientation decides the swap).
@@ -206,6 +224,10 @@ pub fn render_page(
     w: u32,
     h: u32,
 ) -> Option<Vec<u8>> {
+    // Thread-local mupdf context: set on every call so any thread that
+    // rasterizes picks the knob up (contexts are per-thread clones).
+    mupdf::Context::get().set_text_aa_level(TEXT_AA_LEVEL);
+    crate::document::apply_layout_css(settings.line_spacing);
     let page = doc.load_page(page_no as i32).ok()?;
     let bounds = page.bounds().ok()?;
     let geom = LayoutGeom::new(settings, bounds, sub_idx, w, h)?;
@@ -489,5 +511,139 @@ mod tests {
             assert!(r.y0 >= -1.0 && r.y1 <= vh as f32 + 1.0, "{vw}x{vh}: {:?}", r);
             assert!(r.x0 < r.x1 && r.y0 < r.y1);
         }
+    }
+}
+
+#[cfg(test)]
+mod lab {
+    use super::*;
+    use mupdf::Context;
+
+    // Host-only render lab: set YB_LAB=1, cargo test lab -- --nocapture.
+    // Compares font-weight CSS strategies, @font-face, and text AA on
+    // the real Publisher epub; writes /tmp/lab_*.raw for PNG wrapping.
+    #[test]
+    fn lab_css_variants() {
+        if std::env::var("YB_LAB").is_err() {
+            return;
+        }
+        let epubs = ["/tmp/lab.epub"];
+        let path = epubs[0];
+        let page_no = 100;
+        let (w, h) = (1236u32, 1648u32);
+        let (aw, ah) = avail_pt(w, h, 48);
+        let georgia = "/System/Library/Fonts/Supplemental/Georgia Bold.ttf";
+        let variants: &[(&str, &str, bool, i32)] = &[
+            ("1_base", "", true, 8),
+            ("2_bold_body", "body { font-weight: bold; }", true, 8),
+            ("3_bold_star_imp", "* { font-weight: bold !important; }", true, 8),
+            (
+                "4_nodoccss_bold",
+                "body { font-weight: bold; }",
+                false,
+                8,
+            ),
+            ("5_aa0", "", true, 0),
+            (
+                "6_fontface",
+                &format!(
+                    "@font-face {{ font-family: labgeo; src: url(file://{georgia}); }} \
+                     body {{ font-family: labgeo; }}"
+                ),
+                true,
+                8,
+            ),
+            ("7_aa0_bold", "* { font-weight: bold !important; }", true, 0),
+            (
+                "8_sans",
+                "* { font-family: sans-serif !important; }",
+                true,
+                8,
+            ),
+            (
+                "9_sans_aa0",
+                "* { font-family: sans-serif !important; }",
+                true,
+                0,
+            ),
+            ("10_fontface_doc", "", true, 8),
+            ("11_fontface_dir", "", true, 8),
+            (
+                "15_patched_lineheight",
+                "* { line-height: 1.6 !important; }",
+                true,
+                8,
+            ),
+            ("14_lineheight", "* { line-height: 1.6 !important; }", true, 8),
+        ];
+        for (name, css, doc_css, aa) in variants {
+            // 10_* reads the @font-face-patched copy of the same book.
+            let path = match name {
+                n if n.starts_with("10_") => "/tmp/lab_patched.epub",
+                // same patched book, opened as the unzipped directory —
+                // the shipping candidate (no rezip needed on device)
+                n if n.starts_with("11_") => "/tmp/lab_epub",
+                n if n.starts_with("15_") => "/tmp/lab_epub", // patched copy + user-css line-height
+                n if n.starts_with("14_") => "/tmp/lab_orig",
+                _ => path,
+            };
+            let mut ctx = Context::get();
+            let _ = ctx.set_user_css(css);
+            ctx.set_use_document_css(*doc_css);
+            ctx.set_text_aa_level(*aa);
+            let mut doc = Document::open(path).expect("open");
+            let _ = doc.layout(aw, ah, 11.0);
+            let page = doc.load_page(page_no).expect("page");
+            let mut m = Matrix::IDENTITY;
+            m.scale(300.0 / 72.0, 300.0 / 72.0);
+            let pm = page
+                .to_pixmap(&m, &Colorspace::device_gray(), false, true)
+                .expect("pixmap");
+            let pw = pm.width() as usize;
+            let phh = pm.height() as usize;
+            let stride = pm.stride() as usize;
+            let samples = pm.samples();
+            // pack tight (drop stride pad)
+            let mut tight = vec![0u8; pw * phh];
+            for y in 0..phh {
+                tight[y * pw..(y + 1) * pw]
+                    .copy_from_slice(&samples[y * stride..y * stride + pw]);
+            }
+            std::fs::write(format!("/tmp/lab_{name}.raw"), &tight).unwrap();
+            let dark = tight.iter().filter(|&&v| v < 100).count();
+            let total = doc.page_count().unwrap_or(0);
+            println!("{name}: {pw}x{phh} darkpx={dark} pages={total}");
+        }
+        let _ = Context::get().set_user_css("");
+    }
+
+    #[test]
+    fn test_render_page_line_spacing() {
+        let book = std::path::Path::new("/tmp/lab.epub");
+        if !book.exists() {
+            return;
+        }
+        let mut doc = Document::open(book.as_os_str()).expect("open");
+        let (aw, ah) = crate::render::avail_pt(1236, 1648, 72);
+
+        // Layout at 1.0
+        crate::document::apply_layout_css(1.0);
+        let _ = doc.layout(aw, ah, 11.0);
+        let mut s1 = ReaderSettings::default();
+        s1.font_size = 11.0;
+        s1.line_spacing = 1.0;
+        let p1 = render_page(&doc, 20, 0, &s1, 1236, 1648).expect("render 1.0");
+
+        // Layout at 1.6
+        crate::document::apply_layout_css(1.6);
+        let _ = doc.layout(aw, ah, 11.0);
+        crate::document::purge_stored_html(&doc);
+        let mut s2 = s1;
+        s2.line_spacing = 1.6;
+        let p2 = render_page(&doc, 20, 0, &s2, 1236, 1648).expect("render 1.6");
+
+        // Must not be identical pixels
+        assert_ne!(p1, p2, "Render at 1.0 vs 1.6 spacing must produce different page renderings");
+        let _ = Context::get().set_user_css("");
     }
 }

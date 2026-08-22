@@ -73,6 +73,14 @@ pub trait Screen {
     fn is_sleep(&self) -> bool {
         false
     }
+
+    /// Does this screen have a live reason to keep the device awake —
+    /// streaming, running a server, a transfer in flight? App-level
+    /// idle sleep (the stock screensaver timeout) skips screens that
+    /// do, for as long as they are on top.
+    fn holds_awake(&self) -> bool {
+        false
+    }
 }
 
 

@@ -12,3 +12,4 @@ pub mod mtk;
 pub mod panel;
 pub mod ssh;
 pub mod sysinfo;
+pub mod wifi;

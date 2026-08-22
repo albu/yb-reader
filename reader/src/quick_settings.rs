@@ -11,7 +11,7 @@ use crate::crop_dialog::CropDialog;
 use crate::settings_dialog::SettingsDialog;
 use crate::split::{ContrastMode, ReaderSettings, SplitConfig, SplitPreset};
 
-const SHEET_H_PT: f32 = 168.0;
+const SHEET_H_PT: f32 = 197.0; // +29pt for the Spacing row (2026-08-22)
 const PAD_PT: f32 = 16.0;
 const ROW_H_PT: f32 = 25.0;
 const BTN_H_PT: f32 = 22.0;
@@ -63,8 +63,10 @@ impl QuickSettingsSheet {
             self.total,
             self.settings,
         );
-        if let Some(new_gray) = (self.on_change)(self.settings) {
-            self.page_gray = Some(new_gray);
+        if self.is_pdf {
+            if let Some(new_gray) = (self.on_change)(self.settings) {
+                self.page_gray = Some(new_gray);
+            }
         }
         Action::Redraw
     }
@@ -135,6 +137,18 @@ impl Screen for QuickSettingsSheet {
                     p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.5, 0, m_lbl);
                 }
             }
+            y += pt(ROW_H_PT) + pt(4.0);
+
+            // Row 3: Line spacing (multiplier over the book's leading)
+            p.text(pad, y + pt(15.0), 8.5, 0, "SPACING");
+            let sp_str = format!("{:.1}\u{d7}", self.settings.line_spacing);
+            p.text_center_in(pad + pt(70.0), pad + pt(130.0), y + pt(15.0), 9.0, 0, &sp_str);
+            let sp_minus = Rect::new(w - pad - pt(70.0), y, pt(30.0), pt(BTN_H_PT));
+            let sp_plus = Rect::new(w - pad - pt(34.0), y, pt(30.0), pt(BTN_H_PT));
+            p.rect_outline_t(sp_minus, 1, 0);
+            p.text_center_in(sp_minus.x, sp_minus.x + sp_minus.w, y + pt(15.0), 10.0, 0, "-");
+            p.rect_outline_t(sp_plus, 1, 0);
+            p.text_center_in(sp_plus.x, sp_plus.x + sp_plus.w, y + pt(15.0), 10.0, 0, "+");
             y += pt(ROW_H_PT) + pt(4.0);
         } else {
             // --- FIXED-LAYOUT (PDF / MANGA) ---
@@ -243,6 +257,21 @@ impl Screen for QuickSettingsSheet {
                     self.settings.margin_pad = *pad_val;
                     return self.apply_change();
                 }
+            }
+            y += pt(ROW_H_PT) + pt(4.0);
+
+            // Row 3: Spacing (0.1 steps, rounded — float steps drift)
+            let sp_minus = Rect::new(w - pad - pt(70.0), y, pt(30.0), pt(BTN_H_PT));
+            let sp_plus = Rect::new(w - pad - pt(34.0), y, pt(30.0), pt(BTN_H_PT));
+            if sp_minus.contains(vx, vy) {
+                self.settings.line_spacing =
+                    (((self.settings.line_spacing - 0.1) * 10.0).round() / 10.0).max(0.9);
+                return self.apply_change();
+            }
+            if sp_plus.contains(vx, vy) {
+                self.settings.line_spacing =
+                    (((self.settings.line_spacing + 0.1) * 10.0).round() / 10.0).min(1.8);
+                return self.apply_change();
             }
             y += pt(ROW_H_PT) + pt(4.0);
         } else {

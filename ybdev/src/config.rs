@@ -5,6 +5,9 @@
 pub struct ServerConf {
     pub server: Option<String>,
     pub refresh_every: Option<u32>,
+    /// Read-mode page-turn keys: "arrows" (default) or "space"
+    /// (Space / Shift+Space).
+    pub turn_keys: Option<String>,
 }
 
 pub fn read(path: &str) -> ServerConf {
@@ -22,6 +25,11 @@ pub fn read(path: &str) -> ServerConf {
         } else if let Some(rest) = t.strip_prefix("REFRESH_EVERY=") {
             if let Ok(n) = rest.trim().parse::<u32>() {
                 conf.refresh_every = Some(n);
+            }
+        } else if let Some(rest) = t.strip_prefix("TURN_KEYS=") {
+            let v = rest.trim();
+            if !v.is_empty() {
+                conf.turn_keys = Some(v.to_string());
             }
         }
     }

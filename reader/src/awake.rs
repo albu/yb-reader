@@ -1,13 +1,18 @@
 //! Awake policy: the single place that decides whether the device may
 //! auto-suspend, and what happens when it wakes up anyway.
 //!
-//! powerd (framework-free in takeover) stays the suspender — its t1/t2
-//! input-idle timers fire, we merely hold `preventScreenSaver` when a
-//! screen has a live reason to stay up (mirror streaming, receive
-//! server) or when USB power is present (file-transfer window, tethered
-//! dev loop). Reading a book deliberately does NOT hold: page turns are
-//! input and reset the timer, and ~20 min of stillness means the reader
-//! put the device down — the Kindle behavior, battery-honest.
+//! powerd (framework-free in takeover) is *an* input-idle suspender —
+//! its t1/t2 timers do fire mid-conversation — but it cannot be the
+//! only one: the t1 path leans on the frozen framework, and a wedged
+//! wlan stack resets its timer forever via wmt t1TimerReset spam
+//! (measured 2026-08-21: 27 min untouched and awake at 121mA). yui's
+//! App therefore enforces the stock 10-min idle sleep itself
+//! (`holds_awake`/vbus are the opt-outs); this thread's job is the
+//! `preventScreenSaver` hold for live sessions (mirror streaming,
+//! receive server) and USB power, so powerd stays out of the way while
+//! a session runs. Reading a book deliberately holds nothing: page
+//! turns are input, and stillness means the reader put the device
+//! down — the Kindle behavior, battery-honest.
 //!
 //! The 30 s policy thread re-asserts the hold (a lost lipc call gets
 //! ~30 retries inside powerd's ≥15 min window) and heals Wi-Fi for
@@ -59,10 +64,16 @@ pub fn on_resume(gap: Duration) {
         }
     }
     // Wi-Fi: restore if it was on (or wifid can't answer — err toward
-    // connectivity; the sequence is idempotent).
+    // connectivity; the sequence is idempotent), then verify the radio
+    // actually associated — a restored-but-unassociated radio scans at
+    // ~3× the idle drain (ybdev::wifi::verify_or_power_down has the
+    // measured numbers and the drain guard).
     match wifi::wifi_state() {
         Some(false) => {}
-        _ => wifi::turn_on_wifi(),
+        _ => {
+            wifi::turn_on_wifi();
+            ybdev::wifi::verify_or_power_down();
+        }
     }
 }
 

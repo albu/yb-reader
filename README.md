@@ -4,9 +4,11 @@ A minimal Rust reader for a jailbroken Kindle Paperwhite 5 (FW 5.19.x,
 **32-bit ARM kernel** — `uname: armv7l`, kernel 4.9.77-lab126).
 One static binary, one job: **read**.
 
-- **Screen Mirror (Mac)** — the exact `yb-mirror` protocol, ported 1:1 from
-  `mirror.koplugin`. Your existing `mac/server.py` is untouched and the two
-  can even run side-by-side during migration.
+- **Screen Mirror (Mac)** — the `yb-mirror` protocol, ported from
+  `mirror.koplugin` and since extended: page turns go through `/key`
+  (selectable presets), and a **Control mode** (two-finger tap) turns the
+  Kindle into a touchpad — taps click at their mirrored coordinates
+  (crop-accurate), swipes scroll the window.
 - **Receive over Wi-Fi** — the Kindle *is* the server: a QR code on screen
   points any phone/laptop browser at a drag-drop page; books stream straight
   to `documents/` (atomically, never RAM-buffered). The lab126 default-DROP
@@ -290,11 +292,14 @@ decoder now uses `Transformations::EXPAND` and there are unit tests
 
 | Screen | Gesture | Action |
 |---|---|---|
-| Mirror | tap left third | previous page (`/prev`) |
-| Mirror | tap elsewhere | next page (`/next`) |
+| Mirror | tap left third | previous page (turn-key preset) |
+| Mirror | tap elsewhere | next page (turn-key preset) |
 | Mirror | tap top-right corner | screen clean (full flashing refresh) |
-| Mirror | two-finger tap | frontlight dialog |
-| Mirror | vertical swipe | exit to launcher |
+| Mirror | two-finger tap | toggle Control mode ↔ Read mode |
+| Mirror | vertical swipe (read mode) | exit to launcher |
+| Mirror (control) | tap | click at that point in the window (`/tap`, crop-accurate) |
+| Mirror (control) | swipe | scroll the window (`/scroll`), natural-scroll direction |
+| Mirror (control) | app-level edge gestures | disabled — every swipe goes to the page (exit via two-finger tap → Read mode) |
 | Reader | tap left third / swipe east | previous page |
 | Reader | tap elsewhere / swipe west | next page |
 | Reader | tap top-left or bottom-right corner | back to library |
@@ -329,7 +334,14 @@ doesn't produce spurious "Mac not found".
 Same files as the Lua plugin, same semantics:
 
 - `/mnt/us/extensions/mirror/mirror.conf` — `SERVER=` (pin the Mac; discovery
-  rewrites it), `REFRESH_EVERY=N` (full refresh every N frames; 0 = never).
+  rewrites it), `REFRESH_EVERY=N` (full refresh every N frames; 0 = never),
+  `TURN_KEYS=arrows|space|pages` (read-mode page turns):
+  - `arrows` (default) — ←/→, for readers whose JS pages on arrow keys
+    (the classic behavior, verified on books.example.com);
+  - `space` — Space / Shift+Space, only where the site binds Space itself
+    (a pid-posted Space never triggers Safari's native space-scroll);
+  - `pages` — PageDown / PageUp, native full-page keys delivered even to a
+    background Safari, no site JS required.
 - Log: `/mnt/us/extensions/mirror/plugin.log` (same format). Override with
   `yb-reader --log /tmp/x.log` for testing.
 

@@ -160,11 +160,20 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                     .and_then(|s| s.parse::<u32>().ok())
                     .filter(|m| (16..=216).contains(m))
                     .unwrap_or(72);
+                // Appended after margin_pad (same backward-compatible
+                // pattern): old lines without it keep the book's own
+                // leading.
+                let line_spacing = it
+                    .next()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .filter(|v| (0.8..=1.8).contains(v))
+                    .unwrap_or(1.0);
 
                 settings = Some(ReaderSettings {
                     split,
                     font_size,
                     margin_pad,
+                    line_spacing,
                     contrast,
                     white_cutoff: white_cut,
                     invert,
@@ -201,7 +210,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
             if let Some(s) = p.settings {
                 let sc = s.split;
                 format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{}",
                     k,
                     p.page,
                     p.total,
@@ -218,7 +227,8 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
                     contrast_to_str(s.contrast),
                     s.white_cutoff,
                     if s.invert { "1" } else { "0" },
-                    s.margin_pad
+                    s.margin_pad,
+                    format!("{:.1}", s.line_spacing)
                 )
             } else {
                 format!("{}\t{}\t{}\t{}", k, p.page, p.total, p.ts)

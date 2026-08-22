@@ -34,6 +34,10 @@ pub struct ReaderScreen {
     pw: u32,
     ph: u32,
     loading: Option<std::sync::mpsc::Receiver<Result<BookReady, String>>>,
+    /// Captured right before a reflow, consumed when it lands: the text
+    /// at the top of the current page, so the new pagination can be
+    /// searched for the same words (page numbers don't survive).
+    reflow_anchor: Option<doc_store::Anchor>,
     doc: Option<Rc<Document>>,
     err: Option<String>,
     total: usize,
@@ -109,6 +113,7 @@ impl ReaderScreen {
             page_start_time: Instant::now(),
             avg_secs_per_page: 45.0,
             toc_chapters: Vec::new(),
+            reflow_anchor: None,
             sel_mode: false,
             sel: None,
             highlights: Vec::new(),
@@ -336,6 +341,7 @@ impl ReaderScreen {
         self.page_links.clear();
 
         let Some(doc) = &self.doc else { return };
+        crate::document::apply_layout_css(self.settings.line_spacing);
         let Ok(page) = doc.load_page(self.page_no as i32) else { return };
         let (vw, vh) = self.visual_dims();
         let Some(geom) = crate::render::LayoutGeom::new(
@@ -361,8 +367,8 @@ impl ReaderScreen {
         let s = self.settings;
         let is_pdf = self.is_pdf();
         let gray = self.page_gray.clone();
-        let doc_rc = self.doc.clone();
         let (vw, vh) = self.visual_dims();
+        let doc_rc = if is_pdf { self.doc.clone() } else { None };
 
         Action::Push(Box::new(crate::quick_settings::QuickSettingsSheet::new(
             book,
@@ -371,7 +377,7 @@ impl ReaderScreen {
             tot,
             s,
             is_pdf,
-            doc_rc.clone(),
+            None,
             gray,
             move |new_settings| {
                 if let Some(doc) = &doc_rc {
@@ -456,13 +462,13 @@ impl Screen for ReaderScreen {
         }
 
         // Warm cache check: the document was laid out for exactly these
-        // visual dims and font — anything else (e.g. a rotation change
+        // visual dims and settings — anything else (e.g. a rotation change
         // while away) needs a cold open.
         let (vw, vh) = self.visual_dims();
         if let Ok(mut warm) = WARM.lock() {
-            if let Some((p, SendDoc(doc), total, font_sz, warm_w, warm_h)) = warm.take() {
+            if let Some((p, SendDoc(doc), total, warm_settings, warm_w, warm_h)) = warm.take() {
                 if p == self.path
-                    && (font_sz - self.settings.font_size).abs() < 0.01
+                    && warm_settings == self.settings
                     && warm_w == vw
                     && warm_h == vh
                 {
@@ -485,6 +491,8 @@ impl Screen for ReaderScreen {
             vh,
             self.settings.font_size,
             self.settings.margin_pad,
+            self.settings.line_spacing,
+            None, // fresh open: position comes from positions.txt
         ));
         Action::Redraw
     }
@@ -498,7 +506,7 @@ impl Screen for ReaderScreen {
                         self.path.clone(),
                         SendDoc(doc),
                         self.total,
-                        self.settings.font_size,
+                        self.settings,
                         vw,
                         vh,
                     ));
@@ -532,6 +540,7 @@ impl Screen for ReaderScreen {
             // config (rotation, preset, overlap, crop margins) —
             // invalidates the current render; reflowables must re-layout.
             let layout_changed = (s.font_size - self.settings.font_size).abs() > 0.01
+                || (s.line_spacing - self.settings.line_spacing).abs() > 0.01
                 || s.margin_pad != self.settings.margin_pad
                 || s.split != self.settings.split;
             self.settings = s;
@@ -545,10 +554,26 @@ impl Screen for ReaderScreen {
                 self.page_annotations.clear();
 
                 if !self.is_pdf() {
+                    if self.page_words.is_empty() {
+                        self.extract_words_and_links();
+                    }
+                    let words: String = self
+                        .page_words
+                        .iter()
+                        .map(|(w, _)| w.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let anchor = if words.trim().is_empty() {
+                        None
+                    } else if let Some(doc) = &self.doc {
+                        Some(doc_store::Anchor::capture(doc.as_ref(), self.page_no, self.total, words))
+                    } else {
+                        None
+                    };
+                    self.reflow_anchor = anchor.clone();
                     self.sub_idx = 0;
                     self.page_gray = None;
                     let (vw, vh) = self.visual_dims();
-                    // In-memory instant reflow without re-reading/re-parsing ZIP archive from disk
                     if let Some(doc_rc) = self.doc.take() {
                         if let Ok(doc) = Rc::try_unwrap(doc_rc) {
                             self.loading = Some(doc_store::reflow_async(
@@ -557,6 +582,8 @@ impl Screen for ReaderScreen {
                                 vh,
                                 self.settings.font_size,
                                 self.settings.margin_pad,
+                                self.settings.line_spacing,
+                                anchor,
                             ));
                         } else {
                             self.loading = Some(doc_store::open_async(
@@ -565,6 +592,8 @@ impl Screen for ReaderScreen {
                                 vh,
                                 self.settings.font_size,
                                 self.settings.margin_pad,
+                                self.settings.line_spacing,
+                                anchor,
                             ));
                         }
                     } else {
@@ -574,6 +603,8 @@ impl Screen for ReaderScreen {
                             vh,
                             self.settings.font_size,
                             self.settings.margin_pad,
+                            self.settings.line_spacing,
+                            anchor,
                         ));
                     }
                     return Action::Redraw;
@@ -602,15 +633,36 @@ impl Screen for ReaderScreen {
     fn on_tick(&mut self) -> Action {
         self.time_str = chrome::current_time_str();
         let Some(rx) = &self.loading else {
+            if self.doc.is_some() && self.page_gray.is_some() {
+                let (w, h) = self.dims;
+                self.pre_cache_neighbors(w as u32, h as u32);
+            }
             return Action::Keep;
         };
         match rx.try_recv() {
-            Ok(Ok(BookReady { doc, total })) => {
+            Ok(Ok(BookReady { doc, total, landing })) => {
                 self.doc = Some(Rc::new(doc.0));
                 self.total = total;
                 self.scan_toc_chapters();
                 self.highlights = crate::notes::load(&self.book_name());
                 self.loading = None;
+
+                // Reflow survival: land on the page carrying the same
+                // top-of-page words; if the text match missed, the
+                // fraction estimate still beats a stale page number.
+                if let Some(target) = landing {
+                    self.page_no = target.min(total.saturating_sub(1));
+                    self.sub_idx = 0;
+                    self.page_gray = None;
+                } else if let Some(a) = self.reflow_anchor.take() {
+                    let target = (a.fraction * total as f64).round() as usize;
+                    let target = target.min(total.saturating_sub(1));
+                    if target != self.page_no {
+                        self.page_no = target;
+                        self.sub_idx = 0;
+                        self.page_gray = None;
+                    }
+                }
 
                 if self.pending_turns != 0 {
                     let steps = self.settings.split.total_steps(self.total);
@@ -653,9 +705,10 @@ impl Screen for ReaderScreen {
             return;
         }
 
-        // If no cached snapshot exists AND doc is still loading:
-        if self.page_gray.is_none() && self.doc.is_none() {
-            p.text_center(h / 2, 10.0, fg_color, "Opening…");
+        // If doc is loading / reflowing:
+        if self.loading.is_some() && self.page_gray.is_none() {
+            let msg = if self.total > 0 { "Reflowing…" } else { "Opening…" };
+            p.text_center(h / 2, 10.0, fg_color, msg);
             let name = p.truncate(8.0, &self.book_name(), p.width_pt() - 24.0);
             p.text_center(h / 2 + pt(16.0), 8.0, fg_color, &name);
             return;
@@ -706,12 +759,9 @@ impl Screen for ReaderScreen {
             p.blit_gray(0, 0, w, h, gray, w as usize);
         }
 
-        // Trigger neighbor pre-caching and word/link extraction for selection & lookups
-        if self.doc.is_some() {
-            self.pre_cache_neighbors(w as u32, h as u32);
-            if self.page_words.is_empty() {
-                self.extract_words_and_links();
-            }
+        // Word/link extraction for selection & lookups
+        if self.doc.is_some() && self.page_words.is_empty() {
+            self.extract_words_and_links();
         }
 
         // Header status line + progress footer

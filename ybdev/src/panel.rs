@@ -230,7 +230,13 @@ impl Panel {
         }
     }
 
-    /// Partial refresh (no flash), the default for page turns.
+    /// Partial refresh (no flash), the default for page turns. GL16, not
+    /// AUTO: AUTO's histogram hints resolve text-like regions to DU —
+    /// the ~2-level mode — which snaps the renderer's anti-aliasing ramp
+    /// to black/white and reads as blurry text on glass (2026-08-21:
+    /// source framebuffer verified crisp, ~4.6% AA-gray pixels). GL16
+    /// reproduces all 16 levels without flashing, at ~1.5–2× DU's
+    /// update time — the trade a text reader wants.
     pub fn refresh_partial(&mut self, x: u32, y: u32, w: u32, h: u32) {
         self.fence();
         self.marker = self.marker.wrapping_add(1);
@@ -243,7 +249,7 @@ impl Panel {
         let _ = mtk::send_update(
             self.fb.as_raw_fd(),
             region,
-            mtk::WAVEFORM_AUTO,
+            mtk::WAVEFORM_GL16,
             mtk::UPDATE_MODE_PARTIAL,
             self.marker,
         );

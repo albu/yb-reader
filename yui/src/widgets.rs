@@ -175,18 +175,9 @@ pub fn emergency_wake_restore() {
         }
     }
     // Wi-Fi back to the framework default (harmless if it never went
-    // down). wifid before com.lab126.cmd — the cmd property is
-    // framework-owned and never answers without one (same order as
-    // the reader's turn_on_wifi).
-    let _ = std::process::Command::new("/sbin/ifconfig")
-        .args(&["wlan0", "up"])
-        .output();
-    let _ = std::process::Command::new("lipc-set-prop")
-        .args(&["-i", "com.lab126.wifid", "enable", "1"])
-        .status();
-    let _ = std::process::Command::new("lipc-set-prop")
-        .args(&["-i", "com.lab126.cmd", "wirelessEnable", "1"])
-        .status();
+    // down). No restore verification here: this is a teardown path, it
+    // must not spawn threads.
+    ybdev::wifi::turn_on();
 }
 
 /// Enter kernel suspend-to-RAM. Returns when the SoC wakes (power key or
@@ -243,15 +234,7 @@ impl SleepScreen {
         }
 
         // Shut off Wi-Fi radio power amplifier to eliminate standby drain
-        let _ = std::process::Command::new("/sbin/ifconfig")
-            .args(&["wlan0", "down"])
-            .output();
-        let _ = std::process::Command::new("lipc-set-prop")
-            .args(&["-i", "com.lab126.cmd", "wirelessEnable", "0"])
-            .status();
-        let _ = std::process::Command::new("lipc-set-prop")
-            .args(&["-i", "com.lab126.wifid", "enable", "0"])
-            .status();
+        ybdev::wifi::turn_off();
 
         let image_raw = pick_random_screensaver();
 
@@ -378,16 +361,14 @@ impl Screen for SleepScreen {
         // Handled cleanly: retract what the emergency path would restore.
         SAVED_FL_BRIGHT.store(-1, Ordering::SeqCst);
         SAVED_FL_TONE.store(-1, Ordering::SeqCst);
-        // Restore Wi-Fi
-        let _ = std::process::Command::new("/sbin/ifconfig")
-            .args(&["wlan0", "up"])
-            .output();
-        let _ = std::process::Command::new("lipc-set-prop")
-            .args(&["-i", "com.lab126.cmd", "wirelessEnable", "1"])
-            .status();
-        let _ = std::process::Command::new("lipc-set-prop")
-            .args(&["-i", "com.lab126.wifid", "enable", "1"])
-            .status();
+        // Restore Wi-Fi, then verify the restore actually associated.
+        // This is the only code that runs on the power-button wake path
+        // (the App resume hook is skipped while the sleep screen is on
+        // top), and a restored radio that never associates scans at
+        // ~3× the idle drain — ybdev::wifi::verify_or_power_down has
+        // the measured numbers and the drain guard.
+        ybdev::wifi::turn_on();
+        ybdev::wifi::verify_or_power_down();
 
         // Drain accounting: %/h over this sleep session, plus the suspend
         // count — one entry per wake, so suspends-1 is how many wakes were

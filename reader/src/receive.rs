@@ -480,6 +480,10 @@ impl Screen for ReceiveScreen {
         }
     }
 
+    fn holds_awake(&self) -> bool {
+        true
+    }
+
     fn tick_interval(&self) -> Duration {
         Duration::from_millis(300)
     }

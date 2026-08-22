@@ -28,20 +28,14 @@ pub fn is_wifi_on() -> bool {
 }
 
 pub fn turn_on_wifi() {
-    // The interface must be administratively up before wifid can
-    // associate: the off path (and a suspend) can leave wlan0 down, and
-    // `wifid enable 1` alone never raises it — the curtain tile turned
-    // Wi-Fi off fine and then could never turn it back on (2026-08-19).
-    // Mirrors guard's emergency_wake_restore, the proven wake path.
-    // wifid before com.lab126.cmd: cmd is framework-owned and never
-    // answers in takeover mode.
-    let _ = Command::new("/sbin/ifconfig").args(["wlan0", "up"]).status();
-    let _ = Command::new("lipc-set-prop")
-        .args(["-i", "com.lab126.wifid", "enable", "1"])
-        .status();
-    let _ = Command::new("lipc-set-prop")
-        .args(["-i", "com.lab126.cmd", "wirelessEnable", "1"])
-        .status();
+    // The sequence lives in ybdev::wifi (shared with yui's sleep
+    // screen). History kept here: the interface must be administratively
+    // up before wifid can associate — the off path (and a suspend) can
+    // leave wlan0 down, and `wifid enable 1` alone never raises it — the
+    // curtain tile turned Wi-Fi off fine and then could never turn it
+    // back on (2026-08-19). wifid before com.lab126.cmd: cmd is
+    // framework-owned and never answers in takeover mode.
+    ybdev::wifi::turn_on();
 }
 
 pub fn ensure_wifi() {

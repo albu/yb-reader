@@ -297,6 +297,10 @@ pub struct ReaderSettings {
     pub font_size: f32,
     /// Reflow margin padding in pixels (e.g. 36 = compact, 72 = normal, 108 = wide)
     pub margin_pad: u32,
+    /// Line-spacing multiplier (1.0 = the book's own leading; 1.1–1.6
+    /// for airier text). Layout-affecting like font size — changes
+    /// repaginate, so the anchor path carries the position.
+    pub line_spacing: f32,
     /// Contrast & text darkness curve
     pub contrast: ContrastMode,
     /// Background white snap cutoff (e.g. 0 = off, 240, 230)
@@ -315,6 +319,7 @@ impl Default for ReaderSettings {
             split: SplitConfig::default(),
             font_size: 11.0,
             margin_pad: 72,
+            line_spacing: 1.0,
             contrast: ContrastMode::Normal,
             white_cutoff: 0,
             invert: false,

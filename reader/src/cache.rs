@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use crate::split::ReaderSettings;
 
 const CACHE_DIR: &str = "/mnt/us/extensions/reader/cache";
-const MAGIC: &[u8; 8] = b"YBSNAP04";
+const MAGIC: &[u8; 8] = b"YBSNAP11"; // 11: Includes line_spacing in snapshot key
 pub const MAX_CACHED_FILES: usize = 24; // orientation/preset variants coexist
 
 /// Byte code for the split preset — part of the snapshot's identity.
@@ -65,12 +65,14 @@ pub fn load_snapshot_from(
 ) -> Option<Vec<u8>> {
     let path = cache_file_path_at(dir, book_name, page_no, sub_idx);
     let bytes = fs::read(&path).ok()?;
-    if bytes.len() < 58 {
+    let (header_len, snap_spacing) = if bytes.len() >= 62 && &bytes[0..8] == MAGIC {
+        let sp = f32::from_le_bytes(bytes[58..62].try_into().ok()?);
+        (62, sp)
+    } else if bytes.len() >= 58 && &bytes[0..8] == b"YBSNAP10" {
+        (58, 1.0f32)
+    } else {
         return None;
-    }
-    if &bytes[0..8] != MAGIC {
-        return None;
-    }
+    };
 
     let snap_page = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
     let snap_sub = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
@@ -98,6 +100,7 @@ pub fn load_snapshot_from(
         || snap_w != w
         || snap_h != h
         || (snap_font - settings.font_size).abs() > 0.01
+        || (snap_spacing - settings.line_spacing).abs() > 0.01
         || snap_margin != settings.margin_pad
         || snap_contrast != (settings.contrast as u8)
         || snap_invert != settings.invert
@@ -113,7 +116,7 @@ pub fn load_snapshot_from(
     }
 
     let expected_len = (w * h) as usize;
-    let pixel_data = &bytes[58..];
+    let pixel_data = &bytes[header_len..];
     if pixel_data.len() != expected_len {
         return None;
     }
@@ -149,7 +152,7 @@ pub fn save_snapshot_to(
     let _ = fs::create_dir_all(dir);
     let path = cache_file_path_at(dir, book_name, page_no, sub_idx);
 
-    let mut buf = Vec::with_capacity(58 + pixels.len());
+    let mut buf = Vec::with_capacity(62 + pixels.len());
     buf.extend_from_slice(MAGIC);
     buf.extend_from_slice(&(page_no as u32).to_le_bytes());
     buf.extend_from_slice(&(sub_idx as u32).to_le_bytes());
@@ -168,6 +171,7 @@ pub fn save_snapshot_to(
     buf.extend_from_slice(&sc.margin_top.to_le_bytes());
     buf.extend_from_slice(&sc.margin_right.to_le_bytes());
     buf.extend_from_slice(&sc.margin_bottom.to_le_bytes());
+    buf.extend_from_slice(&settings.line_spacing.to_le_bytes());
     buf.extend_from_slice(pixels);
 
     let tmp = format!("{}.tmp", path.display());
@@ -286,6 +290,11 @@ mod tests {
         let mut diff_crop = settings;
         diff_crop.split.margin_top = 0.10;
         assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_crop, w, h), None);
+
+        // Different line spacing -> Rejected
+        let mut diff_spacing = settings;
+        diff_spacing.line_spacing = 1.4;
+        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_spacing, w, h), None);
 
         let _ = fs::remove_dir_all(dir);
     }

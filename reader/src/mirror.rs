@@ -6,6 +6,11 @@
 //! fetched PNG frames are decoded into a pixel cache that draw() blits,
 //! so an overlay pop (frontlight) re-presents the frame without a
 //! re-fetch.
+//!
+//! Two modes. Read (default): taps and E/W swipes turn pages with the
+//! TURN_KEYS preset. Control (two-finger tap to toggle): taps click at
+//! their mirrored coordinates, swipes scroll — the Kindle becomes a
+//! touchpad for the window.
 
 use std::time::{Duration, Instant};
 
@@ -15,11 +20,56 @@ use ybdev::log::{now_ms, plog};
 
 use crate::protocol::{self, Conn, Resp};
 use crate::wifi;
-use yui::painter::{pt, Painter};
+use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
 const CONF_PATH: &str = "/mnt/us/extensions/mirror/mirror.conf";
 const PING_EVERY_MS: u128 = 15_000;
+
+/// Read-mode page-turn keys, from mirror.conf TURN_KEYS=.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TurnPreset {
+    /// ←/→ — readers whose own JS flips pages on arrows (the classic
+    /// yb-mirror behavior, verified against books.example.com).
+    Arrows,
+    /// Space / Shift+Space — readers that page on scroll keys. Only
+    /// works where the site binds Space itself: a pid-posted Space (or
+    /// ↓) never triggers Safari's *native* space-scroll, which needs
+    /// first-responder focus in the page.
+    Space,
+    /// PageDown / PageUp — native full-page keys, delivered even to a
+    /// background Safari (verified), no site JS required.
+    Pages,
+}
+
+impl TurnPreset {
+    fn from_conf(v: &Option<String>) -> TurnPreset {
+        match v.as_deref().map(str::trim) {
+            Some("space") => TurnPreset::Space,
+            Some("pages") => TurnPreset::Pages,
+            _ => TurnPreset::Arrows,
+        }
+    }
+
+    /// The query that turns one page forward/back. It carries its own
+    /// params; act() appends wait/id/frame — same turn machinery for
+    /// every action.
+    fn next(&self) -> &'static str {
+        match self {
+            TurnPreset::Arrows => "/key?k=right",
+            TurnPreset::Space => "/key?k=space",
+            TurnPreset::Pages => "/key?k=pagedown",
+        }
+    }
+
+    fn prev(&self) -> &'static str {
+        match self {
+            TurnPreset::Arrows => "/key?k=left",
+            TurnPreset::Space => "/key?k=space&shift=1",
+            TurnPreset::Pages => "/key?k=pageup",
+        }
+    }
+}
 
 pub struct MirrorScreen {
     w: u32,
@@ -37,11 +87,15 @@ pub struct MirrorScreen {
     last_frame: Option<Vec<u8>>,
     /// Decoded current frame (tight w*h grayscale).
     gray: Option<Vec<u8>>,
+    /// Control mode: taps click, swipes scroll.
+    control: bool,
+    preset: TurnPreset,
 }
 
 impl MirrorScreen {
     pub fn new(w: u32, h: u32) -> MirrorScreen {
         let conf = config::read(CONF_PATH);
+        let preset = TurnPreset::from_conf(&conf.turn_keys);
         MirrorScreen {
             w,
             h,
@@ -57,6 +111,8 @@ impl MirrorScreen {
             last_ping: 0,
             last_frame: None,
             gray: None,
+            control: false,
+            preset,
         }
     }
 
@@ -234,22 +290,26 @@ impl MirrorScreen {
         }
     }
 
-    fn turn(&mut self, endpoint: &str) -> Action {
+    /// One action on the mirrored window — key press, tap, scroll — with
+    /// the shared turn semantics (idempotency, settle-polling, loss
+    /// probe). `action` is the endpoint plus its own params, e.g.
+    /// "/key?k=space&shift=1" or "/tap?x=100&y=200".
+    fn act(&mut self, action: &str) -> Action {
         if self.busy {
             return Action::Keep;
         }
         self.busy = true;
-        let a = self.turn_inner(endpoint);
+        let a = self.act_inner(action);
         self.busy = false;
         a
     }
 
-    fn turn_inner(&mut self, endpoint: &str) -> Action {
-        // Idempotency key: one id per tap, reused across retries.
+    fn act_inner(&mut self, action: &str) -> Action {
+        // Idempotency key: one id per action, reused across retries.
         self.turn_seq += 1;
         let path = format!(
-            "{}?wait=1&id={}&{}",
-            endpoint,
+            "{}&wait=1&id={}&{}",
+            action,
             self.turn_seq,
             self.frame_query()
         );
@@ -358,11 +418,23 @@ impl Screen for MirrorScreen {
         plog("mirror exit");
     }
 
+    fn holds_awake(&self) -> bool {
+        true
+    }
+
     fn draw(&mut self, p: &mut Painter) {
         p.clear(255);
         let (_, h) = p.size();
         if let Some(gray) = &self.gray {
             p.blit_gray(0, 0, self.w as i32, self.h as i32, gray, self.w as usize);
+            if self.control {
+                // The frame is WYSIWYG, so mark the one state that changes
+                // what touches do. Top-left, opposite the read-mode
+                // screen-clean corner.
+                let bw = p.text_width(7.0, "CTRL") as i32 + pt(10.0);
+                p.rect(Rect::new(0, 0, bw, pt(15.0)), 0);
+                p.text(pt(5.0), pt(10.5), 7.0, 255, "CTRL");
+            }
         } else {
             // No frame yet (server was down at entry): own the state
             // instead of pushing an overlay — an overlay's dismiss gesture
@@ -388,8 +460,33 @@ impl Screen for MirrorScreen {
                 _ => Action::Pop,
             };
         }
+        // Control mode: the Kindle is a touchpad for the mirrored window.
+        // Taps click at their mirrored coordinates, swipes scroll (raw
+        // delta, natural-scroll sign: finger up moves the content up).
+        // Exit stays with the app-level corner-back swipe.
+        if self.control {
+            return match g {
+                Gesture::Tap { x, y } => self.act(&format!("/tap?x={}&y={}", x, y)),
+                Gesture::Swipe { x, y, ex, ey, .. } => self.act(&format!(
+                    "/scroll?dx={}&dy={}",
+                    ex as i32 - x as i32,
+                    ey as i32 - y as i32
+                )),
+                Gesture::TwoFingerTap => {
+                    self.control = false;
+                    plog("mirror: read mode");
+                    Action::Redraw
+                }
+                _ => Action::Keep,
+            };
+        }
         let (w, h) = (self.w as i32, self.h as i32);
         match g {
+            Gesture::TwoFingerTap => {
+                self.control = true;
+                plog("mirror: control mode");
+                Action::Redraw
+            }
             Gesture::Tap { x, y } => {
                 let (x, y) = (x as i32, y as i32);
                 // Screen-clean lives in the top-right corner.
@@ -400,18 +497,28 @@ impl Screen for MirrorScreen {
                     }
                     return Action::Keep;
                 }
-                let endpoint = if x < w / 3 { "/prev" } else { "/next" };
-                self.turn(endpoint)
+                if x < w / 3 {
+                    self.act(self.preset.prev())
+                } else {
+                    self.act(self.preset.next())
+                }
             }
-            Gesture::Swipe { dir: SwipeDir::East, .. } => self.turn("/prev"),
-            Gesture::Swipe { dir: SwipeDir::West, .. } => self.turn("/next"),
+            Gesture::Swipe { dir: SwipeDir::East, .. } => self.act(self.preset.prev()),
+            Gesture::Swipe { dir: SwipeDir::West, .. } => self.act(self.preset.next()),
             // down/up/anything else: exit, even mid-sync
             Gesture::Swipe { .. } => Action::Pop,
-            Gesture::TwoFingerTap => Action::Keep,
             _ => Action::Keep,
         }
     }
 
+
+    /// In Control mode every swipe belongs to the mirrored window — the
+    /// app-level edges (top-edge brightness, corner-back) would eat page
+    /// scrolls that start near an edge. Two-finger tap returns to Read
+    /// mode, where the edges (and vertical-swipe exit) work again.
+    fn default_edges(&self) -> bool {
+        !self.control
+    }
 
     fn on_tick(&mut self) -> Action {
         self.ping_tick();

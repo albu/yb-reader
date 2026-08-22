@@ -44,6 +44,15 @@ pub fn gap_is_suspend(expected: std::time::Duration, wall: std::time::Duration) 
     wall > expected + std::time::Duration::from_secs(5)
 }
 
+/// No input for this long → the sleep screen (whose tick suspends).
+/// Stock-t1 semantics, enforced by the app rather than powerd: powerd's
+/// t1 path depends on the framework yb-reader freezes in takeover, and
+/// a wedged wlan stack resets its timer forever via wmt t1TimerReset
+/// spam (measured 2026-08-21: 27 min awake untouched at 121mA, 3%
+/// battery). Screens with a live reason override via `holds_awake`;
+/// USB power is checked at the deadline.
+const IDLE_SUSPEND: std::time::Duration = std::time::Duration::from_secs(600);
+
 impl App {
     /// Loads the shared font; panel and input are handed over for good.
     pub fn new(panel: Panel, input: Input) -> Result<App, String> {
@@ -84,6 +93,11 @@ impl App {
         if !self.apply(Action::Push(root)) {
             return;
         }
+        // Input-idle wall clock — wall, not monotonic: powerd can
+        // suspend under the poll and monotonic stops with it, freezing
+        // the idle measurement across exactly the sleeps this timer
+        // exists to enforce.
+        let mut last_input = std::time::SystemTime::now();
         while !self.stack.is_empty() {
             let interval = self
                 .stack
@@ -101,6 +115,12 @@ impl App {
                 .next_gesture(interval)
                 .map(|g| orient.gesture_to_visual(pw, ph, g));
             let wall = before.elapsed().unwrap_or_default();
+            // Any gesture is user activity — including the power press
+            // that wakes us (updating here, before the swallow below,
+            // is what keeps a long sleep from instantly re-sleeping).
+            if gesture.is_some() {
+                last_input = std::time::SystemTime::now();
+            }
             // powerd (or the sleep screen) suspended us under the loop.
             // Hand the app its resume hook and repaint, then still
             // dispatch whatever input woke us — with one exception: the
@@ -129,6 +149,22 @@ impl App {
             };
             if !self.apply(action) {
                 break;
+            }
+            // Idle sleep: untouched past the deadline, no live session
+            // on top, no USB power → the sleep screen, exactly as if
+            // the power button had been pressed. Its 300ms tick is
+            // what carries us into suspend; the wake path restores.
+            if last_input.elapsed().unwrap_or_default() >= IDLE_SUSPEND
+                && !self
+                    .stack
+                    .last()
+                    .map(|s| s.is_sleep() || s.holds_awake())
+                    .unwrap_or(false)
+                && !ybdev::sysinfo::vbus()
+            {
+                if !self.apply(Action::Push(Box::new(crate::widgets::SleepScreen::new()))) {
+                    break;
+                }
             }
         }
         self.panel.refresh_full();

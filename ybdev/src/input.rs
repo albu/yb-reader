@@ -595,6 +595,13 @@ impl Input {
             if t.long_press_fired {
                 return None; // Finger lifted after long-press already triggered while holding!
             }
+            // A contact that never reported both axes is not a gesture:
+            // emitting its default 0s once landed a mid-page tap in the
+            // top-bar bookmark zone (2026-08-22, Tap{x:1078,y:0} with the
+            // finger at y≈1100).
+            if !t.x_set || !t.y_set {
+                return None;
+            }
             let dx = t.x - t.down_x;
             let dy = t.y - t.down_y;
             if dx.abs() > SWIPE_MIN_DIST || dy.abs() > SWIPE_MIN_DIST {
@@ -617,9 +624,12 @@ impl Input {
                     ey: t.y.max(0) as u32,
                 });
             }
+            // Down position, not last: the lift-off frame can carry a
+            // junk coordinate (the same y→0 glitch), and for hit
+            // targets where the finger LANDED is the truth anyway.
             return Some(Gesture::Tap {
-                x: t.x.max(0) as u32,
-                y: t.y.max(0) as u32,
+                x: t.down_x.max(0) as u32,
+                y: t.down_y.max(0) as u32,
             });
         }
 
