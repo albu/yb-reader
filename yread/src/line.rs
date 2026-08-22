@@ -316,22 +316,26 @@ fn break_segment(
         return Vec::new();
     }
 
-    // Try Knuth-Plass optimal line breaking
-    if let Some(lines) = knuth_plass(
-        text,
-        &tokens,
-        first_line_indent_px,
-        max_width,
-        base_font_size,
-        line_spacing_mult,
-        align,
-        fonts,
-        cache,
-        lang,
-        is_last_paragraph_segment,
-    ) {
-        if !lines.is_empty() {
-            return lines;
+    // Knuth-Plass optimal line breaking is strictly for fully-justified text.
+    // For centered, left-aligned, or right-aligned text (like headings and lists),
+    // use greedy ragged line breaking to preserve natural word spacing.
+    if align == TextAlign::Justify {
+        if let Some(lines) = knuth_plass(
+            text,
+            &tokens,
+            first_line_indent_px,
+            max_width,
+            base_font_size,
+            line_spacing_mult,
+            align,
+            fonts,
+            cache,
+            lang,
+            is_last_paragraph_segment,
+        ) {
+            if !lines.is_empty() {
+                return lines;
+            }
         }
     }
 

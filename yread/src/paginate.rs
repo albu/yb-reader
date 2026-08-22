@@ -346,19 +346,14 @@ pub fn paginate_chapter_with_images(
                 }
                 cur_y += config.font_size * config.paragraph_spacing;
             }
-            Block::Heading { level, runs } => {
-                let size_mult = match level {
-                    1 => 1.35,
-                    2 => 1.20,
-                    _ => 1.10,
-                };
+            Block::Heading { level: _, runs } => {
                 let lines = break_paragraph_lines_streaming(
                     &chapter.text,
                     runs,
                     0.0,
                     content_w,
-                    config.font_size * size_mult,
-                    config.line_spacing,
+                    config.font_size,
+                    1.2,
                     TextAlign::Center,
                     fonts,
                     cache,
