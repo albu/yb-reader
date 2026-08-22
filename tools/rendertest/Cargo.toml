@@ -5,4 +5,6 @@ edition.workspace = true
 
 [dependencies]
 yui = { path = "../../yui" }
+yread = { path = "../../yread" }
+hypher = "0.1"
 png = "0.17"

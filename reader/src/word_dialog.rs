@@ -9,6 +9,7 @@ pub struct WordDialog {
     on_action: Option<Box<dyn FnOnce(WordAction) -> Action>>,
     bg: Option<Vec<u8>>,
     dims: (i32, i32),
+    chk_rect: Rect,
 }
 
 pub enum WordAction {
@@ -29,6 +30,7 @@ impl WordDialog {
             on_action: Some(Box::new(on_action)),
             bg,
             dims: (1236, 1648),
+            chk_rect: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -43,7 +45,7 @@ impl WordDialog {
 
 impl Screen for WordDialog {
     fn default_edges(&self) -> bool {
-        false
+        true
     }
 
     fn on_enter(&mut self) -> Action {
@@ -64,7 +66,6 @@ impl Screen for WordDialog {
         // Bottom docked card
         let card_w = w - pt(16.0);
         let card_x = pt(8.0);
-
 
         // Wrap text to calculate required height
         let max_text_w = (card_w - pt(28.0)) as f32;
@@ -118,6 +119,7 @@ impl Screen for WordDialog {
         let chk_x = card_x + card_w - chk_w - pt(10.0);
         let chk_y = card_y + pt(6.0);
         let chk_rect = Rect::new(chk_x, chk_y, chk_w, chk_h);
+        self.chk_rect = chk_rect;
 
         if self.is_learning {
             p.rect(chk_rect, 0);
@@ -143,27 +145,14 @@ impl Screen for WordDialog {
         }
     }
 
-
     fn on_gesture(&mut self, g: Gesture) -> Action {
-        let (w, h) = self.dims;
-        let card_w = w - pt(16.0);
-        let card_x = pt(8.0);
-        let card_h = pt(120.0);
-        let card_y = h - card_h - pt(10.0);
-
-        let chk_w = pt(72.0);
-        let chk_h = pt(22.0);
-        let chk_x = card_x + card_w - chk_w - pt(10.0);
-        let chk_y = card_y + pt(6.0);
-        let chk_rect = Rect::new(chk_x, chk_y, chk_w, chk_h);
-
         match g {
             Gesture::Tap { x, y } => {
                 let px = x as i32;
                 let py = y as i32;
 
                 // Tapping the Learn checkbox toggles learning
-                if chk_rect.contains(px, py) {
+                if self.chk_rect.contains(px, py) {
                     return self.dispatch(WordAction::StarLearning);
                 }
 
@@ -171,9 +160,9 @@ impl Screen for WordDialog {
                 self.dispatch(WordAction::Close)
             }
             Gesture::Swipe { .. } => self.dispatch(WordAction::Close),
+            Gesture::LongPress { .. } => self.dispatch(WordAction::Close),
             _ => Action::Keep,
         }
     }
-
 }
 

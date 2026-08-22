@@ -91,7 +91,6 @@ impl CurtainScreen {
 
     /// Reader-opened curtain: adds the ROTATE pill (cycles the book's
     /// orientation, preset/crop untouched).
-    #[allow(dead_code)]
     pub fn new_with_rotation(ctx: RotateCtx) -> CurtainScreen {
         Self::build(Some(ctx))
     }
@@ -590,4 +589,3 @@ mod tests {
         );
     }
 }
-

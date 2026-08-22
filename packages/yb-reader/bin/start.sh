@@ -62,4 +62,16 @@ lipc-set-prop com.lab126.pillow disableEnablePillow enable 2>/dev/null
 # stays on the framebuffer until the next tap. Starting the home booklet
 # forces the redraw (a harmless re-launch if home is already current).
 lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home 2>/dev/null
+
+# Takeover handoff: a session launched by start.sh while takeover mode is
+# armed (DONT_START_FRAMEWORK present — e.g. the deploy's fallback path)
+# must still be able to return to the stock UI. boot.sh owns this handoff
+# when the upstart job runs the reader; mirror it here so "Exit to Kindle"
+# works from either launcher instead of stranding the device frozen.
+if [ "$rc" -eq 42 ] && [ -e /mnt/us/DONT_START_FRAMEWORK ]; then
+    rm -f /mnt/us/DONT_START_FRAMEWORK
+    killall -CONT awesome webreader kfxreader kfxview KPPMainApp pillowd \
+        kb scanner-main JunoStatusBarDr 2>/dev/null
+    initctl start framework 2>/dev/null || true
+fi
 exit $rc

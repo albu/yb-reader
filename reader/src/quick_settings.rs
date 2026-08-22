@@ -204,6 +204,19 @@ impl Screen for QuickSettingsSheet {
         }
         y += pt(ROW_H_PT) + pt(6.0);
 
+        // Row 4: Night / Invert (page inversion — the old night-reading
+        // toggle the settings unification dropped).
+        p.text(pad, y + pt(15.0), 8.5, 0, "NIGHT");
+        let inv_btn = Rect::new(w - pad - pt(120.0), y, pt(120.0), pt(BTN_H_PT));
+        if self.settings.invert {
+            p.rect(inv_btn, 0);
+            p.text_center_in(inv_btn.x, inv_btn.x + inv_btn.w, y + pt(15.0), 7.5, 255, "ON");
+        } else {
+            p.rect_outline_t(inv_btn, 1, 120);
+            p.text_center_in(inv_btn.x, inv_btn.x + inv_btn.w, y + pt(15.0), 7.5, 0, "OFF");
+        }
+        y += pt(ROW_H_PT) + pt(6.0);
+
         // Row 4: Action Footer (tap above · swipe down hint)
         p.text_center_in(
             pad,
@@ -322,6 +335,14 @@ impl Screen for QuickSettingsSheet {
                 self.settings.contrast = *c_mode;
                 return self.apply_change();
             }
+        }
+        y += pt(ROW_H_PT) + pt(6.0);
+
+        // Row 4: Night / Invert
+        let inv_btn = Rect::new(w - pad - pt(120.0), y, pt(120.0), pt(BTN_H_PT));
+        if inv_btn.contains(vx, vy) {
+            self.settings.invert = !self.settings.invert;
+            return self.apply_change();
         }
 
         Action::Keep

@@ -63,6 +63,7 @@ pub fn load_snapshot_from(
     settings: &ReaderSettings,
     w: u32,
     h: u32,
+    engine: u8,
 ) -> Option<Vec<u8>> {
     let path = cache_file_path_at(dir, book_name, page_no, sub_idx);
     let bytes = fs::read(&path).ok()?;
@@ -85,6 +86,7 @@ pub fn load_snapshot_from(
     let snap_invert = bytes[33] != 0;
     // XOR so a mismatch shows up as nonzero in one integer compare path.
     let snap_preset = preset_code(&settings.split.preset) ^ bytes[34];
+    let snap_engine = engine ^ bytes[35];
     let snap_rotation = u16::from_le_bytes(bytes[36..38].try_into().ok()?) ^ settings.split.rotation;
     let snap_overlap = f32::from_le_bytes(bytes[38..42].try_into().ok()?);
     let snap_ml = f32::from_le_bytes(bytes[42..46].try_into().ok()?);
@@ -106,6 +108,7 @@ pub fn load_snapshot_from(
         || snap_contrast != (settings.contrast as u8)
         || snap_invert != settings.invert
         || snap_preset != 0
+        || snap_engine != 0
         || snap_rotation != 0
         || !near(snap_overlap, settings.split.overlap)
         || !near(snap_ml, settings.split.margin_left)
@@ -132,8 +135,9 @@ pub fn load_snapshot(
     settings: &ReaderSettings,
     w: u32,
     h: u32,
+    engine: u8,
 ) -> Option<Vec<u8>> {
-    load_snapshot_from(CACHE_DIR, book_name, page_no, sub_idx, settings, w, h)
+    load_snapshot_from(CACHE_DIR, book_name, page_no, sub_idx, settings, w, h, engine)
 }
 
 /// Save page snapshot to cache and run garbage collection.
@@ -147,6 +151,7 @@ pub fn save_snapshot_to(
     w: u32,
     h: u32,
     pixels: &[u8],
+    engine: u8,
 ) {
     if pixels.len() != (w * h) as usize {
         return;
@@ -165,7 +170,7 @@ pub fn save_snapshot_to(
     buf.push(settings.contrast as u8);
     buf.push(if settings.invert { 1 } else { 0 });
     buf.push(preset_code(&settings.split.preset));
-    buf.push(0u8); // padding: rotation below is u16-aligned
+    buf.push(engine);
     buf.extend_from_slice(&settings.split.rotation.to_le_bytes());
     let sc = settings.split;
     buf.extend_from_slice(&sc.overlap.to_le_bytes());
@@ -193,6 +198,7 @@ pub fn save_snapshot(
     w: u32,
     h: u32,
     pixels: &[u8],
+    engine: u8,
 ) {
     if pixels.len() != (w * h) as usize {
         return;
@@ -201,7 +207,7 @@ pub fn save_snapshot(
     let s = *settings;
     let data = pixels.to_vec();
     std::thread::spawn(move || {
-        save_snapshot_to(CACHE_DIR, &name, page_no, sub_idx, &s, w, h, &data);
+        save_snapshot_to(CACHE_DIR, &name, page_no, sub_idx, &s, w, h, &data, engine);
     });
 }
 
@@ -258,46 +264,50 @@ mod tests {
         let h = 10;
         let pixels = vec![128u8; (w * h) as usize];
 
-        save_snapshot_to(dir, "my_book.epub", 5, 0, &settings, w, h, &pixels);
+        save_snapshot_to(dir, "my_book.epub", 5, 0, &settings, w, h, &pixels, 0);
 
         // Exact match -> Loads successfully
-        let loaded = load_snapshot_from(dir, "my_book.epub", 5, 0, &settings, w, h);
+        let loaded = load_snapshot_from(dir, "my_book.epub", 5, 0, &settings, w, h, 0);
         assert_eq!(loaded, Some(pixels.clone()));
 
         // Different page -> Rejected
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 6, 0, &settings, w, h), None);
+        assert_eq!(load_snapshot_from(dir, "my_book.epub", 6, 0, &settings, w, h, 0), None);
+
+        // Different engine -> Rejected (a yread bitmap must never pose as
+        // a mupdf one and vice versa — the engines paginate differently).
+        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &settings, w, h, 1), None);
 
         // Different font size -> Rejected
         let mut diff_font = settings;
         diff_font.font_size = 14.0;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_font, w, h), None);
+        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_font, w, h, 0), None);
 
         // Different invert -> Rejected
         let mut diff_inv = settings;
         diff_inv.invert = true;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_inv, w, h), None);
+        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_inv, w, h, 0), None);
 
         // Different rotation -> Rejected (the bug this header field exists
         // for: portrait renders used to pose as landscape and vice versa).
         let mut diff_rot = settings;
         diff_rot.split.rotation = 270;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_rot, w, h), None);
+        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_rot, w, h, 0), None);
 
         // Different preset -> Rejected (H2 and H3 share visual dims and
         // sub numbering but crop different regions).
         let mut diff_preset = settings;
         diff_preset.split.preset = crate::split::SplitPreset::Horizontal2;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_preset, w, h), None);
+        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_preset, w, h, 0), None);
 
         // Different crop margin -> Rejected (the big-PDF tuning workflow).
         let mut diff_crop = settings;
         diff_crop.split.margin_top = 0.10;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_crop, w, h), None);
+        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_crop, w, h, 0), None);
 
         // Different line spacing -> Rejected
         let mut diff_spacing = settings;
         diff_spacing.line_spacing = 1.4;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_spacing, w, h), None);
+        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_spacing, w, h, 0), None);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -315,7 +325,7 @@ mod tests {
         // Create more snapshots than the cap
         for i in 0..(MAX_CACHED_FILES + 8) {
             let book_name = format!("book_{}.epub", i);
-            save_snapshot_to(dir, &book_name, i, 0, &settings, w, h, &pixels);
+            save_snapshot_to(dir, &book_name, i, 0, &settings, w, h, &pixels, 0);
             std::thread::sleep(std::time::Duration::from_millis(15));
         }
 

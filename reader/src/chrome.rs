@@ -31,7 +31,9 @@ pub fn draw_header(p: &mut Painter, time_str: &str, book: &str, is_night: bool) 
     p.hline_t(pt(20.0), pt(16.0), w - pt(16.0), 1, if is_night { 60 } else { 225 });
 }
 
-/// Progress footer along the visual bottom edge: centered status text + minimal progress track.
+/// Progress footer along the visual bottom edge: centered status text +
+/// minimal progress track. `page_no` is 1-based (the number shown in the
+/// text), `toc_chapters` holds 0-based outline pages for the tick marks.
 pub fn draw_footer(
     p: &mut Painter,
     footer: &str,
@@ -59,7 +61,7 @@ pub fn draw_footer(
 
         p.rect(Rect::new(bar_x, bar_y, bar_w, bar_h), track_color);
 
-        let frac = ((page_no + 1) as f32 / total as f32).clamp(0.0, 1.0);
+        let frac = (page_no as f32 / total as f32).clamp(0.0, 1.0);
         let fill_w = ((bar_w as f32) * frac).round() as i32;
         if fill_w > 0 {
             p.rect(Rect::new(bar_x, bar_y, fill_w, bar_h), fill_color);
@@ -67,11 +69,31 @@ pub fn draw_footer(
 
         // Chapter ticks
         for &chap_page in toc_chapters {
-            if chap_page > 0 && chap_page < total {
-                let chap_frac = (chap_page as f32 / total as f32).clamp(0.0, 1.0);
+            if chap_page > 0 && chap_page + 1 < total {
+                let chap_frac = ((chap_page + 1) as f32 / total as f32).clamp(0.0, 1.0);
                 let tx = bar_x + ((bar_w as f32) * chap_frac).round() as i32;
                 p.rect(Rect::new(tx, bar_y - 1, 1, bar_h + 2), tick_color);
             }
         }
+    }
+}
+
+/// Selection-mode bookmark: a ribbon hanging from the top edge, left of
+/// the battery — outline when off, filled when on.
+pub fn draw_bookmark_ribbon(p: &mut Painter, w: i32, sel_mode: bool) {
+    let bw = pt(13.0);
+    let bh = pt(20.0);
+    let x = w - pt(58.0);
+    let y = 0;
+    let body_h = bh - pt(4.0);
+    let seg = bw / 3;
+    if sel_mode {
+        p.rect(Rect::new(x, y, bw, body_h), 0);
+        p.rect(Rect::new(x, y + body_h, seg, pt(4.0)), 0);
+        p.rect(Rect::new(x + 2 * seg, y + body_h, seg, pt(4.0)), 0);
+    } else {
+        p.rect_outline_t(Rect::new(x, y, bw, body_h), 2, 130);
+        p.line_w(x, y + body_h, x + bw / 2, y + bh, 2, 130);
+        p.line_w(x + bw, y + body_h, x + bw / 2, y + bh, 2, 130);
     }
 }

@@ -35,7 +35,6 @@ pub struct TocDialog<F: FnMut(TocAction) -> Action> {
     /// children ignore their flag; collapsing a parent hides its subtree
     /// but keeps child flags, so re-expanding restores the exact view.
     expanded: Vec<bool>,
-    current_page: usize,
     active_idx: usize,
     /// Window start, in VISIBLE-row coordinates (collapsed rows hidden).
     offset: usize,
@@ -92,7 +91,7 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             }
         }
 
-        Self::with_items_and_active(items, cur_chapter, best_idx, on_action)
+        Self::with_items_and_active(items, best_idx, on_action)
     }
 
     #[allow(dead_code)]
@@ -131,12 +130,11 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
                 break;
             }
         }
-        Self::with_items_and_active(items, current_page, best_idx, on_action)
+        Self::with_items_and_active(items, best_idx, on_action)
     }
 
     fn with_items_and_active(
         items: Vec<TocItem>,
-        current_page: usize,
         best_idx: usize,
         on_action: F,
     ) -> Self {
@@ -156,7 +154,6 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
         let mut dlg = TocDialog {
             items,
             expanded,
-            current_page,
             active_idx: best_idx,
             offset: 0,
             per_page: 8,

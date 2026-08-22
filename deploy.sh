@@ -65,6 +65,12 @@ ssh_deploy() {
     sleep 1
     if $SSHC "$HOST" "initctl status yb-reader 2>/dev/null | grep -q 'start/running'" 2>/dev/null; then
         $SSHC "$HOST" "initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1"
+    elif $SSHC "$HOST" "test -e /mnt/us/DONT_START_FRAMEWORK" 2>/dev/null; then
+        # Takeover with the job stopped (a normal exit left it that way):
+        # start the job so boot.sh owns the flag and the exit-42 handoff.
+        # Falling back to start.sh here would strand the device frozen on
+        # "Exit to Kindle" (start.sh does not start the framework).
+        $SSHC "$HOST" "initctl start yb-reader </dev/null >/dev/null 2>&1 || nohup /mnt/us/extensions/reader/bin/boot.sh </dev/null >/dev/null 2>&1 &"
     else
         $SSHC "$HOST" "nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 &"
     fi

@@ -19,6 +19,8 @@ pub struct FootnoteDialog<F: FnMut(FootnoteAction) -> Action> {
     target_yread: Option<(usize, usize, usize)>, // (chapter_idx, char_offset, page)
     bg: Option<Vec<u8>>,
     dims: (i32, i32),
+    card_rect: Rect,
+    btn_rect: Rect,
     scroll_line: usize,
     max_scroll: usize,
     visible_lines: usize,
@@ -40,6 +42,8 @@ impl<F: FnMut(FootnoteAction) -> Action> FootnoteDialog<F> {
             target_yread: None,
             bg,
             dims: (1236, 1648),
+            card_rect: Rect::new(0, 0, 0, 0),
+            btn_rect: Rect::new(0, 0, 0, 0),
             scroll_line: 0,
             max_scroll: 0,
             visible_lines: 6,
@@ -61,6 +65,8 @@ impl<F: FnMut(FootnoteAction) -> Action> FootnoteDialog<F> {
             target_yread,
             bg,
             dims: (1236, 1648),
+            card_rect: Rect::new(0, 0, 0, 0),
+            btn_rect: Rect::new(0, 0, 0, 0),
             scroll_line: 0,
             max_scroll: 0,
             visible_lines: 6,
@@ -71,7 +77,7 @@ impl<F: FnMut(FootnoteAction) -> Action> FootnoteDialog<F> {
 
 impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
     fn default_edges(&self) -> bool {
-        false
+        true
     }
 
     fn on_enter(&mut self) -> Action {
@@ -142,6 +148,14 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
         self.visible_lines = vis_count;
         self.max_scroll = lines.len().saturating_sub(vis_count);
         self.scroll_line = self.scroll_line.min(self.max_scroll);
+        let btn_w = pt(65.0);
+        let btn_h = pt(22.0);
+        let btn_x = card_x + card_w - btn_w - pt(10.0);
+        let btn_y = card_y + pt(6.0);
+        let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
+
+        self.card_rect = card_rect;
+        self.btn_rect = btn_rect;
 
         // Backdrop Card
         p.rect(card_rect, 255);
@@ -163,12 +177,6 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
         }
 
         // Action button on top-right: [ ↗ Jump ] if target exists, else [ ✕ Close ]
-        let btn_w = pt(65.0);
-        let btn_h = pt(22.0);
-        let btn_x = card_x + card_w - btn_w - pt(10.0);
-        let btn_y = card_y + pt(6.0);
-        let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
-
         if let Some((_, _, page)) = self.target_yread {
             p.rect(btn_rect, 0);
             let jump_lbl = format!("↗ p.{}", page + 1);
@@ -211,31 +219,18 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
-        let (w, h) = self.dims;
-        let card_w = w - pt(16.0);
-        let card_x = pt(8.0);
-        let card_h = pt(180.0).min(h / 2);
-        let card_y = h - card_h - pt(10.0);
-        let card_rect = Rect::new(card_x, card_y, card_w, card_h);
-
         match g {
             Gesture::Tap { x, y } => {
                 let px = x as i32;
                 let py = y as i32;
 
-                // Tap outside dismisses
-                if !card_rect.contains(px, py) {
+                // Tap outside card dismisses
+                if !self.card_rect.contains(px, py) {
                     return (self.on_action)(FootnoteAction::Close);
                 }
 
                 // Top right button tap
-                let btn_w = pt(65.0);
-                let btn_h = pt(22.0);
-                let btn_x = card_x + card_w - btn_w - pt(10.0);
-                let btn_y = card_y + pt(6.0);
-                let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
-
-                if btn_rect.contains(px, py) {
+                if self.btn_rect.contains(px, py) {
                     if let Some((ch, off, page)) = self.target_yread {
                         return (self.on_action)(FootnoteAction::JumpToYRead {
                             chapter_idx: ch,
@@ -249,8 +244,13 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
                     }
                 }
 
+                // If content is not scrollable, tapping inside card dismisses cleanly
+                if self.max_scroll == 0 {
+                    return (self.on_action)(FootnoteAction::Close);
+                }
+
                 // Tap body top half / bottom half for scrolling
-                let body_mid_y = card_y + (card_h / 2);
+                let body_mid_y = self.card_rect.y + (self.card_rect.h / 2);
                 if py < body_mid_y {
                     if self.scroll_line > 0 {
                         let step = self.visible_lines.saturating_sub(1).max(1);
@@ -263,22 +263,20 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
                     return Action::Redraw;
                 }
 
-                Action::Keep
+                (self.on_action)(FootnoteAction::Close)
             }
             Gesture::Swipe { dir, .. } => {
                 match dir {
                     SwipeDir::North => {
-                        // Swipe up -> scroll down (reveal later text)
                         if self.scroll_line < self.max_scroll {
                             let step = self.visible_lines.saturating_sub(1).max(1);
                             self.scroll_line = (self.scroll_line + step).min(self.max_scroll);
                             Action::Redraw
                         } else {
-                            Action::Keep
+                            (self.on_action)(FootnoteAction::Close)
                         }
                     }
                     SwipeDir::South => {
-                        // Swipe down -> scroll up (reveal earlier text) or close if at top
                         if self.scroll_line > 0 {
                             let step = self.visible_lines.saturating_sub(1).max(1);
                             self.scroll_line = self.scroll_line.saturating_sub(step);
@@ -292,6 +290,9 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
                     }
                 }
             }
+            Gesture::LongPress { .. } => {
+                (self.on_action)(FootnoteAction::Close)
+            }
             _ => Action::Keep,
         }
     }
@@ -300,6 +301,37 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yui::Orientation;
+
+    #[test]
+    fn dict_miss_draw_is_fast() {
+        let (w, h) = (1236, 1648);
+        let bg = vec![128u8; (w * h) as usize];
+        let mut dlg = FootnoteDialog::new(
+            "Dictionary",
+            "«xylophoneist» — no entry in the dictionary",
+            None,
+            Some(bg),
+            |_| Action::Keep,
+        );
+        let f = yui::font::Font::load().unwrap();
+        let mut canvas = vec![0u8; (w * h) as usize];
+        let mut buf = vec![255u8; 1248 * h as usize];
+        let mut p = yui::painter::Painter::new(
+            &mut buf,
+            w,
+            h,
+            1248,
+            Orientation::Portrait,
+            &mut canvas,
+            &f,
+        );
+        let t0 = std::time::Instant::now();
+        dlg.draw(&mut p);
+        let elapsed = t0.elapsed();
+        eprintln!("DICT_MISS DRAW: {:?}", elapsed);
+        assert!(elapsed.as_millis() < 2000);
+    }
 
     #[test]
     fn test_footnote_dialog_creation_and_scrolling() {
