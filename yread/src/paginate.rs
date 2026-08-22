@@ -97,6 +97,34 @@ pub struct PageLayout {
 use std::collections::HashMap;
 use crate::model::FontStyle;
 
+/// Push a finished page + its break record. `start_char`/`start_byte` may be
+/// the pending sentinel (`usize::MAX`) when the page began at a
+/// Rule/Image/CodeBlock and no text claimed it — then the last known char
+/// position stands in, keeping page-break offsets monotonic.
+fn finish_page(
+    pages: &mut Vec<PageLayout>,
+    breaks: &mut Vec<PageBreak>,
+    mut page: PageLayout,
+    block_idx: usize,
+    start_char: usize,
+    start_byte: usize,
+    last_char: usize,
+    last_byte: usize,
+) {
+    let sc = if start_char == usize::MAX { last_char } else { start_char };
+    let sb = if start_byte == usize::MAX { last_byte } else { start_byte };
+    page.start_char = sc;
+    if page.end_char < sc {
+        page.end_char = sc;
+    }
+    pages.push(page);
+    breaks.push(PageBreak {
+        block_idx,
+        byte_offset: sb,
+        char_offset: sc,
+    });
+}
+
 /// Paginate a single chapter and return both its PageTable and precalculated PageLayouts.
 pub fn paginate_chapter(
     chapter: &Chapter,
@@ -129,6 +157,10 @@ pub fn paginate_chapter_with_images(
     let mut cur_page_start_char = 0usize;
     let mut cur_page_start_byte = 0usize;
     let mut cur_block_idx = 0usize;
+    // Furthest text position placed so far — resolves pending page starts
+    // and end_chars for pages that end at non-text blocks.
+    let mut last_char_pos = 0usize;
+    let mut last_byte_pos = 0usize;
 
     let target_lang = if config.hyphenate { lang } else { None };
 
@@ -174,12 +206,16 @@ pub fn paginate_chapter_with_images(
                     if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
                         // Finish current page
                         cur_page.end_char = line.start_char;
-                        pages.push(cur_page);
-                        page_breaks.push(PageBreak {
-                            block_idx: cur_block_idx,
-                            byte_offset: cur_page_start_byte,
-                            char_offset: cur_page_start_char,
-                        });
+                        finish_page(
+                            &mut pages,
+                            &mut page_breaks,
+                            std::mem::take(&mut cur_page),
+                            cur_block_idx,
+                            cur_page_start_char,
+                            cur_page_start_byte,
+                            last_char_pos,
+                            last_byte_pos,
+                        );
 
                         // Start new page
                         cur_page = PageLayout::default();
@@ -189,6 +225,15 @@ pub fn paginate_chapter_with_images(
                         cur_page_start_byte = line.start_byte;
                         cur_block_idx = b_idx;
                     }
+
+                    // First text on a page that began at a non-text block
+                    // claims the pending start.
+                    if cur_page_start_char == usize::MAX {
+                        cur_page_start_char = line.start_char;
+                        cur_page_start_byte = line.start_byte;
+                    }
+                    last_char_pos = last_char_pos.max(line.end_char);
+                    last_byte_pos = last_byte_pos.max(line.end_byte);
 
                     let baseline = cur_y + line.ascender;
 
@@ -238,15 +283,22 @@ pub fn paginate_chapter_with_images(
 
                 for c_line in code.lines() {
                     if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
-                        pages.push(cur_page);
-                        page_breaks.push(PageBreak {
-                            block_idx: cur_block_idx,
-                            byte_offset: cur_page_start_byte,
-                            char_offset: cur_page_start_char,
-                        });
+                        cur_page.end_char = last_char_pos;
+                        finish_page(
+                            &mut pages,
+                            &mut page_breaks,
+                            std::mem::take(&mut cur_page),
+                            cur_block_idx,
+                            cur_page_start_char,
+                            cur_page_start_byte,
+                            last_char_pos,
+                            last_byte_pos,
+                        );
                         cur_page = PageLayout::default();
                         cur_page.page_idx = pages.len();
                         cur_y = 0.0;
+                        cur_page_start_char = usize::MAX;
+                        cur_page_start_byte = usize::MAX;
                         cur_block_idx = b_idx;
                     }
 
@@ -284,24 +336,34 @@ pub fn paginate_chapter_with_images(
 
                 // Orphan prevention: if heading + spacing doesn't leave room on page, break early
                 if cur_y + heading_h > content_h && !cur_page.elements.is_empty() {
-                    cur_page.end_char = lines.first().map(|l| l.start_char).unwrap_or(0);
-                    pages.push(cur_page);
-                    page_breaks.push(PageBreak {
-                        block_idx: cur_block_idx,
-                        byte_offset: cur_page_start_byte,
-                        char_offset: cur_page_start_char,
-                    });
+                    cur_page.end_char = lines.first().map(|l| l.start_char).unwrap_or(last_char_pos);
+                    finish_page(
+                        &mut pages,
+                        &mut page_breaks,
+                        std::mem::take(&mut cur_page),
+                        cur_block_idx,
+                        cur_page_start_char,
+                        cur_page_start_byte,
+                        last_char_pos,
+                        last_byte_pos,
+                    );
 
                     cur_page = PageLayout::default();
                     cur_page.page_idx = pages.len();
                     cur_y = 0.0;
-                    cur_page_start_char = lines.first().map(|l| l.start_char).unwrap_or(0);
-                    cur_page_start_byte = lines.first().map(|l| l.start_byte).unwrap_or(0);
+                    cur_page_start_char = lines.first().map(|l| l.start_char).unwrap_or(usize::MAX);
+                    cur_page_start_byte = lines.first().map(|l| l.start_byte).unwrap_or(usize::MAX);
                     cur_block_idx = b_idx;
                 }
 
                 cur_y += config.font_size * 0.5; // Space before heading
                 for line in lines {
+                    if cur_page_start_char == usize::MAX {
+                        cur_page_start_char = line.start_char;
+                        cur_page_start_byte = line.start_byte;
+                    }
+                    last_char_pos = last_char_pos.max(line.end_char);
+                    last_byte_pos = last_byte_pos.max(line.end_byte);
                     let baseline = cur_y + line.ascender;
                     cur_y += line.height;
                     cur_page.elements.push(PageElement::Line {
@@ -319,15 +381,22 @@ pub fn paginate_chapter_with_images(
             }
             Block::Rule => {
                 if cur_y + 10.0 > content_h && !cur_page.elements.is_empty() {
-                    pages.push(cur_page);
-                    page_breaks.push(PageBreak {
-                        block_idx: cur_block_idx,
-                        byte_offset: cur_page_start_byte,
-                        char_offset: cur_page_start_char,
-                    });
+                    cur_page.end_char = last_char_pos;
+                    finish_page(
+                        &mut pages,
+                        &mut page_breaks,
+                        std::mem::take(&mut cur_page),
+                        cur_block_idx,
+                        cur_page_start_char,
+                        cur_page_start_byte,
+                        last_char_pos,
+                        last_byte_pos,
+                    );
                     cur_page = PageLayout::default();
                     cur_page.page_idx = pages.len();
                     cur_y = 0.0;
+                    cur_page_start_char = usize::MAX;
+                    cur_page_start_byte = usize::MAX;
                     cur_block_idx = b_idx;
                 }
                 cur_page.elements.push(PageElement::Rule {
@@ -350,15 +419,22 @@ pub fn paginate_chapter_with_images(
                 let draw_h = (orig_h as f32 * scale).round();
 
                 if cur_y + draw_h > content_h && !cur_page.elements.is_empty() {
-                    pages.push(cur_page);
-                    page_breaks.push(PageBreak {
-                        block_idx: cur_block_idx,
-                        byte_offset: cur_page_start_byte,
-                        char_offset: cur_page_start_char,
-                    });
+                    cur_page.end_char = last_char_pos;
+                    finish_page(
+                        &mut pages,
+                        &mut page_breaks,
+                        std::mem::take(&mut cur_page),
+                        cur_block_idx,
+                        cur_page_start_char,
+                        cur_page_start_byte,
+                        last_char_pos,
+                        last_byte_pos,
+                    );
                     cur_page = PageLayout::default();
                     cur_page.page_idx = pages.len();
                     cur_y = 0.0;
+                    cur_page_start_char = usize::MAX;
+                    cur_page_start_byte = usize::MAX;
                     cur_block_idx = b_idx;
                 }
 
@@ -377,12 +453,16 @@ pub fn paginate_chapter_with_images(
 
     if !cur_page.elements.is_empty() || pages.is_empty() {
         cur_page.end_char = chapter.char_count();
-        pages.push(cur_page);
-        page_breaks.push(PageBreak {
-            block_idx: cur_block_idx,
-            byte_offset: cur_page_start_byte,
-            char_offset: cur_page_start_char,
-        });
+        finish_page(
+            &mut pages,
+            &mut page_breaks,
+            cur_page,
+            cur_block_idx,
+            cur_page_start_char,
+            cur_page_start_byte,
+            last_char_pos,
+            last_byte_pos,
+        );
     }
 
     (ChapterPageTable { pages: page_breaks }, pages)

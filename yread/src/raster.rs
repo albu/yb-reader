@@ -1,20 +1,38 @@
-//! Glyph rasterization using swash and 8-bit grayscale framebuffer blitting.
-
+use std::collections::HashMap;
+use std::sync::Arc;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 
 use crate::font::FontSystem;
 use crate::line::{LayoutLine, LineItem};
-use crate::model::{Book, TextAlign};
+use crate::model::{Book, FontStyle, TextAlign};
 use crate::paginate::{LayoutConfig, PageElement, PageLayout};
+
+#[derive(Clone)]
+struct CachedGlyph {
+    left: i32,
+    top: i32,
+    width: usize,
+    height: usize,
+    data: Vec<u8>,
+}
+
+/// Cache ceilings. Overflow clears wholesale — crude but bounded; both
+/// caches rewarm in a page or two of reading.
+const GLYPH_CACHE_CAP: usize = 4096;
+const IMAGE_CACHE_CAP: usize = 10;
 
 pub struct Rasterizer {
     scale_ctx: ScaleContext,
+    glyph_cache: HashMap<(u16, u16, FontStyle), Option<Arc<CachedGlyph>>>,
+    image_cache: HashMap<(String, usize, usize), Arc<Vec<u8>>>,
 }
 
 impl Default for Rasterizer {
     fn default() -> Self {
         Self {
             scale_ctx: ScaleContext::new(),
+            glyph_cache: HashMap::with_capacity(2048),
+            image_cache: HashMap::new(),
         }
     }
 }
@@ -64,6 +82,7 @@ impl Rasterizer {
                         origin_x + x,
                         origin_y + y,
                         *size_pt,
+                        crate::model::FontStyle::Bold,
                         face,
                         fb,
                         stride,
@@ -104,38 +123,50 @@ impl Rasterizer {
                 PageElement::Rule { x, y, width } => {
                     let rx = (origin_x + x).round() as usize;
                     let ry = (origin_y + y).round() as usize;
-                    let rw = (*width).round() as usize;
+                    let rw = (*width as usize).min(p_width.saturating_sub(rx));
                     if ry < p_height {
-                        for col in rx..(rx + rw).min(p_width) {
-                            fb[ry * stride + col] = 0;
+                        for col in rx..(rx + rw) {
+                            fb[ry * stride + col] = 160;
                         }
                     }
                 }
                 PageElement::Image { id, x, y, width, height } => {
-                    if let Some(data) = book.images.get(id) {
-                        if let Ok(img) = image::load_from_memory(data) {
-                            let gray = img.to_luma8();
-                            let target_w = width.round() as u32;
-                            let target_h = height.round() as u32;
-                            if target_w > 0 && target_h > 0 {
-                                let resized = image::imageops::resize(
-                                    &gray,
-                                    target_w,
-                                    target_h,
-                                    image::imageops::FilterType::Lanczos3,
-                                );
+                    let img_w = (*width as usize).max(1);
+                    let img_h = (*height as usize).max(1);
+                    let img_x = (origin_x + x).round() as usize;
+                    let img_y = (origin_y + y).round() as usize;
 
-                                let dst_x = (origin_x + x).round() as usize;
-                                let dst_y = (origin_y + y).round() as usize;
+                    let cache_key = (id.clone(), img_w, img_h);
+                    let tile = if let Some(t) = self.image_cache.get(&cache_key) {
+                        Arc::clone(t)
+                    } else {
+                        // Eager store or lazy archive load, memoized in Book.
+                        let Some(raw_data) = book.get_image(id) else { continue };
+                        let Ok(dyn_img) = image::load_from_memory(raw_data.as_slice()) else { continue };
+                        let gray = dyn_img
+                            .resize_exact(img_w as u32, img_h as u32, image::imageops::FilterType::Lanczos3)
+                            .to_luma8();
+                        let t = Arc::new(gray.into_raw());
+                        if self.image_cache.len() >= IMAGE_CACHE_CAP {
+                            self.image_cache.clear();
+                        }
+                        self.image_cache.insert(cache_key, Arc::clone(&t));
+                        t
+                    };
 
-                                for (ix, iy, px) in resized.enumerate_pixels() {
-                                    let target_col = dst_x + ix as usize;
-                                    let target_row = dst_y + iy as usize;
-                                    if target_col < p_width && target_row < p_height {
-                                        fb[target_row * stride + target_col] = px.0[0];
-                                    }
-                                }
+                    for row in 0..img_h {
+                        let dst_row_idx = img_y + row;
+                        if dst_row_idx >= p_height {
+                            break;
+                        }
+                        let dst_offset = dst_row_idx * stride;
+                        let src_offset = row * img_w;
+                        for col in 0..img_w {
+                            let dst_col_idx = img_x + col;
+                            if dst_col_idx >= p_width {
+                                break;
                             }
+                            fb[dst_offset + dst_col_idx] = tile[src_offset + col];
                         }
                     }
                 }
@@ -146,7 +177,7 @@ impl Rasterizer {
     fn render_line(
         &mut self,
         line: &LayoutLine,
-        x: f32,
+        line_start_x: f32,
         baseline_y: f32,
         base_font_size: f32,
         fonts: &FontSystem,
@@ -155,10 +186,8 @@ impl Rasterizer {
         p_width: usize,
         p_height: usize,
     ) {
-        // Calculate justification extra space
+        let mut cur_x = line_start_x;
         let mut extra_space_per_gap = 0.0f32;
-        let mut cur_x = x;
-
         match line.align {
             TextAlign::Center => {
                 let slack = (line.max_width - line.width).max(0.0);
@@ -173,8 +202,7 @@ impl Rasterizer {
                     let space_count = line.items.iter().filter(|it| it.is_space()).count();
                     if space_count > 0 {
                         let slack = line.max_width - line.width;
-                        // Avoid extreme justification distortion on short lines
-                        if slack < line.max_width * 0.35 {
+                        if slack < line.max_width * 0.40 {
                             extra_space_per_gap = slack / space_count as f32;
                         }
                     }
@@ -188,17 +216,20 @@ impl Rasterizer {
                 LineItem::Word { shaped, style, .. } => {
                     let run_size = base_font_size * style.size_mult;
                     let face = fonts.face_for_style(style.font_style);
-                    let mut baseline = baseline_y;
-                    if style.is_sup {
-                        baseline -= run_size * (300.0 / 72.0) * 0.35;
+                    let baseline = if style.is_sup {
+                        baseline_y - (run_size * 0.40 * (300.0 / 72.0))
                     } else if style.is_sub {
-                        baseline += run_size * (300.0 / 72.0) * 0.20;
-                    }
+                        baseline_y + (run_size * 0.25 * (300.0 / 72.0))
+                    } else {
+                        baseline_y
+                    };
+
                     self.render_shaped_word(
                         shaped,
                         cur_x,
                         baseline,
                         run_size,
+                        style.font_style,
                         face,
                         fb,
                         stride,
@@ -215,6 +246,7 @@ impl Rasterizer {
                         cur_x,
                         baseline_y,
                         run_size,
+                        style.font_style,
                         face,
                         fb,
                         stride,
@@ -223,15 +255,34 @@ impl Rasterizer {
                     );
                     cur_x += prefix_shaped.advance;
 
-                    // Draw hyphen
-                    // Simplified: rustybuzz hyphen glyph or simple bar
-                    let hyp_y = baseline_y - (run_size * 0.3 * (300.0 / 72.0));
-                    let hyp_x = cur_x;
-                    let hyp_w = (hyphen_adv * 0.7).max(4.0) as usize;
-                    let h_row = hyp_y.round() as usize;
-                    if h_row < p_height {
-                        for col in (hyp_x.round() as usize)..(hyp_x.round() as usize + hyp_w).min(p_width) {
-                            fb[h_row * stride + col] = 0;
+                    // Draw shaped hyphen
+                    let swash_font = face.as_swash();
+                    if let Some(font_ref) = swash_font {
+                        let hyphen_gid = font_ref.charmap().map('-');
+                        if hyphen_gid != 0 {
+                            let hyp_shaped = crate::shape::ShapedWord {
+                                advance: *hyphen_adv,
+                                glyphs: vec![crate::shape::ShapedGlyph {
+                                    glyph_id: hyphen_gid,
+                                    cluster: 0,
+                                    x_advance: *hyphen_adv,
+                                    y_advance: 0.0,
+                                    x_offset: 0.0,
+                                    y_offset: 0.0,
+                                }],
+                            };
+                            self.render_shaped_word(
+                                &hyp_shaped,
+                                cur_x,
+                                baseline_y,
+                                run_size,
+                                style.font_style,
+                                face,
+                                fb,
+                                stride,
+                                p_width,
+                                p_height,
+                            );
                         }
                     }
                     cur_x += *hyphen_adv;
@@ -239,6 +290,7 @@ impl Rasterizer {
                 LineItem::Space { adv, .. } => {
                     cur_x += *adv + extra_space_per_gap;
                 }
+                LineItem::HardBreak => {}
             }
         }
     }
@@ -249,6 +301,7 @@ impl Rasterizer {
         mut x: f32,
         baseline_y: f32,
         size_pt: f32,
+        font_style: FontStyle,
         face: &crate::font::FontFace,
         fb: &mut [u8],
         stride: usize,
@@ -261,28 +314,49 @@ impl Rasterizer {
         };
 
         let px_size = size_pt * (300.0 / 72.0);
-        let mut scaler = self
-            .scale_ctx
-            .builder(swash_font)
-            .size(px_size)
-            .hint(false)
-            .build();
+        let px_size_u16 = (px_size * 10.0).round() as u16;
 
         for glyph in &shaped.glyphs {
             let gx = x + glyph.x_offset;
             let gy = baseline_y - glyph.y_offset;
+            let key = (glyph.glyph_id, px_size_u16, font_style);
 
-            if let Some(image) = Render::new(&[
-                Source::ColorOutline(0),
-                Source::ColorBitmap(StrikeWith::BestFit),
-                Source::Outline,
-            ])
-            .render(&mut scaler, glyph.glyph_id)
-            {
-                let glyph_left = (gx + image.placement.left as f32).round() as i32;
-                let glyph_top = (gy - image.placement.top as f32).round() as i32;
-                let g_width = image.placement.width as usize;
-                let g_height = image.placement.height as usize;
+            let cached_entry = if let Some(entry) = self.glyph_cache.get(&key) {
+                entry.clone()
+            } else {
+                let mut scaler = self
+                    .scale_ctx
+                    .builder(swash_font)
+                    .size(px_size)
+                    .hint(false)
+                    .build();
+
+                let rendered = Render::new(&[
+                    Source::ColorOutline(0),
+                    Source::ColorBitmap(StrikeWith::BestFit),
+                    Source::Outline,
+                ])
+                .render(&mut scaler, glyph.glyph_id);
+
+                let entry = rendered.map(|img| Arc::new(CachedGlyph {
+                    left: img.placement.left,
+                    top: img.placement.top,
+                    width: img.placement.width as usize,
+                    height: img.placement.height as usize,
+                    data: img.data,
+                }));
+                if self.glyph_cache.len() >= GLYPH_CACHE_CAP {
+                    self.glyph_cache.clear();
+                }
+                self.glyph_cache.insert(key, entry.clone());
+                entry
+            };
+
+            if let Some(cached) = cached_entry {
+                let glyph_left = (gx + cached.left as f32).round() as i32;
+                let glyph_top = (gy - cached.top as f32).round() as i32;
+                let g_width = cached.width;
+                let g_height = cached.height;
 
                 for row in 0..g_height {
                     let dst_y = glyph_top + row as i32;
@@ -297,11 +371,9 @@ impl Rasterizer {
                             continue;
                         }
 
-                        let coverage = image.data[row * g_width + col];
+                        let coverage = cached.data[row * g_width + col];
                         if coverage > 0 {
                             let dst_idx = dst_row_idx + dst_x as usize;
-                            // Blend black glyph on existing pixel:
-                            // dst = (cov * 0 + (255 - cov) * dst) / 255
                             let curr = fb[dst_idx] as u32;
                             let alpha = coverage as u32;
                             let blended = ((255 - alpha) * curr) / 255;

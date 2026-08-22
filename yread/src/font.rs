@@ -4,7 +4,10 @@ use std::sync::Arc;
 use swash::FontRef;
 use crate::model::FontStyle;
 
-pub static LITERATA_BYTES: &[u8] = include_bytes!("../../resources/fonts/Literata.ttf");
+pub static LITERATA_REGULAR_BYTES: &[u8] = include_bytes!("../../resources/fonts/Literata-Regular.ttf");
+pub static LITERATA_BOLD_BYTES: &[u8] = include_bytes!("../../resources/fonts/Literata-Bold.ttf");
+pub static LITERATA_ITALIC_BYTES: &[u8] = include_bytes!("../../resources/fonts/Literata-Italic.ttf");
+pub static LITERATA_BOLD_ITALIC_BYTES: &[u8] = include_bytes!("../../resources/fonts/Literata-BoldItalic.ttf");
 pub static NOTO_SANS_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSans-Regular.ttf");
 
 #[derive(Clone)]
@@ -32,22 +35,32 @@ impl FontFace {
 
 pub struct FontSystem {
     pub regular: FontFace,
+    pub bold: FontFace,
+    pub italic: FontFace,
+    pub bold_italic: FontFace,
     pub fallback: FontFace,
 }
 
 impl Default for FontSystem {
     fn default() -> Self {
         Self {
-            regular: FontFace::from_bytes(LITERATA_BYTES),
+            regular: FontFace::from_bytes(LITERATA_REGULAR_BYTES),
+            bold: FontFace::from_bytes(LITERATA_BOLD_BYTES),
+            italic: FontFace::from_bytes(LITERATA_ITALIC_BYTES),
+            bold_italic: FontFace::from_bytes(LITERATA_BOLD_ITALIC_BYTES),
             fallback: FontFace::from_bytes(NOTO_SANS_BYTES),
         }
     }
 }
 
 impl FontSystem {
-    pub fn face_for_style(&self, _style: FontStyle) -> &FontFace {
-        // When bold/italic TTFs are loaded, route accordingly.
-        &self.regular
+    pub fn face_for_style(&self, style: FontStyle) -> &FontFace {
+        match style {
+            FontStyle::Regular => &self.regular,
+            FontStyle::Bold => &self.bold,
+            FontStyle::Italic => &self.italic,
+            FontStyle::BoldItalic => &self.bold_italic,
+        }
     }
 
     pub fn fallback_face(&self) -> &FontFace {

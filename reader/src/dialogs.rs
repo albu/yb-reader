@@ -43,24 +43,37 @@ pub fn toc_dialog(
                 record(&path_name, target, total, settings);
                 Action::Pop
             }
+            crate::toc_dialog::TocAction::JumpToYRead { page, .. } => {
+                record(&path_name, page, total, settings);
+                Action::Pop
+            }
             crate::toc_dialog::TocAction::Close => Action::Pop,
         },
     )))
 }
 
 pub fn yread_toc_dialog(
-    chapters: &[yread::model::Chapter],
-    cur_chap: usize,
+    toc: &[yread::model::TocEntry],
+    offsets: &[usize],
+    chars_per_page: f32,
+    cur_page: usize,
     path_name: String,
-    total_chapters: usize,
+    total_pages: usize,
     settings: ReaderSettings,
 ) -> Action {
-    Action::Push(Box::new(crate::toc_dialog::TocDialog::from_chapters(
-        chapters,
-        cur_chap,
+    Action::Push(Box::new(crate::toc_dialog::TocDialog::from_yread_toc(
+        toc,
+        offsets,
+        chars_per_page,
+        cur_page,
         move |act| match act {
             crate::toc_dialog::TocAction::JumpTo(target) => {
-                record(&path_name, target, total_chapters, settings);
+                record(&path_name, target, total_pages, settings);
+                Action::Pop
+            }
+            crate::toc_dialog::TocAction::JumpToYRead { chapter_idx, char_offset, page } => {
+                let encoded_sub = chapter_idx * 1_000_000 + (char_offset % 1_000_000);
+                positions::record_pos(&path_name, page, total_pages, encoded_sub, Some(settings));
                 Action::Pop
             }
             crate::toc_dialog::TocAction::Close => Action::Pop,
@@ -104,10 +117,10 @@ pub fn scrubber_dialog(
                                 match act {
                                     crate::toc_dialog::TocAction::JumpTo(t) => {
                                         record(&path_cl, t, total, settings);
-                                        // Unwind BOTH the TOC and this scrubber:
-                                        // a single Pop would reveal the scrubber,
-                                        // whose Done would overwrite this position
-                                        // and the reader would never jump.
+                                        Action::PopN(2)
+                                    }
+                                    crate::toc_dialog::TocAction::JumpToYRead { page, .. } => {
+                                        record(&path_cl, page, total, settings);
                                         Action::PopN(2)
                                     }
                                     crate::toc_dialog::TocAction::Close => Action::Pop,

@@ -21,7 +21,7 @@ use ybdev::sysinfo;
 /// copy: unzipped to the cache, font dropped in, one CSS rule appended.
 /// mupdf opens the directory exactly like the zip (verified: identical
 /// pixel output), which is why no rezip is ever needed.
-const EPUB_FONT: &[u8] = include_bytes!("../../resources/fonts/Literata.ttf");
+const EPUB_FONT: &[u8] = include_bytes!("../../resources/fonts/Literata-Regular.ttf");
 const EPUB_FONT_FAMILY: &str = "Literata";
 
 /// The patched copy of `book` — same book, one injected font. Falls

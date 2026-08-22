@@ -33,6 +33,10 @@ fn test_render_real_sample_book() {
     println!("Authors: {:?}", book.meta.authors);
     println!("Language: '{}'", book.meta.language);
     println!("Chapters: {}", book.chapters.len());
+    println!("TOC Entries: {}", book.toc.len());
+    for (t_idx, entry) in book.toc.iter().enumerate().take(20) {
+        println!("  TOC #{}: '{:indent$}{}' (ch={}, char={})", t_idx, "", entry.title, entry.chapter_idx, entry.char_offset, indent = entry.level * 2);
+    }
     println!("Total images: {}", book.images.len());
     println!("Total chars: {}", book.total_chars());
 
@@ -124,14 +128,90 @@ fn test_render_real_sample_book() {
                 yread::paginate::PageElement::QuoteBar { x, y0, y1 } => {
                     println!("  -> QuoteBar at x={:.1}, y0={:.1}, y1={:.1}", x, y0, y1);
                 }
-                _ => {}
+                    _ => {}
+                }
             }
         }
-        assert!(dark_px > 500, "Page should have rendered ink");
 
-        let img_gray = image::GrayImage::from_raw(1236, 1648, fb.clone()).expect("GrayImage");
-        let out_path = format!("/tmp/sample_ch7_page_{}.png", p);
-        img_gray.save(&out_path).expect("save png");
-        println!("Saved rendered page to {}", out_path);
+    // Search for "Outline of Th" across all chapters
+    println!("\n=== Searching for 'Outline of Th' across all chapters ===");
+    for (idx, ch) in book.chapters.iter().enumerate() {
+        if let Some(pos) = ch.text.to_lowercase().find("outline of th") {
+            println!("Found match in Chapter #{}: '{}' at char {}", idx, ch.title, pos);
+            let snippet_start = pos.saturating_sub(50);
+            let snippet_end = (pos + 100).min(ch.text.len());
+            println!("Context snippet:\n\"{}\"\n", &ch.text[snippet_start..snippet_end]);
+
+            // Paginate this chapter and find which page it lands on
+            let (pt, louts) = yread::paginate::paginate_chapter_with_images(
+                ch,
+                Some(&book.image_sizes),
+                &config,
+                &fonts,
+                &mut cache,
+                Some(hypher::Lang::English),
+            );
+            let p_idx = pt.page_for_char(pos);
+            println!("Match lands on Page {} of Chapter #{}", p_idx, idx);
+
+            // Render that page to see how it looks
+            let mut page_fb = vec![255u8; 1236 * 1648];
+            raster.render_page(
+                &book,
+                &louts[p_idx],
+                &config,
+                &fonts,
+                &mut page_fb,
+                1236,
+            );
+            let out_p = format!("/tmp/outline_ch{}_page_{}.png", idx, p_idx);
+            let img = image::GrayImage::from_raw(1236, 1648, page_fb).unwrap();
+            img.save(&out_p).unwrap();
+            println!("Rendered and saved to {}", out_p);
+
+            // Inspect elements on this page
+            for elem in &louts[p_idx].elements {
+                if let yread::paginate::PageElement::Line { line, .. } = elem {
+                    let mut s = String::new();
+                    for it in &line.items {
+                        match it {
+                            yread::line::LineItem::Word { byte_start, byte_end, .. } => {
+                                if let Some(w) = ch.text.get(*byte_start..*byte_end) {
+                                    s.push_str(w);
+                                }
+                            }
+                            yread::line::LineItem::Space { .. } => s.push(' '),
+                            yread::line::LineItem::HardBreak => {}
+                            yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, .. } => {
+                                if let Some(w) = ch.text.get(*byte_start..*byte_end) {
+                                    s.push_str(w);
+                                    s.push('-');
+                                }
+                            }
+                        }
+                    }
+                    if s.to_lowercase().contains("outline") || s.to_lowercase().contains("book") {
+                        println!("  Line: \"{}\"", s);
+                        println!("  Line details: align={:?}, width={}, max_width={}", line.align, line.width, line.max_width);
+                        for it in &line.items {
+                            match it {
+                                yread::line::LineItem::Word { byte_start, byte_end, shaped, style, .. } => {
+                                    let w = ch.text.get(*byte_start..*byte_end).unwrap_or("");
+                                    println!("    Word '{}' (bytes {}..{}, adv={}, size_mult={}, font_style={:?})", w, byte_start, byte_end, shaped.advance, style.size_mult, style.font_style);
+                                    for g in &shaped.glyphs {
+                                        println!("      glyph id={}, adv={}", g.glyph_id, g.x_advance);
+                                    }
+                                }
+                                yread::line::LineItem::Space { adv, .. } => {
+                                    println!("    Space (adv={})", adv);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
+

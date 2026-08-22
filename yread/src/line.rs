@@ -29,6 +29,9 @@ pub enum LineItem {
         adv: f32,
         style: Style,
     },
+    /// Explicit <br/> — force-ends the current line. Consumed by the
+    /// breaker; never part of a rendered line.
+    HardBreak,
 }
 
 impl LineItem {
@@ -39,6 +42,7 @@ impl LineItem {
                 prefix_shaped.advance + hyphen_adv
             }
             LineItem::Space { adv, .. } => *adv,
+            LineItem::HardBreak => 0.0,
         }
     }
 
@@ -50,7 +54,7 @@ impl LineItem {
         match self {
             LineItem::Word { byte_start, byte_end, .. } => Some((*byte_start, *byte_end)),
             LineItem::HyphenatedPrefix { byte_start, byte_end, .. } => Some((*byte_start, *byte_end)),
-            LineItem::Space { .. } => None,
+            _ => None,
         }
     }
 
@@ -58,7 +62,7 @@ impl LineItem {
         match self {
             LineItem::Word { char_start, char_end, .. } => Some((*char_start, *char_end)),
             LineItem::HyphenatedPrefix { char_start, char_end, .. } => Some((*char_start, *char_end)),
-            LineItem::Space { .. } => None,
+            _ => None,
         }
     }
 }
@@ -98,6 +102,12 @@ pub fn break_paragraph_lines(
 
     // Step 1: Flatten runs into token list (words and spaces)
     let mut tokens = Vec::new();
+    let mut cur_char_idx = if let Some(first_run) = runs.first() {
+        text[..first_run.start].chars().count()
+    } else {
+        0
+    };
+    let mut last_byte_offset = runs.first().map(|r| r.start).unwrap_or(0);
 
     for run in runs {
         let run_text = match text.get(run.start..run.end) {
@@ -105,12 +115,17 @@ pub fn break_paragraph_lines(
             None => continue,
         };
 
+        if run.start > last_byte_offset {
+            cur_char_idx += text[last_byte_offset..run.start].chars().count();
+        }
+        last_byte_offset = run.end;
+
         let run_size = base_font_size * run.style.size_mult;
-        let mut cur_char_idx = text[..run.start].chars().count();
         let mut byte_offset = run.start;
 
-        for part in run_text.split_inclusive(' ') {
-            let has_trailing_space = part.ends_with(' ');
+        for part in run_text.split_inclusive(|c: char| c == ' ' || c == '\n') {
+            let trailing_nl = part.ends_with('\n');
+            let has_trailing_space = part.ends_with(' ') || trailing_nl;
             let word_str = if has_trailing_space {
                 &part[..part.len() - 1]
             } else {
@@ -138,12 +153,22 @@ pub fn break_paragraph_lines(
             cur_char_idx += word_char_count;
             byte_offset += word_str.len();
 
-            if has_trailing_space {
-                let sp_adv = cache.space_advance(run.style.font_style, run_size, fonts);
-                tokens.push(LineItem::Space {
-                    adv: sp_adv,
-                    style: run.style.clone(),
-                });
+            if trailing_nl {
+                tokens.push(LineItem::HardBreak);
+                cur_char_idx += 1;
+                byte_offset += 1;
+            } else if has_trailing_space {
+                // Runs whose text nodes each normalize to edge spaces produce
+                // adjacent Space tokens ("text  more") — collapse them so
+                // justify doesn't count phantom gaps.
+                let prev_is_space = matches!(tokens.last(), Some(LineItem::Space { .. }));
+                if !prev_is_space {
+                    let sp_adv = cache.space_advance(run.style.font_style, run_size, fonts);
+                    tokens.push(LineItem::Space {
+                        adv: sp_adv,
+                        style: run.style.clone(),
+                    });
+                }
                 cur_char_idx += 1;
                 byte_offset += 1;
             }
@@ -155,7 +180,7 @@ pub fn break_paragraph_lines(
     }
 
     // Step 2: Greedy line breaking
-    let mut lines = Vec::new();
+    let mut lines: Vec<LayoutLine> = Vec::new();
     let mut current_line_items: Vec<LineItem> = Vec::new();
     let mut current_line_width = 0.0f32;
     let mut is_first_line = true;
@@ -166,6 +191,37 @@ pub fn break_paragraph_lines(
         } else {
             max_width
         };
+
+        // <br/>: force-end the current line. An empty item list here means
+        // a consecutive break — emit a blank line that inherits the previous
+        // line's text range so char offsets stay monotonic.
+        if matches!(item, LineItem::HardBreak) {
+            let was_empty = current_line_items.is_empty();
+            while current_line_items.last().map(|it| it.is_space()).unwrap_or(false) {
+                current_line_items.pop();
+            }
+            let mut line = build_line(
+                std::mem::take(&mut current_line_items),
+                allowed_width,
+                align,
+                false,
+                base_font_size,
+                line_spacing_mult,
+                fonts,
+            );
+            if was_empty {
+                if let Some(prev) = lines.last() {
+                    line.start_byte = prev.end_byte;
+                    line.end_byte = prev.end_byte;
+                    line.start_char = prev.end_char;
+                    line.end_char = prev.end_char;
+                }
+            }
+            lines.push(line);
+            is_first_line = false;
+            current_line_width = 0.0;
+            continue;
+        }
 
         let item_adv = item.advance();
 
@@ -182,59 +238,61 @@ pub fn break_paragraph_lines(
             let mut hyphenated = false;
             if let (Some(target_lang), LineItem::Word { byte_start, byte_end, char_start, style, .. }) = (lang, &item) {
                 if let Some(word_text) = text.get(*byte_start..*byte_end) {
-                    if word_text.len() >= 6 {
+                    if word_text.chars().count() >= 5 {
                         let syllables: Vec<&str> = hyphenate(word_text, target_lang).collect();
                         if syllables.len() >= 2 {
                             let run_size = base_font_size * style.size_mult;
                             let hyp_adv = cache.hyphen_advance(style.font_style, run_size, fonts);
                             let mut prefix = String::new();
+                            let mut best_break: Option<(usize, usize, Arc<crate::shape::ShapedWord>)> = None;
+
                             for &syl in &syllables[..syllables.len() - 1] {
                                 prefix.push_str(syl);
                                 let prefix_shaped = cache.shape_word(&prefix, style.font_style, run_size, fonts);
                                 if current_line_width + prefix_shaped.advance + hyp_adv <= allowed_width {
-                                    // Can break here!
-                                    let pref_bytes = prefix.len();
-                                    let pref_chars = prefix.chars().count();
-                                    current_line_items.push(LineItem::HyphenatedPrefix {
-                                        byte_start: *byte_start,
-                                        byte_end: *byte_start + pref_bytes,
-                                        char_start: *char_start,
-                                        char_end: *char_start + pref_chars,
-                                        prefix_shaped: Arc::clone(&prefix_shaped),
-                                        hyphen_adv: hyp_adv,
-                                        style: style.clone(),
-                                    });
-
-                                    // Remainder becomes the start of the next line
-                                    let suffix = &word_text[pref_bytes..];
-                                    let suffix_shaped = cache.shape_word(suffix, style.font_style, run_size, fonts);
-                                    let suffix_item = LineItem::Word {
-                                        byte_start: *byte_start + pref_bytes,
-                                        byte_end: *byte_end,
-                                        char_start: *char_start + pref_chars,
-                                        char_end: *char_start + word_text.chars().count(),
-                                        shaped: Arc::clone(&suffix_shaped),
-                                        style: style.clone(),
-                                    };
-
-                                    // Finish current line
-                                    let line = build_line(
-                                        std::mem::take(&mut current_line_items),
-                                        allowed_width,
-                                        align,
-                                        false,
-                                        base_font_size,
-                                        line_spacing_mult,
-                                        fonts,
-                                    );
-                                    lines.push(line);
-                                    is_first_line = false;
-
-                                    current_line_items.push(suffix_item);
-                                    current_line_width = suffix_shaped.advance;
-                                    hyphenated = true;
-                                    break;
+                                    best_break = Some((prefix.len(), prefix.chars().count(), prefix_shaped));
                                 }
+                            }
+
+                            if let Some((pref_bytes, pref_chars, prefix_shaped)) = best_break {
+                                current_line_items.push(LineItem::HyphenatedPrefix {
+                                    byte_start: *byte_start,
+                                    byte_end: *byte_start + pref_bytes,
+                                    char_start: *char_start,
+                                    char_end: *char_start + pref_chars,
+                                    prefix_shaped: Arc::clone(&prefix_shaped),
+                                    hyphen_adv: hyp_adv,
+                                    style: style.clone(),
+                                });
+
+                                // Remainder becomes the start of the next line
+                                let suffix = &word_text[pref_bytes..];
+                                let suffix_shaped = cache.shape_word(suffix, style.font_style, run_size, fonts);
+                                let suffix_item = LineItem::Word {
+                                    byte_start: *byte_start + pref_bytes,
+                                    byte_end: *byte_end,
+                                    char_start: *char_start + pref_chars,
+                                    char_end: *char_start + word_text.chars().count(),
+                                    shaped: Arc::clone(&suffix_shaped),
+                                    style: style.clone(),
+                                };
+
+                                // Finish current line
+                                let line = build_line(
+                                    std::mem::take(&mut current_line_items),
+                                    allowed_width,
+                                    align,
+                                    false,
+                                    base_font_size,
+                                    line_spacing_mult,
+                                    fonts,
+                                );
+                                lines.push(line);
+
+                                // Start new line with the suffix
+                                current_line_items.push(suffix_item);
+                                current_line_width = suffix_shaped.advance;
+                                hyphenated = true;
                             }
                         }
                     }
@@ -324,6 +382,7 @@ fn build_line(
 
         let style = match it {
             LineItem::Word { style, .. } | LineItem::HyphenatedPrefix { style, .. } | LineItem::Space { style, .. } => style,
+            LineItem::HardBreak => continue,
         };
         let m = fonts.metrics(style.font_style, base_font_size * style.size_mult);
         max_ascender = max_ascender.max(m.ascender);

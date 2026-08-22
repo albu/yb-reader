@@ -8,6 +8,12 @@
 //! a pure function of (content, style_params).
 
 use std::collections::HashMap;
+use std::io::{Read, Seek};
+use zip::ZipArchive;
+
+/// Boxed reader backing a file-backed archive.
+pub trait ImageSource: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ImageSource for T {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontStyle {
@@ -109,19 +115,24 @@ pub enum Block {
 #[derive(Debug, Clone, Default)]
 pub struct Chapter {
     pub id: String,
+    pub href: String,
     pub title: String,
     /// Flat normalized text representation of the chapter
     pub text: String,
     pub blocks: Vec<Block>,
+    /// Element ID -> char offset in `text`
+    pub anchors: HashMap<String, usize>,
 }
 
 impl Chapter {
     pub fn new(id: impl Into<String>, title: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            href: String::new(),
             title: title.into(),
             text: String::new(),
             blocks: Vec::new(),
+            anchors: HashMap::new(),
         }
     }
 
@@ -154,16 +165,111 @@ pub struct BookMetadata {
     pub cover_image_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct TocEntry {
+    pub title: String,
+    pub chapter_idx: usize,
+    pub byte_offset: usize,
+    pub char_offset: usize,
+    pub level: usize,
+}
+
+/// Lazily-loaded image source for file-backed books: the zip archive stays
+/// open; image bytes are pulled (and memoized, small) only when a page that
+/// shows them is rendered. Keeps 300MB illustrated epubs out of RAM.
+pub struct LazyImages {
+    archive: std::sync::Mutex<Option<ZipArchive<Box<dyn ImageSource>>>>,
+    /// image id -> path inside the archive
+    entries: HashMap<String, String>,
+    loaded: std::sync::Mutex<HashMap<String, std::sync::Arc<Vec<u8>>>>,
+}
+
+impl Default for LazyImages {
+    fn default() -> Self {
+        Self {
+            archive: std::sync::Mutex::new(None),
+            entries: HashMap::new(),
+            loaded: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl std::fmt::Debug for LazyImages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazyImages")
+            .field("entries", &self.entries.len())
+            .field("loaded", &self.loaded.lock().map(|m| m.len()).unwrap_or(0))
+            .finish()
+    }
+}
+
+impl LazyImages {
+    pub fn from_archive(
+        archive: ZipArchive<Box<dyn ImageSource>>,
+        entries: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            archive: std::sync::Mutex::new(Some(archive)),
+            entries,
+            loaded: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn load(&self, id: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+        if let Some(hit) = self.loaded.lock().ok()?.get(id) {
+            return Some(std::sync::Arc::clone(hit));
+        }
+        let path = self.entries.get(id)?;
+        let mut guard = self.archive.lock().ok()?;
+        let archive = guard.as_mut()?;
+        let mut file = archive.by_name(path).ok()?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes).ok()?;
+        let arc = std::sync::Arc::new(bytes);
+        if let Ok(mut loaded) = self.loaded.lock() {
+            if loaded.len() >= 24 {
+                loaded.clear();
+            }
+            loaded.insert(id.to_string(), std::sync::Arc::clone(&arc));
+        }
+        Some(arc)
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct Book {
     pub meta: BookMetadata,
     pub chapters: Vec<Chapter>,
-    /// Embedded images keyed by ID/filename -> raw bytes (PNG/JPEG)
+    /// Table of Contents (hierarchical entries with section titles & levels)
+    pub toc: Vec<TocEntry>,
+    /// Embedded images keyed by ID/filename -> raw bytes (PNG/JPEG).
+    /// Eager store (fb2, in-memory parses); file-backed epubs use
+    /// `lazy_images` instead.
     pub images: HashMap<String, Vec<u8>>,
     /// Precalculated pixel dimensions (width, height) for each image ID
     pub image_sizes: HashMap<String, (u32, u32)>,
     /// Footnotes/notes keyed by target ID -> blocks
     pub footnotes: HashMap<String, Vec<Block>>,
+    /// On-demand image source (file-backed epubs).
+    pub lazy_images: std::sync::Arc<LazyImages>,
+}
+
+impl std::fmt::Debug for Book {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Book")
+            .field("meta", &self.meta)
+            .field("chapters", &self.chapters.len())
+            .field("toc", &self.toc.len())
+            .field("images", &self.images.len())
+            .field("image_sizes", &self.image_sizes.len())
+            .field("footnotes", &self.footnotes.len())
+            .field("lazy_images", &self.lazy_images)
+            .finish()
+    }
 }
 
 impl Book {
@@ -179,6 +285,25 @@ impl Book {
             }
         }
         self.images.insert(id, bytes);
+    }
+
+    /// Image bytes by id, eager store first, then lazy archive load
+    /// (with a bare file-name fallback for books whose references use
+    /// short names). Results are memoized.
+    pub fn get_image(&self, id: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+        if let Some(bytes) = self.images.get(id) {
+            return Some(std::sync::Arc::new(bytes.clone()));
+        }
+        if let Some(hit) = self.lazy_images.load(id) {
+            return Some(hit);
+        }
+        let fname = std::path::Path::new(id)
+            .file_name()
+            .and_then(|f| f.to_str())?;
+        if let Some(bytes) = self.images.get(fname) {
+            return Some(std::sync::Arc::new(bytes.clone()));
+        }
+        self.lazy_images.load(fname)
     }
 }
 

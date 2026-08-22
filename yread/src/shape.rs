@@ -72,6 +72,12 @@ impl ShapeCache {
 
         let face = fonts.face_for_style(style);
         let shaped = Arc::new(shape_string_with_face(word, face, size_pt));
+        // Bound the shared cache (400MB device): ~8k entries ≈ a few MB.
+        // Wholesale clear on overflow — rewarm cost is one chapter's worth
+        // of shaping.
+        if self.cache.len() >= 8192 {
+            self.cache.clear();
+        }
         self.cache.insert(key, Arc::clone(&shaped));
         shaped
     }

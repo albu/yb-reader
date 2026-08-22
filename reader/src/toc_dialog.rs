@@ -6,12 +6,19 @@ use yui::screen::{Action, Screen};
 #[derive(Debug, Clone)]
 pub struct TocItem {
     pub title: String,
+    pub chapter_idx: usize,
+    pub char_offset: usize,
     pub page: usize,
     pub level: usize,
 }
 
 pub enum TocAction {
     JumpTo(usize),
+    JumpToYRead {
+        chapter_idx: usize,
+        char_offset: usize,
+        page: usize,
+    },
     Close,
 }
 
@@ -50,6 +57,46 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
         }
     }
 
+    pub fn from_yread_toc(
+        toc: &[yread::model::TocEntry],
+        offsets: &[usize],
+        chars_per_page: f32,
+        current_page: usize,
+        on_action: F,
+    ) -> Self {
+        let mut items = Vec::new();
+        let cpp = chars_per_page.max(100.0);
+        for entry in toc {
+            let base_page = offsets.get(entry.chapter_idx).copied().unwrap_or(0);
+            let sec_page = (entry.char_offset as f32 / cpp).floor() as usize;
+            let page = base_page + sec_page;
+            items.push(TocItem {
+                title: entry.title.clone(),
+                chapter_idx: entry.chapter_idx,
+                char_offset: entry.char_offset,
+                page,
+                level: entry.level,
+            });
+        }
+        let mut best_idx = 0;
+        for (i, item) in items.iter().enumerate() {
+            if item.page <= current_page {
+                best_idx = i;
+            } else {
+                break;
+            }
+        }
+        let initial_offset = best_idx.saturating_sub(2);
+        TocDialog {
+            items,
+            current_page,
+            offset: initial_offset,
+            per_page: 8,
+            dims: (1236, 1648),
+            on_action,
+        }
+    }
+
     pub fn from_chapters(
         chapters: &[yread::model::Chapter],
         current_chap: usize,
@@ -64,6 +111,8 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             };
             items.push(TocItem {
                 title,
+                chapter_idx: idx,
+                char_offset: 0,
                 page: idx,
                 level: 0,
             });
@@ -100,6 +149,8 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             if !clean_title.is_empty() {
                 out.push(TocItem {
                     title: clean_title,
+                    chapter_idx: 0,
+                    char_offset: 0,
                     page: page_num,
                     level,
                 });
@@ -223,8 +274,12 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
                 if py >= list_top && py < list_top + self.per_page as i32 * row_h {
                     let idx = self.offset + ((py - list_top) / row_h) as usize;
                     if idx < self.items.len() {
-                        let target_page = self.items[idx].page;
-                        return (self.on_action)(TocAction::JumpTo(target_page));
+                        let it = &self.items[idx];
+                        return (self.on_action)(TocAction::JumpToYRead {
+                            chapter_idx: it.chapter_idx,
+                            char_offset: it.char_offset,
+                            page: it.page,
+                        });
                     }
                 }
 

@@ -217,3 +217,244 @@ fn test_epub_parse_and_paginate() {
     assert_eq!(pt.page_count(), 1);
     assert_eq!(layouts.len(), 1);
 }
+
+#[test]
+fn test_html_entity_unescape_and_lossy_safety() {
+    use yread::epub::unescape_html_lossy;
+
+    assert_eq!(unescape_html_lossy("Hello&nbsp;world"), "Hello\u{00A0}world");
+    assert_eq!(unescape_html_lossy("A&mdash;B&hellip;C"), "A—B…C");
+    assert_eq!(unescape_html_lossy("&#8212;"), "—");
+    assert_eq!(unescape_html_lossy("&#x2014;"), "—");
+    // Unknown entities shouldn't panic or fail
+    assert_eq!(unescape_html_lossy("&unknownentity;"), "&unknownentity;");
+}
+
+#[test]
+fn test_fb2_footnotes_and_toc_extraction() {
+    const FB2_WITH_NOTES: &str = r##"<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+<description>
+  <title-info>
+    <book-title>Test Book</book-title>
+  </title-info>
+</description>
+<body>
+  <section>
+    <title><p>Chapter One: Beginning</p></title>
+    <p>Some text with footnote reference <a type="note" href="#note_1">[1]</a>.</p>
+  </section>
+</body>
+<body name="notes">
+  <section id="note_1">
+    <title><p>1</p></title>
+    <p>This is the explanation of note 1.</p>
+  </section>
+</body>
+</FictionBook>"##;
+
+    let book = parse_fb2(FB2_WITH_NOTES.as_bytes()).expect("parse");
+    assert_eq!(book.toc.len(), 1);
+    assert_eq!(book.toc[0].title, "Chapter One: Beginning");
+    assert!(book.footnotes.contains_key("note_1"));
+}
+
+/// In-memory EPUB with arbitrary body XHTML (for parser-level tests).
+fn epub_with_body(body: &str) -> Vec<u8> {
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    let mut buf = Vec::new();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+    let options = SimpleFileOptions::default();
+    zip.start_file("META-INF/container.xml", options).unwrap();
+    zip.write_all(br#"<container><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
+    zip.start_file("content.opf", options).unwrap();
+    zip.write_all(br#"<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>T</dc:title><dc:language>en</dc:language></metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#).unwrap();
+    zip.start_file("c1.xhtml", options).unwrap();
+    let doc = format!(r#"<html><head><title>Ch</title></head><body>{}</body></html>"#, body);
+    zip.write_all(doc.as_bytes()).unwrap();
+    zip.finish().unwrap();
+    buf
+}
+
+#[test]
+fn test_lazy_epub_images_load_on_demand() {
+    let path = std::path::Path::new("/tmp/sample_book.epub");
+    if !path.exists() {
+        return; // device book not present on this host
+    }
+    let book = yread::epub::parse_epub_file(path).expect("lazy parse");
+    assert!(book.chapters.len() > 1);
+    // No eager bytes; sizes known for layout; lazy entries registered.
+    assert!(book.images.is_empty(), "file-backed parse must not retain image bytes");
+    let entries = book.lazy_images.entry_count();
+    assert!(entries > 50, "expected ~109 image entries, got {}", entries);
+    let sniffed = book.image_sizes.len();
+    assert!(sniffed > entries / 2, "sniffer should cover most images ({} of {})", sniffed, entries);
+
+    // An on-demand load returns decodable bytes.
+    let any_id = book.image_sizes.keys().next().cloned().unwrap();
+    let bytes = book.get_image(&any_id).expect("lazy load");
+    assert!(bytes.len() > 100);
+    // Second load hits the memoized copy.
+    assert!(book.get_image(&any_id).is_some());
+}
+
+#[test]
+fn test_sniff_image_size_headers() {
+    use yread::epub::sniff_image_size;
+    // PNG: signature + IHDR with 1234x567
+    let mut png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+    png.extend_from_slice(&[0, 0, 0, 13]); // IHDR len
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&1234u32.to_be_bytes());
+    png.extend_from_slice(&567u32.to_be_bytes());
+    assert_eq!(sniff_image_size(&png), Some((1234, 567)));
+
+    // GIF: 6-byte magic + LE dims
+    let mut gif = b"GIF89a".to_vec();
+    gif.extend_from_slice(&320u16.to_le_bytes());
+    gif.extend_from_slice(&240u16.to_le_bytes());
+    assert_eq!(sniff_image_size(&gif), Some((320, 240)));
+
+    // JPEG: SOI + APP0 (JFIF, 16 bytes) + SOF0 with 800x600
+    let mut jpg = vec![0xFF, 0xD8];
+    jpg.extend_from_slice(&[0xFF, 0xE0]);
+    jpg.extend_from_slice(&16u16.to_be_bytes());
+    jpg.extend_from_slice(&[0; 14]); // JFIF payload
+    jpg.extend_from_slice(&[0xFF, 0xC0]);
+    jpg.extend_from_slice(&17u16.to_be_bytes());
+    jpg.extend_from_slice(&[8, 0x02, 0x58, 0x03, 0x20, 0x03]); // prec, h=600, w=800
+    assert_eq!(sniff_image_size(&jpg), Some((800, 600)));
+
+    assert_eq!(sniff_image_size(b"not an image at all"), None);
+}
+
+#[test]
+fn test_fb2_path_streaming_parse() {
+    let tmp = std::env::temp_dir().join("yread_probe.fb2");
+    std::fs::write(&tmp, WAR_AND_PEACE_FB2.as_bytes()).unwrap();
+    let book = yread::fb2::parse_fb2_path(&tmp).expect("path parse");
+    assert_eq!(book.chapters.len(), 1);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn test_br_produces_real_line_breaks() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    let book = yread::epub::parse_epub(&epub_with_body("<p>line one<br/>line two</p>")).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let lines = break_paragraph_lines(
+        &ch.text, runs, 0.0, 5000.0, 10.0, 1.1, TextAlign::Left,
+        &fonts, &mut cache, None,
+    );
+
+    assert_eq!(lines.len(), 2, "br must split into two lines, text was {:?}", ch.text);
+    assert_eq!(&ch.text[lines[0].start_byte..lines[0].end_byte], "line one");
+    assert_eq!(&ch.text[lines[1].start_byte..lines[1].end_byte], "line two");
+}
+
+#[test]
+fn test_consecutive_brs_yield_blank_line_with_monotonic_offsets() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    let book = yread::epub::parse_epub(&epub_with_body("<p>alpha<br/><br/>beta</p>")).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let lines = break_paragraph_lines(
+        &ch.text, runs, 0.0, 5000.0, 10.0, 1.1, TextAlign::Left,
+        &fonts, &mut cache, None,
+    );
+
+    assert_eq!(lines.len(), 3, "consecutive brs = 3 lines (one blank)");
+    assert!(lines[1].items.is_empty(), "middle line is blank");
+    assert_eq!(lines[1].start_char, lines[0].end_char, "blank line inherits previous end");
+    assert!(lines[1].start_char <= lines[2].start_char, "offsets stay monotonic");
+}
+
+#[test]
+fn test_page_starts_are_set_consistent_and_monotonic() {
+    use yread::model::{Block, Chapter, Run, Style, TextAlign};
+
+    // Hand-built chapter: one-line paragraphs each followed by a rule (scene
+    // breaks), paginated into a tiny page. Units are line+rule, so overflow
+    // lands on the RULE half of the unit — the pending-start path — on most
+    // page breaks, deterministically.
+    let mut ch = Chapter::new("t", "T");
+    let filler = "lorem ipsum dolor sit";
+    let mut blocks = Vec::new();
+    for i in 0..40 {
+        let text = format!("{} {}", filler, i);
+        let start = ch.text.len();
+        ch.text.push_str(&text);
+        let end = ch.text.len();
+        blocks.push(Block::Paragraph {
+            runs: vec![Run { start, end, style: Style::default() }],
+            indent: false,
+            align: TextAlign::Justify,
+            left_margin_em: 0.0,
+            bullet_prefix: None,
+            is_quote: false,
+        });
+        blocks.push(Block::Rule);
+    }
+    ch.blocks = blocks;
+
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let config = LayoutConfig {
+        page_width: 600,
+        page_height: 500,
+        margin_left: 30,
+        margin_right: 30,
+        margin_top: 30,
+        margin_bottom: 30,
+        font_size: 11.0,
+        line_spacing: 1.15,
+        paragraph_spacing: 0.15,
+        indent_em: 1.2,
+        hyphenate: true,
+    };
+
+    let (pt, layouts) = paginate_chapter(&ch, &config, &fonts, &mut cache, Some(hypher::Lang::English));
+
+    assert!(pt.page_count() >= 3, "tiny pages must force breaks, got {}", pt.page_count());
+    for (i, l) in layouts.iter().enumerate() {
+        assert_eq!(l.start_char, pt.pages[i].char_offset,
+            "page {} start_char must match its PageBreak", i);
+    }
+    for w in layouts.windows(2) {
+        // Strict: a repeated start means a page recorded its predecessor's
+        // offset (the old Rule/Image/CodeBlock break bug).
+        assert!(w[0].start_char < w[1].start_char, "page starts must be strictly monotonic");
+        assert!(w[0].end_char <= w[1].end_char, "page ends must be monotonic");
+    }
+    // A later page starting at char 0 means the start was never recorded.
+    assert!(layouts[layouts.len() - 1].start_char > 0,
+        "last page start_char must be a real offset, not the default 0");
+
+    // And the reading position round-trips: the page that claims to contain
+    // a char actually renders that char.
+    let probe = ch.char_count() / 2;
+    let page = pt.page_for_char(probe);
+    let upper = layouts.get(page + 1).map(|l| l.start_char).unwrap_or(ch.char_count());
+    assert!(probe >= layouts[page].start_char && probe < upper,
+        "char {} should be inside page {} [{}, {})",
+        probe, page, layouts[page].start_char, upper);
+}

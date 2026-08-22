@@ -224,13 +224,25 @@ impl<R: BufRead> Fb2Parser<R> {
             }
             "a" => {
                 self.style_stack.push(self.current_style.clone());
+                let mut target: Option<String> = None;
+                let mut is_note = false;
                 for attr in e.attributes().flatten() {
                     let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
+                    let v = String::from_utf8_lossy(&attr.value).to_string();
                     if k.ends_with("href") {
-                        let href = String::from_utf8_lossy(&attr.value).to_string();
-                        let target = href.trim_start_matches('#').to_string();
-                        self.current_style.footnote_ref = Some(target);
+                        target = Some(v.trim_start_matches('#').to_string());
+                    } else if k == "type" && v == "note" {
+                        is_note = true;
                     }
+                }
+                if let Some(t) = target {
+                    // Note references render as small superscript markers;
+                    // the conventional "n…" id covers books omitting type.
+                    if is_note || t.starts_with('n') {
+                        self.current_style.is_sup = true;
+                        self.current_style.size_mult *= 0.75;
+                    }
+                    self.current_style.footnote_ref = Some(t);
                 }
             }
             "empty-line" => {
@@ -309,6 +321,15 @@ impl<R: BufRead> Fb2Parser<R> {
                 self.in_title = false;
                 let title_text = self.extract_runs_text(&self.title_runs);
                 if !title_text.is_empty() {
+                    let ch_idx = self.book.chapters.len();
+                    let char_offset = self.current_chapter.as_ref().map(|c| c.char_count()).unwrap_or(0);
+                    self.book.toc.push(crate::model::TocEntry {
+                        title: title_text.clone(),
+                        chapter_idx: ch_idx,
+                        byte_offset: 0,
+                        char_offset,
+                        level: self.section_depth.saturating_sub(1),
+                    });
                     if let Some(ref mut chap) = self.current_chapter {
                         chap.title = title_text.clone();
                         chap.blocks.push(Block::Heading {
@@ -391,7 +412,16 @@ impl<R: BufRead> Fb2Parser<R> {
                 // Only collect text when actively inside a paragraph, title, or note
                 if self.in_paragraph || self.in_title {
                     if self.in_notes {
-                        // For notes, collect text
+                        let normalized = normalize_spaces(raw_text);
+                        if !normalized.is_empty() {
+                            let start = 0;
+                            let end = normalized.len();
+                            self.current_runs.push(Run {
+                                start,
+                                end,
+                                style: self.current_style.clone(),
+                            });
+                        }
                     } else {
                         self.ensure_chapter(None);
                         if let Some(ref mut chap) = self.current_chapter {
@@ -463,6 +493,32 @@ pub fn parse_fb2(data: &[u8]) -> Result<Book, String> {
         Err("No .fb2 file found in zip archive".to_string())
     } else {
         let parser = Fb2Parser::new(Cursor::new(data));
+        parser.parse()
+    }
+}
+
+/// Parse an FB2 / FB2.ZIP file from disk, streaming — no whole-file read
+/// (a 4MB novel never materializes as a Vec).
+pub fn parse_fb2_path(path: &std::path::Path) -> Result<Book, String> {
+    let mut magic = [0u8; 4];
+    let is_zip = match std::fs::File::open(path) {
+        Ok(mut f) => f.read_exact(&mut magic).is_ok() && &magic == b"PK\x03\x04",
+        Err(e) => return Err(format!("Cannot open FB2 '{}': {}", path.display(), e)),
+    };
+    if is_zip {
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Zip error: {:?}", e))?;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).map_err(|e| format!("Zip file error: {:?}", e))?;
+            if file.name().ends_with(".fb2") || file.name().ends_with(".xml") {
+                let parser = Fb2Parser::new(std::io::BufReader::new(file));
+                return parser.parse();
+            }
+        }
+        Err("No .fb2 file found in zip archive".to_string())
+    } else {
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let parser = Fb2Parser::new(std::io::BufReader::new(file));
         parser.parse()
     }
 }
