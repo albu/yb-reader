@@ -734,7 +734,12 @@ impl ReaderScreen {
         let origin_y = cfg.margin_top as f32;
         for elem in &cur_layout.elements {
             if let yread::paginate::PageElement::Line { line, x, y } = elem {
-                let mut cur_x = origin_x + x;
+                // Same pen math the raster uses (alignment offsets +
+                // justify space stretch) — rects must match painted
+                // positions or lookups hit the neighbor word near line
+                // ends on justified text.
+                let (align_off, extra_space) = yread::raster::alignment_adjust(line);
+                let mut cur_x = origin_x + x + align_off;
                 for item in &line.items {
                     match item {
                         yread::line::LineItem::Word { byte_start, byte_end, shaped, style, .. } => {
@@ -768,7 +773,7 @@ impl ReaderScreen {
                             cur_x += prefix_shaped.advance + hyphen_adv;
                         }
                         yread::line::LineItem::Space { adv, .. } => {
-                            cur_x += *adv;
+                            cur_x += *adv + extra_space;
                         }
                         yread::line::LineItem::HardBreak => {}
                     }

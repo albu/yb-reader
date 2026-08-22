@@ -37,11 +37,41 @@ impl Default for Rasterizer {
     }
 }
 
+/// Pen position adjustment for a line's alignment: (leading offset,
+/// extra advance per inter-word space). Shared truth for the RASTER and
+/// the app's word-rect extraction — when they drifted apart, lookups
+/// hit the wrong word near line ends on justified text (the dictionary
+/// "couldn't find" words it had).
+pub fn alignment_adjust(line: &crate::line::LayoutLine) -> (f32, f32) {
+    match line.align {
+        TextAlign::Center => {
+            let slack = (line.max_width - line.width).max(0.0);
+            (slack / 2.0, 0.0)
+        }
+        TextAlign::Right => {
+            let slack = (line.max_width - line.width).max(0.0);
+            (slack, 0.0)
+        }
+        TextAlign::Justify => {
+            if !line.is_last_in_paragraph && line.width < line.max_width {
+                let space_count = line.items.iter().filter(|it| it.is_space()).count();
+                if space_count > 0 {
+                    let slack = line.max_width - line.width;
+                    if slack < line.max_width * 0.40 {
+                        return (0.0, slack / space_count as f32);
+                    }
+                }
+            }
+            (0.0, 0.0)
+        }
+        TextAlign::Left => (0.0, 0.0),
+    }
+}
+
 impl Rasterizer {
     pub fn new() -> Self {
         Self::default()
     }
-
     /// Render a page into an 8-bit grayscale framebuffer (0 = black, 255 = white).
     pub fn render_page(
         &mut self,
@@ -187,29 +217,8 @@ impl Rasterizer {
         p_height: usize,
     ) {
         let mut cur_x = line_start_x;
-        let mut extra_space_per_gap = 0.0f32;
-        match line.align {
-            TextAlign::Center => {
-                let slack = (line.max_width - line.width).max(0.0);
-                cur_x += slack / 2.0;
-            }
-            TextAlign::Right => {
-                let slack = (line.max_width - line.width).max(0.0);
-                cur_x += slack;
-            }
-            TextAlign::Justify => {
-                if !line.is_last_in_paragraph && line.width < line.max_width {
-                    let space_count = line.items.iter().filter(|it| it.is_space()).count();
-                    if space_count > 0 {
-                        let slack = line.max_width - line.width;
-                        if slack < line.max_width * 0.40 {
-                            extra_space_per_gap = slack / space_count as f32;
-                        }
-                    }
-                }
-            }
-            TextAlign::Left => {}
-        }
+        let (start_off, extra_space_per_gap) = alignment_adjust(line);
+        cur_x += start_off;
 
         for item in &line.items {
             match item {

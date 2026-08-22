@@ -37,7 +37,7 @@ fn main() {
         page_height: 1648,
         margin_left: 72,
         margin_right: 72,
-        margin_top: 72 + 92,
+        margin_top: std::env::var("MT").ok().and_then(|v| v.parse().ok()).unwrap_or(72 + 92),
         margin_bottom: 72 + 50,
         font_size: 9.0,
         line_spacing: 1.2,
@@ -91,6 +91,35 @@ fn main() {
     let _ = (pt.pages.len(), pt2.pages.len());
 
     // Loop warm runs long enough to profile (~3s)
+    // What does the dictionary see? Find hyphenated fragments on ch12 pages
+    {
+        let mut frags = 0;
+        for (pi, lay) in layouts.iter().enumerate() {
+            for elem in &lay.elements {
+                if let yread::paginate::PageElement::Line { line, .. } = elem {
+                    let mut has_prefix = false;
+                    for item in &line.items {
+                        match item {
+                            yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, .. } => {
+                                has_prefix = true;
+                                let w = &ch.text[*byte_start..*byte_end];
+                                if w.contains("switch") { println!("p{} PREFIX {:?} (line ends, next line starts with rest)", pi, w); }
+                            }
+                            yread::line::LineItem::Word { byte_start, byte_end, .. } => {
+                                let w = &ch.text[*byte_start..*byte_end];
+                                if w.contains("switch") { println!("p{} WORD   {:?}", pi, w); }
+                                if has_prefix && (w == "es" || w == "es," || w.len() <= 4) { frags += 1; }
+                                has_prefix = false;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        println!("prefix-suffix fragment pairs near 'switch': {}", frags);
+    }
+
     // Hyphenation A/B: same chapter, hyphenate=false
     {
         let mut cfg_noh = cfg.clone();
