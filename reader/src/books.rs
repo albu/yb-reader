@@ -30,6 +30,7 @@ pub struct ReaderScreen {
     sel_mode: bool,
     sel: Option<SelState>,
     jump_history: Vec<(usize, usize)>,
+    turns_since_full: usize,
 }
 
 impl ReaderScreen {
@@ -72,6 +73,7 @@ impl ReaderScreen {
             sel_mode: false,
             sel: None,
             jump_history: Vec::new(),
+            turns_since_full: 0,
         }
     }
 
@@ -189,6 +191,25 @@ impl ReaderScreen {
     fn open_word_dialog(&mut self, entry: crate::vocab::WordEntry) -> Action {
         dialogs::word_dialog(entry, self.vocab_prof.clone(), self.page_gray.clone())
     }
+
+    fn handle_page_turn_result(&mut self, res: PageTurnResult) -> Action {
+        match res {
+            PageTurnResult::Changed { redraw_full } => {
+                self.page_gray = None;
+                self.save_progress();
+                self.turns_since_full += 1;
+                let interval = positions::global_refresh_interval();
+                let force_full = redraw_full || (interval > 0 && self.turns_since_full >= interval);
+                if force_full {
+                    self.turns_since_full = 0;
+                    Action::RedrawFull
+                } else {
+                    Action::Redraw
+                }
+            }
+            _ => Action::Keep,
+        }
+    }
 }
 
 impl Screen for ReaderScreen {
@@ -233,6 +254,7 @@ impl Screen for ReaderScreen {
         let (vw, vh) = self.visual_dims();
 
         if self.backend.poll(vw, vh, &self.settings) {
+            self.page_gray = None;
             Action::Redraw
         } else {
             Action::Keep
@@ -322,21 +344,20 @@ impl Screen for ReaderScreen {
         }
 
         match g {
+            Gesture::TwoFingerTap => {
+                self.turns_since_full = 0;
+                self.page_gray = None;
+                Action::RedrawFull
+            }
             Gesture::Swipe { dir, .. } => {
                 match dir {
                     SwipeDir::East => {
                         let res = self.backend.turn_page(-1, vw, vh, &self.settings);
-                        if let PageTurnResult::Changed { redraw_full } = res {
-                            self.save_progress();
-                            return if redraw_full { Action::RedrawFull } else { Action::Redraw };
-                        }
+                        return self.handle_page_turn_result(res);
                     }
                     SwipeDir::West => {
                         let res = self.backend.turn_page(1, vw, vh, &self.settings);
-                        if let PageTurnResult::Changed { redraw_full } = res {
-                            self.save_progress();
-                            return if redraw_full { Action::RedrawFull } else { Action::Redraw };
-                        }
+                        return self.handle_page_turn_result(res);
                     }
                     SwipeDir::North => {
                         return self.open_quick_settings_sheet();
@@ -378,16 +399,10 @@ impl Screen for ReaderScreen {
                 // Page Turn tap zones
                 if vx < vis_w / 3 {
                     let res = self.backend.turn_page(-1, vw, vh, &self.settings);
-                    if let PageTurnResult::Changed { redraw_full } = res {
-                        self.save_progress();
-                        return if redraw_full { Action::RedrawFull } else { Action::Redraw };
-                    }
+                    return self.handle_page_turn_result(res);
                 } else if vx > vis_w * 2 / 3 {
                     let res = self.backend.turn_page(1, vw, vh, &self.settings);
-                    if let PageTurnResult::Changed { redraw_full } = res {
-                        self.save_progress();
-                        return if redraw_full { Action::RedrawFull } else { Action::Redraw };
-                    }
+                    return self.handle_page_turn_result(res);
                 }
                 Action::Keep
             }
