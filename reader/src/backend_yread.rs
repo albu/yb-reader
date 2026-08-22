@@ -628,10 +628,17 @@ impl ReaderBackend for YreadBackend {
         settings: ReaderSettings,
     ) -> Action {
         if let Some(book) = &self.ybook {
+            let cur_char = self
+                .ychap_cache
+                .get(&self.ychap_idx)
+                .and_then(|(_, layouts)| layouts.get(self.ychap_page))
+                .map(|l| l.end_char)
+                .unwrap_or(self.y_char_offset);
+
             return dialogs::yread_toc_dialog(
                 &book.toc,
                 self.ychap_idx,
-                self.y_char_offset,
+                cur_char,
                 &self.ychap_offsets,
                 back,
                 path_name,
