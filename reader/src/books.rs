@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
@@ -18,7 +20,7 @@ use yui::Orientation;
 pub struct ReaderScreen {
     pw: u32,
     ph: u32,
-    backend: Box<dyn ReaderBackend>,
+    backend: Rc<RefCell<Box<dyn ReaderBackend>>>,
     settings: ReaderSettings,
     page_gray: Option<Vec<u8>>,
     dims: (i32, i32),
@@ -61,7 +63,7 @@ impl ReaderScreen {
         ReaderScreen {
             pw: w,
             ph: h,
-            backend,
+            backend: Rc::new(RefCell::new(backend)),
             settings,
             page_gray: cached_snap,
             dims: (w as i32, h as i32),
@@ -78,7 +80,7 @@ impl ReaderScreen {
     }
 
     fn book_name(&self) -> String {
-        self.backend.book_name()
+        self.backend.borrow().book_name()
     }
 
     fn visual_dims(&self) -> (u32, u32) {
@@ -86,16 +88,17 @@ impl ReaderScreen {
     }
 
     fn is_pdf(&self) -> bool {
-        self.backend.is_pdf()
+        self.backend.borrow().is_pdf()
     }
 
     fn save_progress(&self) {
         let name = self.book_name();
+        let b = self.backend.borrow();
         positions::record_pos(
             &name,
-            self.backend.current_page(),
-            self.backend.total_pages(),
-            self.backend.current_sub_idx(),
+            b.current_page(),
+            b.total_pages(),
+            b.current_sub_idx(),
             Some(self.settings),
         );
     }
@@ -135,7 +138,7 @@ impl ReaderScreen {
     }
 
     fn open_footnote_or_link(&self, uri: &str) -> Action {
-        self.backend.resolve_link_or_footnote(
+        self.backend.borrow().resolve_link_or_footnote(
             uri,
             self.page_gray.clone(),
             self.book_name(),
@@ -144,16 +147,16 @@ impl ReaderScreen {
     }
 
     fn open_toc_dialog(&mut self) -> Action {
-        let cur_page = self.backend.current_page();
+        let cur_page = self.backend.borrow().current_page();
         let back = self.jump_history.last().copied();
-        self.backend.open_toc_dialog(cur_page, back, self.book_name(), self.settings)
+        self.backend.borrow().open_toc_dialog(cur_page, back, self.book_name(), self.settings)
     }
 
     fn open_scrubber_dialog(&mut self) -> Action {
-        let cur_page = self.backend.current_page();
+        let cur_page = self.backend.borrow().current_page();
         let (vw, vh) = self.visual_dims();
         let back = self.jump_history.last().copied();
-        self.backend.open_scrubber_dialog(
+        self.backend.borrow().open_scrubber_dialog(
             cur_page,
             self.page_gray.clone(),
             back,
@@ -166,12 +169,14 @@ impl ReaderScreen {
 
     fn open_quick_settings_sheet(&mut self) -> Action {
         let path_name = self.book_name();
-        let total = self.backend.total_pages();
-        let page_no = self.backend.current_page();
-        let sub_idx = self.backend.current_sub_idx();
+        let total = self.backend.borrow().total_pages();
+        let page_no = self.backend.borrow().current_page();
+        let sub_idx = self.backend.borrow().current_sub_idx();
         let settings = self.settings;
         let is_pdf = self.is_pdf();
         let base_gray = self.page_gray.clone();
+        let backend_rc = Rc::clone(&self.backend);
+        let (vw, vh) = self.visual_dims();
 
         dialogs::quick_settings_sheet(
             path_name,
@@ -182,8 +187,8 @@ impl ReaderScreen {
             is_pdf,
             None,
             base_gray,
-            move |_new_settings| {
-                None
+            move |new_settings| {
+                backend_rc.borrow_mut().interactive_preview(&new_settings, vw, vh)
             },
         )
     }
@@ -230,11 +235,11 @@ impl Screen for ReaderScreen {
             if s != self.settings {
                 let old = self.settings;
                 self.settings = s;
-                self.backend.apply_settings_change(&old, &s, vw, vh);
+                self.backend.borrow_mut().apply_settings_change(&old, &s, vw, vh);
             }
         }
 
-        self.backend.jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+        self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
         self.page_gray = None;
         self.save_progress();
 
@@ -242,7 +247,7 @@ impl Screen for ReaderScreen {
     }
 
     fn tick_interval(&self) -> std::time::Duration {
-        if !self.backend.is_ready() {
+        if !self.backend.borrow().is_ready() {
             std::time::Duration::from_millis(150)
         } else {
             std::time::Duration::from_secs(10)
@@ -253,7 +258,7 @@ impl Screen for ReaderScreen {
         self.time_str = chrome::current_time_str();
         let (vw, vh) = self.visual_dims();
 
-        if self.backend.poll(vw, vh, &self.settings) {
+        if self.backend.borrow_mut().poll(vw, vh, &self.settings) {
             self.page_gray = None;
             Action::Redraw
         } else {
@@ -266,7 +271,8 @@ impl Screen for ReaderScreen {
         self.dims = (w, h);
         let (vw, vh) = self.visual_dims();
 
-        if let Some(err) = self.backend.error() {
+        let mut backend = self.backend.borrow_mut();
+        if let Some(err) = backend.error() {
             p.clear(255);
             let box_w = (w - pt(48.0)).min(pt(320.0));
             let box_h = pt(140.0);
@@ -281,7 +287,7 @@ impl Screen for ReaderScreen {
             return;
         }
 
-        let render_output = self.backend.render_page(vw, vh, &self.settings);
+        let render_output = backend.render_page(vw, vh, &self.settings);
         if render_output.is_loading {
             p.clear(255);
             p.text_center(h / 2, 12.0, 100, "Opening…");
@@ -299,11 +305,14 @@ impl Screen for ReaderScreen {
         self.page_links = render_output.links;
 
         // Header & Footer Chrome
-        let (footer_text, footer_page, footer_total) = self.backend.footer_info();
-        let chap_title = self.backend.chapter_title();
+        let (footer_text, footer_page, footer_total) = backend.footer_info();
+        let chap_title = backend.chapter_title();
+        let is_pdf = backend.is_pdf();
+        drop(backend);
+
         let book_name = self.book_name();
 
-        let top_title = if self.is_pdf() {
+        let top_title = if is_pdf {
             book_name.as_str()
         } else {
             chap_title.as_deref().unwrap_or(book_name.as_str())
@@ -352,11 +361,11 @@ impl Screen for ReaderScreen {
             Gesture::Swipe { dir, .. } => {
                 match dir {
                     SwipeDir::East => {
-                        let res = self.backend.turn_page(-1, vw, vh, &self.settings);
+                        let res = self.backend.borrow_mut().turn_page(-1, vw, vh, &self.settings);
                         return self.handle_page_turn_result(res);
                     }
                     SwipeDir::West => {
-                        let res = self.backend.turn_page(1, vw, vh, &self.settings);
+                        let res = self.backend.borrow_mut().turn_page(1, vw, vh, &self.settings);
                         return self.handle_page_turn_result(res);
                     }
                     SwipeDir::North => {
@@ -398,10 +407,10 @@ impl Screen for ReaderScreen {
 
                 // Page Turn tap zones
                 if vx < vis_w / 3 {
-                    let res = self.backend.turn_page(-1, vw, vh, &self.settings);
+                    let res = self.backend.borrow_mut().turn_page(-1, vw, vh, &self.settings);
                     return self.handle_page_turn_result(res);
                 } else if vx > vis_w * 2 / 3 {
-                    let res = self.backend.turn_page(1, vw, vh, &self.settings);
+                    let res = self.backend.borrow_mut().turn_page(1, vw, vh, &self.settings);
                     return self.handle_page_turn_result(res);
                 }
                 Action::Keep
