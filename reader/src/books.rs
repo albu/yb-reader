@@ -383,10 +383,10 @@ impl Screen for ReaderScreen {
         let (vw, vh) = self.visual_dims();
 
         // 1. Edge Gestures: Curtain, Back, Brightness
-        if g.top_edge_swipe() {
+        if g.top_edge_swipe() || g.top_edge_swipe_in(vis_h.max(vh as i32) as u32) {
             return Action::Push(Box::new(CurtainScreen::new()));
         }
-        if g.corner_back() {
+        if g.corner_back() || g.corner_back_in(vis_w.max(vw as i32) as u32, vis_h.max(vh as i32) as u32) {
             return Action::Pop;
         }
 

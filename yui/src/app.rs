@@ -186,14 +186,15 @@ impl App {
 
         let edges = self.stack.last().map(|s| s.default_edges()).unwrap_or(false);
         if edges {
-            if g.top_edge_swipe() {
+            let (vw, vh) = self.orientation.visual_dims(self.panel.width, self.panel.height);
+            if g.top_edge_swipe() || g.top_edge_swipe_in(vh) {
                 // No default overlay: the app registers its control
                 // center (with_edge_overlay) or edge gestures aren't
                 // special here.
                 if let Some(make) = self.overlay.as_ref() {
                     return Action::Push(make());
                 }
-            } else if g.corner_back() {
+            } else if g.corner_back() || g.corner_back_in(vw, vh) {
                 return Action::Pop;
             }
         }

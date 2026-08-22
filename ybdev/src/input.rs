@@ -48,12 +48,27 @@ impl Gesture {
         matches!(self, Gesture::Swipe { dir: SwipeDir::South, y, .. } if *y < TOP_EDGE_Y)
     }
 
+    pub fn top_edge_swipe_in(&self, h: u32) -> bool {
+        let max_y = (h * 8 / 100).max(TOP_EDGE_Y);
+        matches!(self, Gesture::Swipe { dir: SwipeDir::South, y, .. } if *y < max_y)
+    }
+
     /// An upward swipe that starts in the bottom-right corner → back.
     pub fn corner_back(&self) -> bool {
         matches!(
             self,
             Gesture::Swipe { dir: SwipeDir::North, x, y, .. }
                 if *x > CORNER_X && *y > CORNER_Y
+        )
+    }
+
+    pub fn corner_back_in(&self, w: u32, h: u32) -> bool {
+        let min_x = w - (w * 28 / 100);
+        let min_y = h - (h * 18 / 100);
+        matches!(
+            self,
+            Gesture::Swipe { dir: SwipeDir::North, x, y, .. }
+                if *x > min_x && *y > min_y
         )
     }
 }
