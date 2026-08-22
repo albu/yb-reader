@@ -299,273 +299,257 @@ impl<R: Read + Seek> EpubParser<R> {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                     for attr in e.attributes().flatten() {
-                        let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
-                        if k == "id" || k == "name" {
-                            let id_val = String::from_utf8_lossy(&attr.value).to_string();
-                            chapter.anchors.insert(id_val, current_char_count);
+                        let k = attr.key.as_ref();
+                        if k.eq_ignore_ascii_case(b"id") || k.eq_ignore_ascii_case(b"name") {
+                            if let Ok(id_val) = std::str::from_utf8(&attr.value) {
+                                chapter.anchors.insert(id_val.to_string(), current_char_count);
+                            }
                         }
                     }
-                    let name = String::from_utf8_lossy(e.name().as_ref()).to_lowercase();
-                    match name.as_str() {
-                        "title" => {
-                            in_title_tag = true;
-                            title_tag_buf.clear();
+                    let name = e.name();
+                    let n = name.as_ref();
+                    if n.eq_ignore_ascii_case(b"title") {
+                        in_title_tag = true;
+                        title_tag_buf.clear();
+                    } else if n.eq_ignore_ascii_case(b"br") {
+                        if in_block {
+                            let start = chapter.text.len();
+                            chapter.text.push('\n');
+                            current_char_count += 1;
+                            let end = chapter.text.len();
+                            current_runs.push(Run {
+                                start,
+                                end,
+                                style: current_style.clone(),
+                            });
                         }
-                        "br" => {
-                            if in_block {
-                                let start = chapter.text.len();
-                                chapter.text.push('\n');
-                                current_char_count += 1;
-                                let end = chapter.text.len();
-                                current_runs.push(Run {
-                                    start,
-                                    end,
-                                    style: current_style.clone(),
-                                });
-                            }
-                        }
-                        "ul" => {
-                            list_stack.push(ListType::Unordered);
-                        }
-                        "ol" => {
-                            list_stack.push(ListType::Ordered(1));
-                        }
-                        "blockquote" | "aside" => {
-                            in_blockquote = true;
-                        }
-                        "figure" => {
-                            in_figure = true;
-                        }
-                        "li" => {
-                            in_li = true;
-                            let level = list_stack.len().max(1);
-                            li_margin_em = (level - 1) as f32 * 1.5;
-                            let bullet_str = if let Some(last) = list_stack.last_mut() {
-                                match last {
-                                    ListType::Ordered(num) => {
-                                        let s = format!("{}. ", num);
-                                        *num += 1;
-                                        s
-                                    }
-                                    ListType::Unordered => {
-                                        if level > 1 { "– ".to_string() } else { "• ".to_string() }
-                                    }
+                    } else if n.eq_ignore_ascii_case(b"ul") {
+                        list_stack.push(ListType::Unordered);
+                    } else if n.eq_ignore_ascii_case(b"ol") {
+                        list_stack.push(ListType::Ordered(1));
+                    } else if n.eq_ignore_ascii_case(b"blockquote") || n.eq_ignore_ascii_case(b"aside") {
+                        in_blockquote = true;
+                    } else if n.eq_ignore_ascii_case(b"figure") {
+                        in_figure = true;
+                    } else if n.eq_ignore_ascii_case(b"li") {
+                        in_li = true;
+                        let level = list_stack.len().max(1);
+                        li_margin_em = (level - 1) as f32 * 1.5;
+                        let bullet_str = if let Some(last) = list_stack.last_mut() {
+                            match last {
+                                ListType::Ordered(num) => {
+                                    let s = format!("{}. ", num);
+                                    *num += 1;
+                                    s
                                 }
-                            } else {
-                                "• ".to_string()
-                            };
-                            li_bullet = Some(bullet_str);
+                                ListType::Unordered => {
+                                    if level > 1 { "– ".to_string() } else { "• ".to_string() }
+                                }
+                            }
+                        } else {
+                            "• ".to_string()
+                        };
+                        li_bullet = Some(bullet_str);
 
-                            current_runs.clear();
-                            in_block = true;
-                            current_style = Style::default();
+                        current_runs.clear();
+                        in_block = true;
+                        current_style = Style::default();
+                        current_style.indent = false;
+                        cur_bullet = li_bullet.clone();
+                        cur_margin_em = li_margin_em;
+                        cur_is_quote = false;
+                        block_align = parse_align_from_attrs(e).unwrap_or(TextAlign::Left);
+                        current_style.align = block_align;
+                    } else if n.eq_ignore_ascii_case(b"pre") {
+                        in_pre = true;
+                        pre_buf.clear();
+                    } else if n.eq_ignore_ascii_case(b"p") || n.eq_ignore_ascii_case(b"div") {
+                        current_runs.clear();
+                        in_block = true;
+                        current_style = Style::default();
+                        if in_li {
                             current_style.indent = false;
-                            cur_bullet = li_bullet.clone();
+                            cur_bullet = li_bullet.take();
                             cur_margin_em = li_margin_em;
                             cur_is_quote = false;
-                            block_align = parse_align_from_attrs(e).unwrap_or(TextAlign::Left);
-                            current_style.align = block_align;
+                        } else if in_blockquote {
+                            current_style.indent = false;
+                            cur_bullet = None;
+                            cur_margin_em = 1.5;
+                            cur_is_quote = true;
+                            current_style.font_style = FontStyle::Italic;
+                        } else {
+                            current_style.indent = n.eq_ignore_ascii_case(b"p");
+                            cur_bullet = None;
+                            cur_margin_em = 0.0;
+                            cur_is_quote = false;
                         }
-                        "pre" => {
-                            in_pre = true;
-                            pre_buf.clear();
-                        }
-                        "p" | "div" => {
-                            current_runs.clear();
-                            in_block = true;
-                            current_style = Style::default();
-                            if in_li {
-                                current_style.indent = false;
-                                cur_bullet = li_bullet.take();
-                                cur_margin_em = li_margin_em;
-                                cur_is_quote = false;
-                            } else if in_blockquote {
-                                current_style.indent = false;
-                                cur_bullet = None;
-                                cur_margin_em = 1.5;
-                                cur_is_quote = true;
-                                current_style.font_style = FontStyle::Italic;
-                            } else {
-                                current_style.indent = name == "p";
-                                cur_bullet = None;
-                                cur_margin_em = 0.0;
-                                cur_is_quote = false;
+                        block_align = parse_align_from_attrs(e).unwrap_or(if in_li { TextAlign::Left } else { TextAlign::Justify });
+                        current_style.align = block_align;
+                    } else if n.len() == 2 && n[0].to_ascii_lowercase() == b'h' && (n[1] >= b'1' && n[1] <= b'6') || n.eq_ignore_ascii_case(b"figcaption") {
+                        current_runs.clear();
+                        in_block = true;
+                        heading_level = if n.eq_ignore_ascii_case(b"figcaption") {
+                            6
+                        } else {
+                            n[1] - b'0'
+                        };
+                        current_style = Style::default();
+                        current_style.font_style = if in_figure || heading_level == 6 { FontStyle::Italic } else { FontStyle::Bold };
+                        current_style.size_mult = if in_figure || heading_level == 6 {
+                            0.85
+                        } else {
+                            match heading_level {
+                                1 => 1.35,
+                                2 => 1.20,
+                                _ => 1.10,
                             }
-                            block_align = parse_align_from_attrs(e).unwrap_or(if in_li { TextAlign::Left } else { TextAlign::Justify });
-                            current_style.align = block_align;
-                        }
-                        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "figcaption" => {
-                            current_runs.clear();
-                            in_block = true;
-                            heading_level = if name == "figcaption" {
-                                6
-                            } else {
-                                name.chars().nth(1).and_then(|c| c.to_digit(10)).unwrap_or(1) as u8
-                            };
-                            current_style = Style::default();
-                            current_style.font_style = if in_figure || heading_level == 6 { FontStyle::Italic } else { FontStyle::Bold };
-                            current_style.size_mult = if in_figure || heading_level == 6 {
-                                0.85
-                            } else {
-                                match heading_level {
-                                    1 => 1.35,
-                                    2 => 1.20,
-                                    _ => 1.10,
-                                }
-                            };
-                            block_align = parse_align_from_attrs(e).unwrap_or(TextAlign::Center);
-                            current_style.align = block_align;
-                        }
-                        "b" | "strong" => {
-                            style_stack.push(current_style.clone());
-                            current_style.font_style = match current_style.font_style {
-                                FontStyle::Italic | FontStyle::BoldItalic => FontStyle::BoldItalic,
-                                _ => FontStyle::Bold,
-                            };
-                        }
-                        "i" | "em" => {
-                            style_stack.push(current_style.clone());
-                            current_style.font_style = match current_style.font_style {
-                                FontStyle::Bold | FontStyle::BoldItalic => FontStyle::BoldItalic,
-                                _ => FontStyle::Italic,
-                            };
-                        }
-                        "sup" => {
-                            style_stack.push(current_style.clone());
-                            current_style.is_sup = true;
-                            current_style.size_mult *= 0.75;
-                        }
-                        "sub" => {
-                            style_stack.push(current_style.clone());
-                            current_style.is_sub = true;
-                            current_style.size_mult *= 0.75;
-                        }
-                        "code" | "tt" => {
-                            style_stack.push(current_style.clone());
-                            current_style.is_code = true;
-                        }
-                        "a" => {
-                            style_stack.push(current_style.clone());
-                            let mut target_href: Option<String> = None;
-                            let mut is_note_ref = false;
-                            for attr in e.attributes().flatten() {
-                                let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
-                                let v = String::from_utf8_lossy(&attr.value).to_string();
-                                if k == "href" || k.ends_with("href") {
-                                    target_href = Some(v);
-                                } else if (k == "epub:type" || k == "type" || k == "class" || k == "rel")
+                        };
+                        block_align = parse_align_from_attrs(e).unwrap_or(TextAlign::Center);
+                        current_style.align = block_align;
+                    } else if n.eq_ignore_ascii_case(b"b") || n.eq_ignore_ascii_case(b"strong") {
+                        style_stack.push(current_style.clone());
+                        current_style.font_style = match current_style.font_style {
+                            FontStyle::Italic | FontStyle::BoldItalic => FontStyle::BoldItalic,
+                            _ => FontStyle::Bold,
+                        };
+                    } else if n.eq_ignore_ascii_case(b"i") || n.eq_ignore_ascii_case(b"em") {
+                        style_stack.push(current_style.clone());
+                        current_style.font_style = match current_style.font_style {
+                            FontStyle::Bold | FontStyle::BoldItalic => FontStyle::BoldItalic,
+                            _ => FontStyle::Italic,
+                        };
+                    } else if n.eq_ignore_ascii_case(b"sup") {
+                        style_stack.push(current_style.clone());
+                        current_style.is_sup = true;
+                        current_style.size_mult *= 0.75;
+                    } else if n.eq_ignore_ascii_case(b"sub") {
+                        style_stack.push(current_style.clone());
+                        current_style.is_sub = true;
+                        current_style.size_mult *= 0.75;
+                    } else if n.eq_ignore_ascii_case(b"code") || n.eq_ignore_ascii_case(b"tt") {
+                        style_stack.push(current_style.clone());
+                        current_style.is_code = true;
+                    } else if n.eq_ignore_ascii_case(b"a") {
+                        style_stack.push(current_style.clone());
+                        let mut target_href: Option<String> = None;
+                        let mut is_note_ref = false;
+                        for attr in e.attributes().flatten() {
+                            let k = attr.key.as_ref();
+                            if let Ok(v) = std::str::from_utf8(&attr.value) {
+                                if k.eq_ignore_ascii_case(b"href") || k.ends_with(b"href") {
+                                    target_href = Some(v.to_string());
+                                } else if (k.eq_ignore_ascii_case(b"epub:type") || k.eq_ignore_ascii_case(b"type") || k.eq_ignore_ascii_case(b"class") || k.eq_ignore_ascii_case(b"rel"))
                                     && (v.contains("noteref") || v.contains("footnote") || v.contains("note"))
                                 {
                                     is_note_ref = true;
                                 }
                             }
-                            if let Some(href) = target_href {
-                                if is_note_ref {
-                                    current_style.is_sup = true;
-                                    current_style.size_mult *= 0.75;
+                        }
+                        if let Some(href) = target_href {
+                            if is_note_ref {
+                                current_style.is_sup = true;
+                                current_style.size_mult *= 0.75;
+                            }
+                            current_style.footnote_ref = Some(href);
+                        }
+                    } else if n.eq_ignore_ascii_case(b"hr") {
+                        chapter.blocks.push(Block::Rule);
+                    } else if n.eq_ignore_ascii_case(b"img") || n.eq_ignore_ascii_case(b"image") {
+                        let mut target_src = String::new();
+                        for attr in e.attributes().flatten() {
+                            let k = attr.key.as_ref();
+                            if k.eq_ignore_ascii_case(b"src") || k.ends_with(b"href") {
+                                if let Ok(v) = std::str::from_utf8(&attr.value) {
+                                    target_src = v.to_string();
                                 }
-                                current_style.footnote_ref = Some(href);
                             }
                         }
-                        "hr" => {
-                            chapter.blocks.push(Block::Rule);
+                        if !target_src.is_empty() {
+                            let resolved_src = resolve_relative_path(href, &target_src);
+                            chapter.blocks.push(Block::Image {
+                                id: resolved_src,
+                                width: None,
+                                height: None,
+                                caption: None,
+                            });
                         }
-                        "img" | "image" => {
-                            let mut target_src = String::new();
-                            for attr in e.attributes().flatten() {
-                                let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
-                                if k == "src" || k.ends_with("href") {
-                                    target_src = String::from_utf8_lossy(&attr.value).to_string();
-                                }
-                            }
-                            if !target_src.is_empty() {
-                                let resolved_src = resolve_relative_path(href, &target_src);
-                                chapter.blocks.push(Block::Image {
-                                    id: resolved_src,
-                                    width: None,
-                                    height: None,
-                                    caption: None,
-                                });
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 Ok(Event::End(ref e)) => {
-                    let name = String::from_utf8_lossy(e.name().as_ref()).to_lowercase();
-                    match name.as_str() {
-                        "title" => {
-                            in_title_tag = false;
-                            if !title_tag_buf.trim().is_empty() && chapter.title.starts_with("Chapter ") {
-                                chapter.title = title_tag_buf.trim().to_string();
+                    let name = e.name();
+                    let n = name.as_ref();
+                    if n.eq_ignore_ascii_case(b"title") {
+                        in_title_tag = false;
+                        if !title_tag_buf.trim().is_empty() && chapter.title.starts_with("Chapter ") {
+                            chapter.title = title_tag_buf.trim().to_string();
+                        }
+                    } else if n.eq_ignore_ascii_case(b"ul") || n.eq_ignore_ascii_case(b"ol") {
+                        list_stack.pop();
+                    } else if n.eq_ignore_ascii_case(b"blockquote") || n.eq_ignore_ascii_case(b"aside") {
+                        in_blockquote = false;
+                    } else if n.eq_ignore_ascii_case(b"figure") {
+                        in_figure = false;
+                    } else if n.eq_ignore_ascii_case(b"li") {
+                        in_li = false;
+                        in_block = false;
+                        if !current_runs.is_empty() {
+                            chapter.blocks.push(Block::Paragraph {
+                                runs: std::mem::take(&mut current_runs),
+                                indent: false,
+                                align: block_align,
+                                left_margin_em: cur_margin_em,
+                                bullet_prefix: cur_bullet.take().or_else(|| li_bullet.take()),
+                                is_quote: cur_is_quote,
+                            });
+                        }
+                        li_bullet = None;
+                        li_margin_em = 0.0;
+                    } else if n.eq_ignore_ascii_case(b"pre") {
+                        in_pre = false;
+                        if !pre_buf.trim().is_empty() {
+                            chapter.blocks.push(Block::CodeBlock {
+                                code: std::mem::take(&mut pre_buf),
+                            });
+                        }
+                    } else if n.eq_ignore_ascii_case(b"p") || n.eq_ignore_ascii_case(b"div") {
+                        in_block = false;
+                        if !current_runs.is_empty() {
+                            chapter.blocks.push(Block::Paragraph {
+                                runs: std::mem::take(&mut current_runs),
+                                indent: n.eq_ignore_ascii_case(b"p") && !in_li && !in_blockquote,
+                                align: block_align,
+                                left_margin_em: cur_margin_em,
+                                bullet_prefix: cur_bullet.take(),
+                                is_quote: cur_is_quote,
+                            });
+                        }
+                    } else if n.len() == 2 && n[0].to_ascii_lowercase() == b'h' && (n[1] >= b'1' && n[1] <= b'6') || n.eq_ignore_ascii_case(b"figcaption") {
+                        in_block = false;
+                        if !current_runs.is_empty() {
+                            let runs = std::mem::take(&mut current_runs);
+                            let h_text: String = runs.iter().filter_map(|r| chapter.text.get(r.start..r.end)).collect();
+                            if !h_text.trim().is_empty() && chapter.title.starts_with("Chapter ") && heading_level <= 2 {
+                                chapter.title = h_text.trim().to_string();
                             }
+                            chapter.blocks.push(Block::Heading {
+                                level: heading_level,
+                                runs,
+                            });
                         }
-                        "ul" | "ol" => {
-                            list_stack.pop();
+                    } else if n.eq_ignore_ascii_case(b"b")
+                        || n.eq_ignore_ascii_case(b"strong")
+                        || n.eq_ignore_ascii_case(b"i")
+                        || n.eq_ignore_ascii_case(b"em")
+                        || n.eq_ignore_ascii_case(b"sup")
+                        || n.eq_ignore_ascii_case(b"sub")
+                        || n.eq_ignore_ascii_case(b"code")
+                        || n.eq_ignore_ascii_case(b"tt")
+                        || n.eq_ignore_ascii_case(b"a")
+                    {
+                        if let Some(prev) = style_stack.pop() {
+                            current_style = prev;
                         }
-                        "blockquote" | "aside" => {
-                            in_blockquote = false;
-                        }
-                        "figure" => {
-                            in_figure = false;
-                        }
-                        "li" => {
-                            in_li = false;
-                            in_block = false;
-                            if !current_runs.is_empty() {
-                                chapter.blocks.push(Block::Paragraph {
-                                    runs: std::mem::take(&mut current_runs),
-                                    indent: false,
-                                    align: block_align,
-                                    left_margin_em: cur_margin_em,
-                                    bullet_prefix: cur_bullet.take().or_else(|| li_bullet.take()),
-                                    is_quote: cur_is_quote,
-                                });
-                            }
-                            li_bullet = None;
-                            li_margin_em = 0.0;
-                        }
-                        "pre" => {
-                            in_pre = false;
-                            if !pre_buf.trim().is_empty() {
-                                chapter.blocks.push(Block::CodeBlock {
-                                    code: std::mem::take(&mut pre_buf),
-                                });
-                            }
-                        }
-                        "p" | "div" => {
-                            in_block = false;
-                            if !current_runs.is_empty() {
-                                chapter.blocks.push(Block::Paragraph {
-                                    runs: std::mem::take(&mut current_runs),
-                                    indent: name == "p" && !in_li && !in_blockquote,
-                                    align: block_align,
-                                    left_margin_em: cur_margin_em,
-                                    bullet_prefix: cur_bullet.take(),
-                                    is_quote: cur_is_quote,
-                                });
-                            }
-                        }
-                        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "figcaption" => {
-                            in_block = false;
-                            if !current_runs.is_empty() {
-                                let runs = std::mem::take(&mut current_runs);
-                                let h_text: String = runs.iter().filter_map(|r| chapter.text.get(r.start..r.end)).collect();
-                                if !h_text.trim().is_empty() && chapter.title.starts_with("Chapter ") && heading_level <= 2 {
-                                    chapter.title = h_text.trim().to_string();
-                                }
-                                chapter.blocks.push(Block::Heading {
-                                    level: heading_level,
-                                    runs,
-                                });
-                            }
-                        }
-                        "b" | "strong" | "i" | "em" | "sup" | "sub" | "code" | "tt" | "a" => {
-                            if let Some(prev) = style_stack.pop() {
-                                current_style = prev;
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 Ok(Event::Text(ref e)) => {
