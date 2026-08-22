@@ -24,7 +24,12 @@ pub enum TocAction {
 
 pub struct TocDialog<F: FnMut(TocAction) -> Action> {
     items: Vec<TocItem>,
+    /// Per-item expansion state (tree rows with children). Rows without
+    /// children ignore their flag; collapsing a parent hides its subtree
+    /// but keeps child flags, so re-expanding restores the exact view.
+    expanded: Vec<bool>,
     current_page: usize,
+    /// Window start, in VISIBLE-row coordinates (collapsed rows hidden).
     offset: usize,
     per_page: usize,
     dims: (i32, i32),
@@ -35,26 +40,7 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
     pub fn from_outlines(outlines: &[Outline], current_page: usize, on_action: F) -> Self {
         let mut items = Vec::new();
         Self::flatten_outlines(outlines, 0, &mut items);
-
-        // Find closest chapter to current page to pre-scroll
-        let mut best_idx = 0;
-        for (i, item) in items.iter().enumerate() {
-            if item.page <= current_page {
-                best_idx = i;
-            } else {
-                break;
-            }
-        }
-        let initial_offset = best_idx.saturating_sub(2);
-
-        TocDialog {
-            items,
-            current_page,
-            offset: initial_offset,
-            per_page: 8,
-            dims: (1236, 1648),
-            on_action,
-        }
+        Self::with_items(items, current_page, on_action)
     }
 
     pub fn from_yread_toc(
@@ -78,23 +64,7 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
                 level: entry.level,
             });
         }
-        let mut best_idx = 0;
-        for (i, item) in items.iter().enumerate() {
-            if item.page <= current_page {
-                best_idx = i;
-            } else {
-                break;
-            }
-        }
-        let initial_offset = best_idx.saturating_sub(2);
-        TocDialog {
-            items,
-            current_page,
-            offset: initial_offset,
-            per_page: 8,
-            dims: (1236, 1648),
-            on_action,
-        }
+        Self::with_items(items, current_page, on_action)
     }
 
     pub fn from_chapters(
@@ -117,15 +87,86 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
                 level: 0,
             });
         }
-        let initial_offset = current_chap.saturating_sub(2);
-        TocDialog {
+        Self::with_items(items, current_chap, on_action)
+    }
+
+    /// Common init: everything collapsed except the ancestor chain of the
+    /// entry containing `current_page`, and pre-scrolled to it.
+    fn with_items(items: Vec<TocItem>, current_page: usize, on_action: F) -> Self {
+        // Find the entry containing the current page
+        let mut best_idx = 0;
+        for (i, item) in items.iter().enumerate() {
+            if item.page <= current_page {
+                best_idx = i;
+            } else {
+                break;
+            }
+        }
+        let mut expanded = vec![false; items.len()];
+        // Expand the ancestors (strictly shallower entries) above it so
+        // "where am I" is visible on open; the entry itself stays as-is.
+        let mut needed = items.get(best_idx).map(|it| it.level).unwrap_or(0);
+        for j in (0..best_idx).rev() {
+            if items[j].level < needed {
+                expanded[j] = true;
+                needed = items[j].level;
+                if needed == 0 {
+                    break;
+                }
+            }
+        }
+        let mut dlg = TocDialog {
             items,
-            current_page: current_chap,
-            offset: initial_offset,
+            expanded,
+            current_page,
+            offset: 0,
             per_page: 8,
             dims: (1236, 1648),
             on_action,
+        };
+        let vis = dlg.visible_indices();
+        let vis_pos = vis
+            .iter()
+            .position(|&i| i >= best_idx)
+            .unwrap_or(0);
+        dlg.offset = vis_pos.saturating_sub(2);
+        dlg
+    }
+
+    /// Does this row own a subtree (next entry is deeper)?
+    fn has_children(&self, idx: usize) -> bool {
+        self.items
+            .get(idx + 1)
+            .map(|next| next.level > self.items[idx].level)
+            .unwrap_or(false)
+    }
+
+    /// Indices of rows currently visible: an entry shows only while every
+    /// ancestor above it is expanded. Collapsed parents stay in the
+    /// ancestor chain (as closed doors), so grandchildren stay hidden too.
+    fn visible_indices(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut chain: Vec<usize> = Vec::new();
+        for i in 0..self.items.len() {
+            while let Some(&top) = chain.last() {
+                if self.items[top].level < self.items[i].level {
+                    break;
+                }
+                chain.pop();
+            }
+            let visible = chain.iter().all(|&a| self.expanded[a]);
+            if visible {
+                out.push(i);
+                if self.has_children(i) {
+                    chain.push(i);
+                }
+            } else if self.has_children(i) {
+                // Keep closed doors in the chain even when this row itself
+                // is hidden — its deeper relatives must see the closure.
+                chain.push(i);
+            }
         }
+        out
     }
 
     fn flatten_outlines(outlines: &[Outline], level: usize, out: &mut Vec<TocItem>) {
@@ -205,8 +246,11 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
         let content_h = h - list_top - pt(35.0);
         self.per_page = ((content_h / row_h) as usize).max(1);
 
-        let visible = self.items.len().min(self.offset + self.per_page);
-        for (i, idx) in (self.offset..visible).enumerate() {
+        let vis = self.visible_indices();
+        self.offset = self.offset.min(vis.len().saturating_sub(1));
+        let visible = vis.len().min(self.offset + self.per_page);
+        for (i, vpos) in (self.offset..visible).enumerate() {
+            let idx = vis[vpos];
             let item = &self.items[idx];
             let ry = list_top + i as i32 * row_h;
             let is_current = idx + 1 < self.items.len()
@@ -226,7 +270,25 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
             let text_x = pad + pt(10.0) + indent;
             let text_y = ry + pt(22.0);
 
-            let max_w = (w - text_x - pt(70.0)) as f32;
+            // Chevron for expandable rows, drawn as two lines — no glyph
+            // coverage gamble. Page number shifts left to make room.
+            let expandable = self.has_children(idx);
+            if expandable {
+                let cy = ry + (row_h - pt(4.0)) / 2;
+                let cx = w - pad - pt(34.0);
+                let s = pt(4.0);
+                if self.expanded[idx] {
+                    // ▾
+                    p.line_w(cx - s, cy - s, cx, cy + s, 2, 60);
+                    p.line_w(cx + s, cy - s, cx, cy + s, 2, 60);
+                } else {
+                    // ▸
+                    p.line_w(cx - s, cy - s, cx + s, cy, 2, 60);
+                    p.line_w(cx - s, cy + s, cx + s, cy, 2, 60);
+                }
+            }
+
+            let max_w = (w - text_x - pt(70.0) - if expandable { pt(34.0) } else { 0 }) as f32;
             let title = p.truncate(9.5, &item.title, max_w);
 
             let marker = if is_current { "● " } else { "" };
@@ -235,11 +297,22 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
 
             // Page number on right
             let page_str = format!("p. {}", item.page + 1);
-            p.text_right(w - pad - pt(12.0), text_y, 8.5, 100, &page_str);
+            let page_right = if expandable { w - pad - pt(56.0) } else { w - pad - pt(12.0) };
+            p.text_right(page_right, text_y, 8.5, 100, &page_str);
         }
 
         // Footer Pagination Info
-        let footer_text = format!("{}-{} of {} chapters · swipe to scroll", self.offset + 1, visible, self.items.len());
+        let footer_text = if vis.len() < self.items.len() {
+            format!(
+                "{}-{} of {} shown ({} total) · ▸ expands",
+                self.offset + 1,
+                visible,
+                vis.len(),
+                self.items.len()
+            )
+        } else {
+            format!("{}-{} of {} chapters", self.offset + 1, visible, self.items.len())
+        };
         p.text_center(h - pt(12.0), 8.0, 120, &footer_text);
     }
 
@@ -269,11 +342,21 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
                 let bar_h = pt(40.0);
                 let list_top = bar_h + pt(10.0);
                 let row_h = pt(42.0);
-                let _pad = pt(14.0);
+                let pad = pt(14.0);
 
                 if py >= list_top && py < list_top + self.per_page as i32 * row_h {
-                    let idx = self.offset + ((py - list_top) / row_h) as usize;
-                    if idx < self.items.len() {
+                    let vpos = self.offset + ((py - list_top) / row_h) as usize;
+                    let vis = self.visible_indices();
+                    if vpos < vis.len() {
+                        let idx = vis[vpos];
+                        // Chevron zone (expandable rows): toggle the subtree
+                        if self.has_children(idx) {
+                            let cx = w - pad - pt(34.0);
+                            if px >= cx - pt(18.0) {
+                                self.expanded[idx] = !self.expanded[idx];
+                                return Action::RedrawFull;
+                            }
+                        }
                         let it = &self.items[idx];
                         return (self.on_action)(TocAction::JumpToYRead {
                             chapter_idx: it.chapter_idx,
@@ -287,7 +370,8 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
             }
 
             Gesture::Swipe { dir: SwipeDir::North, .. } => {
-                self.offset = (self.offset + self.per_page.max(1)).min(self.items.len().saturating_sub(1));
+                let vis_len = self.visible_indices().len();
+                self.offset = (self.offset + self.per_page.max(1)).min(vis_len.saturating_sub(1));
                 Action::RedrawFull
             }
             Gesture::Swipe { dir: SwipeDir::South, .. } => {
@@ -301,5 +385,96 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
             Gesture::Swipe { .. } => (self.on_action)(TocAction::Close),
             _ => Action::Keep,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(title: &str, char_off: usize, level: usize) -> yread::model::TocEntry {
+        yread::model::TocEntry {
+            title: title.to_string(),
+            chapter_idx: 0,
+            byte_offset: char_off,
+            char_offset: char_off,
+            level,
+        }
+    }
+
+    fn book_toc() -> Vec<yread::model::TocEntry> {
+        vec![
+            entry("Part One", 0, 0),       // p.0
+            entry("Ch 1", 5000, 1),        // p.5
+            entry("Sec 1.1", 9000, 2),     // p.9
+            entry("Part Two", 20000, 0),   // p.20
+            entry("Ch 2", 24000, 1),       // p.24
+        ]
+    }
+
+    fn dialog(current_page: usize) -> TocDialog<impl FnMut(TocAction) -> Action> {
+        TocDialog::from_yread_toc(&book_toc(), &[0], 1000.0, current_page, |_| Action::Keep)
+    }
+
+    fn titles(d: &TocDialog<impl FnMut(TocAction) -> Action>) -> Vec<&str> {
+        d.visible_indices()
+            .iter()
+            .map(|&i| d.items[i].title.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn opens_collapsed_except_current_ancestors() {
+        // Reading inside Ch 1 (p.6): Part One auto-expanded, Ch 1's own
+        // subtree stays closed, Part Two collapsed.
+        let d = dialog(6);
+        assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Part Two"]);
+    }
+
+    #[test]
+    fn deep_position_expands_full_ancestor_chain() {
+        // Inside Sec 1.1 (p.10): both Part One and Ch 1 expanded.
+        let d = dialog(10);
+        assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Sec 1.1", "Part Two"]);
+    }
+
+    #[test]
+    fn chevron_toggle_collapses_and_restores() {
+        let mut d = dialog(10);
+        assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Sec 1.1", "Part Two"]);
+        // Collapse Part One (idx 0): subtree hidden, Ch 1 keeps its flag.
+        d.expanded[0] = false;
+        assert_eq!(titles(&d), vec!["Part One", "Part Two"]);
+        d.expanded[0] = true;
+        // Child expansion state survived the collapse cycle.
+        assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Sec 1.1", "Part Two"]);
+    }
+
+    #[test]
+    fn collapsed_parent_hides_grandchildren_even_if_child_open() {
+        let mut d = dialog(6); // [Part One, Ch 1, Part Two]
+        d.expanded[1] = true; // open Ch 1 -> Sec 1.1 shows
+        assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Sec 1.1", "Part Two"]);
+        d.expanded[0] = false; // close Part One: everything below hides
+        assert_eq!(titles(&d), vec!["Part One", "Part Two"]);
+        d.expanded[0] = true; // reopen: Sec 1.1 still there (flag kept)
+        assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Sec 1.1", "Part Two"]);
+    }
+
+    #[test]
+    fn has_children_boundaries() {
+        let d = dialog(6);
+        assert!(d.has_children(0)); // Part One -> Ch 1
+        assert!(d.has_children(1)); // Ch 1 -> Sec 1.1
+        assert!(!d.has_children(2)); // leaf
+        assert!(!d.has_children(4)); // last item
+    }
+
+    #[test]
+    fn flat_toc_shows_everything() {
+        // All level 0 (from_chapters shape): no tree, no behavior change.
+        let flat: Vec<yread::model::TocEntry> = (0..5).map(|i| entry(&format!("Ch {i}"), i * 10, 0)).collect();
+        let d = TocDialog::from_yread_toc(&flat, &[0], 1000.0, 3, |_| Action::Keep);
+        assert_eq!(d.visible_indices().len(), 5);
     }
 }
