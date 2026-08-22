@@ -145,6 +145,8 @@ pub struct Book {
     pub chapters: Vec<Chapter>,
     /// Embedded images keyed by ID/filename -> raw bytes (PNG/JPEG)
     pub images: HashMap<String, Vec<u8>>,
+    /// Precalculated pixel dimensions (width, height) for each image ID
+    pub image_sizes: HashMap<String, (u32, u32)>,
     /// Footnotes/notes keyed by target ID -> blocks
     pub footnotes: HashMap<String, Vec<Block>>,
 }
@@ -152,6 +154,16 @@ pub struct Book {
 impl Book {
     pub fn total_chars(&self) -> usize {
         self.chapters.iter().map(|c| c.char_count()).sum()
+    }
+
+    /// Register an image and record its true pixel dimensions.
+    pub fn add_image(&mut self, id: String, bytes: Vec<u8>) {
+        if let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
+            if let Ok((w, h)) = reader.into_dimensions() {
+                self.image_sizes.insert(id.clone(), (w, h));
+            }
+        }
+        self.images.insert(id, bytes);
     }
 }
 

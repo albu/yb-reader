@@ -356,7 +356,7 @@ impl<R: BufRead> Fb2Parser<R> {
                 if let Some(id) = self.binary_id.take() {
                     let clean_base64: String = self.binary_buf.chars().filter(|c| !c.is_whitespace()).collect();
                     if let Ok(decoded) = BASE64_STANDARD.decode(clean_base64) {
-                        self.book.images.insert(id, decoded);
+                        self.book.add_image(id, decoded);
                     }
                 }
                 self.pop_state();

@@ -73,21 +73,23 @@ impl Rasterizer {
                             let gray = img.to_luma8();
                             let target_w = width.round() as u32;
                             let target_h = height.round() as u32;
-                            let resized = image::imageops::resize(
-                                &gray,
-                                target_w,
-                                target_h,
-                                image::imageops::FilterType::Triangle,
-                            );
+                            if target_w > 0 && target_h > 0 {
+                                let resized = image::imageops::resize(
+                                    &gray,
+                                    target_w,
+                                    target_h,
+                                    image::imageops::FilterType::Lanczos3,
+                                );
 
-                            let dst_x = (origin_x + x).round() as usize;
-                            let dst_y = (origin_y + y).round() as usize;
+                                let dst_x = (origin_x + x).round() as usize;
+                                let dst_y = (origin_y + y).round() as usize;
 
-                            for (ix, iy, px) in resized.enumerate_pixels() {
-                                let target_col = dst_x + ix as usize;
-                                let target_row = dst_y + iy as usize;
-                                if target_col < p_width && target_row < p_height {
-                                    fb[target_row * stride + target_col] = px.0[0];
+                                for (ix, iy, px) in resized.enumerate_pixels() {
+                                    let target_col = dst_x + ix as usize;
+                                    let target_row = dst_y + iy as usize;
+                                    if target_col < p_width && target_row < p_height {
+                                        fb[target_row * stride + target_col] = px.0[0];
+                                    }
                                 }
                             }
                         }

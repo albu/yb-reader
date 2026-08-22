@@ -390,11 +390,10 @@ impl<'a> EpubParser<'a> {
 
         for (id, path) in image_items {
             if let Ok(bytes) = self.read_file_to_bytes(&path) {
-                self.book.images.insert(id.clone(), bytes.clone());
-                // Also insert by filename alone for loose link matching
                 if let Some(fname) = Path::new(&id).file_name().and_then(|n| n.to_str()) {
-                    self.book.images.insert(fname.to_string(), bytes);
+                    self.book.add_image(fname.to_string(), bytes.clone());
                 }
+                self.book.add_image(id, bytes);
             }
         }
     }

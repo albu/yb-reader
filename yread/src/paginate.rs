@@ -6,7 +6,7 @@ use crate::line::{break_paragraph_lines, LayoutLine};
 use crate::model::{Block, Chapter, ChapterPageTable, PageBreak, TextAlign};
 use crate::shape::ShapeCache;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutConfig {
     pub page_width: u32,
     pub page_height: u32,
@@ -16,6 +16,7 @@ pub struct LayoutConfig {
     pub margin_bottom: u32,
     pub font_size: f32,
     pub line_spacing: f32,
+    pub paragraph_spacing: f32,
     pub indent_em: f32,
     pub hyphenate: bool,
 }
@@ -25,13 +26,14 @@ impl Default for LayoutConfig {
         Self {
             page_width: 1236,
             page_height: 1648,
-            margin_left: 72,
-            margin_right: 72,
-            margin_top: 72,
-            margin_bottom: 72,
-            font_size: 11.0,
-            line_spacing: 1.2,
-            indent_em: 1.5,
+            margin_left: 54,
+            margin_right: 54,
+            margin_top: 54,
+            margin_bottom: 54,
+            font_size: 8.5,
+            line_spacing: 1.10,
+            paragraph_spacing: 0.15,
+            indent_em: 1.2,
             hyphenate: true,
         }
     }
@@ -76,9 +78,23 @@ pub struct PageLayout {
     pub elements: Vec<PageElement>,
 }
 
+use std::collections::HashMap;
+
 /// Paginate a single chapter and return both its PageTable and precalculated PageLayouts.
 pub fn paginate_chapter(
     chapter: &Chapter,
+    config: &LayoutConfig,
+    fonts: &FontSystem,
+    cache: &mut ShapeCache,
+    lang: Option<Lang>,
+) -> (ChapterPageTable, Vec<PageLayout>) {
+    paginate_chapter_with_images(chapter, None, config, fonts, cache, lang)
+}
+
+/// Paginate a single chapter with exact image dimension lookup to preserve aspect ratio.
+pub fn paginate_chapter_with_images(
+    chapter: &Chapter,
+    image_sizes: Option<&HashMap<String, (u32, u32)>>,
     config: &LayoutConfig,
     fonts: &FontSystem,
     cache: &mut ShapeCache,
@@ -150,13 +166,13 @@ pub fn paginate_chapter(
                 }
 
                 // Paragraph spacing
-                cur_y += config.font_size * 0.4;
+                cur_y += config.font_size * config.paragraph_spacing;
             }
             Block::Heading { level, runs } => {
                 let size_mult = match level {
-                    1 => 1.5,
-                    2 => 1.3,
-                    _ => 1.15,
+                    1 => 1.35,
+                    2 => 1.20,
+                    _ => 1.10,
                 };
                 let lines = break_paragraph_lines(
                     &chapter.text,
@@ -171,7 +187,7 @@ pub fn paginate_chapter(
                     None,
                 );
 
-                let heading_h: f32 = lines.iter().map(|l| l.height).sum::<f32>() + config.font_size * 1.5;
+                let heading_h: f32 = lines.iter().map(|l| l.height).sum::<f32>() + config.font_size * 1.0;
 
                 // Orphan prevention: if heading + spacing doesn't leave room on page, break early
                 if cur_y + heading_h > content_h && !cur_page.elements.is_empty() {
@@ -191,7 +207,7 @@ pub fn paginate_chapter(
                     cur_block_idx = b_idx;
                 }
 
-                cur_y += config.font_size * 0.8; // Space before heading
+                cur_y += config.font_size * 0.5; // Space before heading
                 for line in lines {
                     let baseline = cur_y + line.ascender;
                     cur_y += line.height;
@@ -201,7 +217,7 @@ pub fn paginate_chapter(
                         y: baseline,
                     });
                 }
-                cur_y += config.font_size * 0.8; // Space after heading
+                cur_y += config.font_size * 0.4; // Space after heading
             }
             Block::Spacer(px) => {
                 if cur_y > 0.0 && cur_y + (*px as f32) < content_h {
@@ -229,11 +245,16 @@ pub fn paginate_chapter(
                 cur_y += 15.0;
             }
             Block::Image { id, width, height, .. } => {
-                let img_w = width.unwrap_or(content_w as u32) as f32;
-                let img_h = height.unwrap_or(400) as f32;
-                let scale = (content_w / img_w).min(1.0);
-                let draw_w = img_w * scale;
-                let draw_h = img_h * scale;
+                let (orig_w, orig_h) = image_sizes
+                    .and_then(|m| m.get(id))
+                    .copied()
+                    .unwrap_or_else(|| (width.unwrap_or(content_w as u32), height.unwrap_or(400)));
+
+                let max_w = content_w;
+                let max_h = content_h * 0.80; // Keep within page limits
+                let scale = (max_w / orig_w as f32).min(max_h / orig_h as f32).min(1.0);
+                let draw_w = (orig_w as f32 * scale).round();
+                let draw_h = (orig_h as f32 * scale).round();
 
                 if cur_y + draw_h > content_h && !cur_page.elements.is_empty() {
                     pages.push(cur_page);
@@ -256,7 +277,7 @@ pub fn paginate_chapter(
                     width: draw_w,
                     height: draw_h,
                 });
-                cur_y += draw_h + 10.0;
+                cur_y += draw_h + config.font_size * 0.5;
             }
         }
     }
