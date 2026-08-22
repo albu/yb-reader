@@ -448,7 +448,9 @@ impl Screen for CurtainScreen {
                     if crate::wifi::wifi_state() == Some(true) {
                         let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.wifid", "enable", "0"]).status();
                         let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.cmd", "wirelessEnable", "0"]).status();
+                        ybdev::wifi::user_turned_off();
                     } else {
+                        ybdev::wifi::user_turned_on();
                         crate::wifi::turn_on_wifi();
                     }
                     return Action::Redraw;
@@ -459,8 +461,14 @@ impl Screen for CurtainScreen {
                     let on = ybdev::ssh::running();
                     if on {
                         ybdev::ssh::disable();
+                        ybdev::wifi::set_ssh_wanted(false);
                     } else {
                         ybdev::ssh::enable();
+                        // SSH without a radio is unreachable — enabling it
+                        // is also a reason to bring Wi-Fi up, now and on
+                        // every future wake.
+                        ybdev::wifi::set_ssh_wanted(true);
+                        crate::wifi::ensure_wifi();
                     }
                     return Action::Redraw;
                 }

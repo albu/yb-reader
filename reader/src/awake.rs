@@ -16,22 +16,19 @@
 //!
 //! The 30 s policy thread re-asserts the hold (a lost lipc call gets
 //! ~30 retries inside powerd's ≥15 min window) and heals Wi-Fi for
-//! screens that need it. The resume hook (App's wall-gap detection)
-//! covers everything suspend breaks in one place: repaint, our
-//! frontlight levels (powerd restores its own over ours), and the Wi-Fi
-//! link (wlan0 stays administratively up across suspend, association
-//! dies — wifid's enable prop surviving as 1 is exactly the "was on"
-//! signal).
+//! screens that need it (never against a manual user off). The resume
+//! hook (App's wall-gap detection) covers everything suspend breaks in
+//! one place: repaint, our frontlight levels (powerd restores its own
+//! over ours), and the Wi-Fi link — restored when a reason wants it
+//! (ybdev::wifi::wifi_wanted_on_wake), powered down when nothing does
+//! (suspend kills the association; an up-but-scanning radio drains).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ybdev::log::plog;
 use ybdev::sysinfo;
 
 use crate::wifi;
-
-static AWAKE_WANTED: AtomicBool = AtomicBool::new(false);
 
 /// Pure decision, host-testable: a screen's live reason, USB power, or
 /// the Wi-Fi link being up (reachable ⇒ awake — a sleeping device
@@ -43,9 +40,11 @@ pub fn desired_awake(screen_wants: bool, vbus: bool, wifi_up: bool) -> bool {
 
 /// Screens with a live reason not to suspend call this on enter/leave
 /// (mirror streaming, receive server). The library reader does not —
-/// input-idle suspend while reading is the approved policy.
+/// input-idle suspend while reading is the approved policy. The flag
+/// lives in ybdev::wifi: it is also the session half of the wake
+/// policy (wifi_wanted_on_wake), visible to yui's sleep screen.
 pub fn screen_wants_awake(on: bool) {
-    AWAKE_WANTED.store(on, Ordering::SeqCst);
+    ybdev::wifi::set_session_wants(on);
 }
 
 /// The resume hook App calls with the measured suspend gap.
@@ -66,17 +65,30 @@ pub fn on_resume(gap: Duration) {
             }
         }
     }
-    // Wi-Fi: restore if it was on (or wifid can't answer — err toward
-    // connectivity; the sequence is idempotent), then verify the radio
-    // actually associated — a restored-but-unassociated radio scans at
-    // ~3× the idle drain (ybdev::wifi::verify_or_power_down has the
-    // measured numbers and the drain guard).
-    match wifi::wifi_state() {
-        Some(false) => {}
-        _ => {
-            wifi::turn_on_wifi();
-            ybdev::wifi::verify_or_power_down();
+    // Wi-Fi: bring it back only when something wants it (live session
+    // or the user's persisted Wi-Fi/SSH choice — pre-fix, a None from a
+    // slow wifid meant "restore", so every wake re-associated). When
+    // nothing wants it, power an unwanted radio down: suspend kills the
+    // association, and an up-but-unassociated radio scans at ~3× the
+    // idle drain (ybdev::wifi::verify_or_power_down has the measured
+    // numbers and the drain guard). Stock mode keeps the historic
+    // restore-if-not-explicitly-off: the framework owns the radio and
+    // nothing of ours sets intents there, so the policy would only ever
+    // fire its power-down half — fighting powerd for its own Wi-Fi.
+    if !ybdev::sysinfo::takeover() {
+        match wifi::wifi_state() {
+            Some(false) => {}
+            _ => {
+                wifi::turn_on_wifi();
+                ybdev::wifi::verify_or_power_down();
+            }
         }
+    } else if ybdev::wifi::wifi_wanted_on_wake() {
+        wifi::turn_on_wifi();
+        ybdev::wifi::verify_or_power_down();
+    } else if wifi::wifi_state() != Some(false) {
+        plog("resume: wifi not wanted — radio down");
+        ybdev::wifi::turn_off();
     }
 }
 
@@ -90,16 +102,22 @@ pub fn spawn() {
 fn loop_fn() {
     loop {
         let want = desired_awake(
-            AWAKE_WANTED.load(Ordering::SeqCst),
+            ybdev::wifi::session_wants(),
             sysinfo::vbus(),
             sysinfo::wifi_up(),
         );
         wifi::keep_awake(want);
         // Wi-Fi healing is gated to live-session screens only: the sleep
         // screen turns the radio off deliberately, and healing there
-        // would fight it. Post-suspend restoration in general is the
+        // would fight it. A manual user off (curtain / System card)
+        // latches in ybdev::wifi and stops the healer too — the user's
+        // choice outranks the session until something real turns the
+        // radio back on. Post-suspend restoration in general is the
         // resume hook's job.
-        if AWAKE_WANTED.load(Ordering::SeqCst) && wifi::wifi_state() != Some(true) {
+        if ybdev::wifi::session_wants()
+            && !ybdev::wifi::user_off()
+            && wifi::wifi_state() != Some(true)
+        {
             plog("awake: wifi down during active session, healing");
             wifi::turn_on_wifi();
         }

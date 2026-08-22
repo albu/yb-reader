@@ -361,14 +361,23 @@ impl Screen for SleepScreen {
         // Handled cleanly: retract what the emergency path would restore.
         SAVED_FL_BRIGHT.store(-1, Ordering::SeqCst);
         SAVED_FL_TONE.store(-1, Ordering::SeqCst);
-        // Restore Wi-Fi, then verify the restore actually associated.
-        // This is the only code that runs on the power-button wake path
-        // (the App resume hook is skipped while the sleep screen is on
-        // top), and a restored radio that never associates scans at
-        // ~3× the idle drain — ybdev::wifi::verify_or_power_down has
-        // the measured numbers and the drain guard.
-        ybdev::wifi::turn_on();
-        ybdev::wifi::verify_or_power_down();
+        // Restore Wi-Fi only when something wants it back — a live
+        // session or the user's persisted Wi-Fi/SSH choice
+        // (ybdev::wifi::wifi_wanted_on_wake has the model); an
+        // unwanted radio stays down instead of re-associating on every
+        // wake. Takeover only: in stock mode the framework owns the
+        // radio and nothing of ours sets intents, so always restore
+        // (the enter above turned it off) and never apply our policy to
+        // its radio. Then verify the restore actually associated: this
+        // is the only code that runs on the power-button wake path (the
+        // App resume hook is skipped while the sleep screen is on top),
+        // and a restored radio that never associates scans at ~3× the
+        // idle drain — ybdev::wifi::verify_or_power_down has the
+        // measured numbers and the drain guard.
+        if !ybdev::sysinfo::takeover() || ybdev::wifi::wifi_wanted_on_wake() {
+            ybdev::wifi::turn_on();
+            ybdev::wifi::verify_or_power_down();
+        }
 
         // Drain accounting: %/h over this sleep session, plus the suspend
         // count — one entry per wake, so suspends-1 is how many wakes were

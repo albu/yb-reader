@@ -122,6 +122,14 @@ pub fn vbus() -> bool {
     battery().1
 }
 
+/// Takeover mode: the framework boot flag is present, so this app owns
+/// power and Wi-Fi policy. In stock mode the framework owns the radio,
+/// and the app must never fight it (e.g. restore or power down a radio
+/// its powerd is managing).
+pub fn takeover() -> bool {
+    std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists()
+}
+
 /// Set CPU frequency scaling governor for all CPU cores (e.g. "ondemand" or "interactive").
 /// Falls back gracefully on desktop or if a governor is unsupported.
 pub fn set_cpu_governor(governor: &str) {

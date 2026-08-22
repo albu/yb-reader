@@ -230,7 +230,9 @@ impl Screen for SystemScreen {
                         let _ = std::process::Command::new("lipc-set-prop")
                             .args(["-i", "com.lab126.cmd", "wirelessEnable", "0"])
                             .status();
+                        ybdev::wifi::user_turned_off();
                     } else {
+                        ybdev::wifi::user_turned_on();
                         crate::wifi::turn_on_wifi();
                     }
                     return Action::Redraw;

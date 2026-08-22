@@ -5,12 +5,94 @@
 //! enable 1` alone never brings wlan0 up after it was downed.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::log::plog;
 
+// --- Wake policy ---------------------------------------------------------
+//
+// The radio comes back on wake only for a reason: a live session
+// (mirror streaming, receive server), or the user's persisted Wi-Fi/SSH
+// choice. Before this, both wake paths (the sleep screen's leave and
+// the app resume hook) restored unconditionally, so every wake
+// re-associated the radio even when nobody wanted it.
+
+const WIFI_WANTED_PATH: &str = "/var/local/yb-reader/wifi";
+const SSH_WANTED_PATH: &str = "/var/local/yb-reader/ssh";
+
+/// A live session wants the radio (set by mirror/receive enter/leave
+/// via awake::screen_wants_awake).
+static SESSION_WANTS: AtomicBool = AtomicBool::new(false);
+/// The user turned Wi-Fi off by hand (curtain / System card). The radio
+/// is down on purpose: the 30s session healer must not quietly bring it
+/// back. Any real turn_on makes the latch stale, so it clears there.
+static USER_OFF: AtomicBool = AtomicBool::new(false);
+
+pub fn set_session_wants(on: bool) {
+    SESSION_WANTS.store(on, Ordering::SeqCst);
+}
+
+pub fn session_wants() -> bool {
+    SESSION_WANTS.load(Ordering::SeqCst)
+}
+
+pub fn user_off() -> bool {
+    USER_OFF.load(Ordering::SeqCst)
+}
+
+fn intent(path: &str) -> bool {
+    std::path::Path::new(path).exists()
+}
+
+fn set_intent(path: &str, on: bool) {
+    // The dir is boot.sh's in takeover, but nothing guarantees it in
+    // stock mode or on a fresh device — without this the toggle works
+    // live and the choice silently evaporates.
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if on {
+        let _ = std::fs::File::create(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub fn set_ssh_wanted(on: bool) {
+    set_intent(SSH_WANTED_PATH, on);
+}
+
+/// Manual Wi-Fi off (curtain / System card): remember the user's choice
+/// (drop the wake intent) and latch against session healing.
+pub fn user_turned_off() {
+    USER_OFF.store(true, Ordering::SeqCst);
+    set_intent(WIFI_WANTED_PATH, false);
+}
+
+/// Manual Wi-Fi on: persist the choice so wake brings it back. The
+/// user-off latch clears inside turn_on when the radio actually rises.
+pub fn user_turned_on() {
+    set_intent(WIFI_WANTED_PATH, true);
+}
+
+/// Pure decision, host-testable: does a wake have a reason to raise the
+/// radio? SSH counts because an unreachable SSH toggle is useless.
+pub fn wake_wants_wifi(session: bool, wifi_intent: bool, ssh_intent: bool) -> bool {
+    session || wifi_intent || ssh_intent
+}
+
+pub fn wifi_wanted_on_wake() -> bool {
+    wake_wants_wifi(
+        session_wants(),
+        intent(WIFI_WANTED_PATH),
+        intent(SSH_WANTED_PATH),
+    )
+}
+
 /// Bring the interface up and ask wifid to associate (idempotent).
 pub fn turn_on() {
+    USER_OFF.store(false, Ordering::SeqCst);
     let _ = Command::new("/sbin/ifconfig").args(["wlan0", "up"]).status();
     let _ = Command::new("lipc-set-prop")
         .args(["-i", "com.lab126.wifid", "enable", "1"])
@@ -84,4 +166,19 @@ pub fn verify_or_power_down() {
             plog("wifi: still unassociated — radio down (idle drain guard)");
             turn_off();
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wake_wifi_truth_table() {
+        // No reason at all: the pre-fix behavior (always on) is gone.
+        assert!(!wake_wants_wifi(false, false, false));
+        // Each reason alone suffices.
+        assert!(wake_wants_wifi(true, false, false));
+        assert!(wake_wants_wifi(false, true, false));
+        assert!(wake_wants_wifi(false, false, true));
+    }
 }
