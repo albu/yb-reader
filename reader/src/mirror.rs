@@ -24,7 +24,14 @@ use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
 const CONF_PATH: &str = "/mnt/us/extensions/mirror/mirror.conf";
-const PING_EVERY_MS: u128 = 15_000;
+/// Keepalive cadence. Doubles as radio-heat: the MTK wifi power-save
+/// dozes the radio between turns, and the first packets of each request
+/// pay the wake-up — measured 2026-08-22, back-to-back requests cost
+/// 25–85 ms on the leg while page turns spaced a second or two apart
+/// paid 65–210 ms. A sub-3 s ping keeps the radio out of deep doze for
+/// the price of a few tiny packets per interval (mirroring holds the
+/// device awake anyway).
+const PING_EVERY_MS: u128 = 2_500;
 
 /// Read-mode page-turn keys, from mirror.conf TURN_KEYS=.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,6 +92,11 @@ pub struct MirrorScreen {
     ping_chain: bool,
     last_ping: u128,
     last_frame: Option<Vec<u8>>,
+    /// Payload of the frame currently on glass — the speculative turn
+    /// flow fetches a settled correction after showing the early frame;
+    /// when it comes back byte-identical (the common case) the decode
+    /// and the refresh are both skipped.
+    last_shown: Option<Vec<u8>>,
     /// Decoded current frame (tight w*h grayscale).
     gray: Option<Vec<u8>>,
     /// Control mode: taps click, swipes scroll.
@@ -110,6 +122,7 @@ impl MirrorScreen {
             ping_chain: false,
             last_ping: 0,
             last_frame: None,
+            last_shown: None,
             gray: None,
             control: false,
             preset,
@@ -257,8 +270,40 @@ impl MirrorScreen {
         let Some(frame) = self.last_frame.take() else {
             return Action::Keep;
         };
-        match ybdev::img::decode_png_gray(&frame, self.w, self.h) {
+        // Byte-identical re-fetch: nothing to decode, nothing to draw.
+        // Never skipped for force_full — screen-clean exists to flash,
+        // and ghosting isn't in the pixels.
+        if !force_full && self.last_shown.as_deref() == Some(frame.as_slice()) {
+            plog("mirror: correction identical — skip");
+            return Action::Keep;
+        }
+        let t0 = Instant::now();
+        let decoded = ybdev::img::decode_png_gray(&frame, self.w, self.h);
+        let decode_ms = t0.elapsed().as_millis();
+        match decoded {
             Some(gray) => {
+                // Visually-identical re-fetch: differs in bytes but by
+                // less than a sliver (progress tick, cursor) — under 2k
+                // of 2M px beyond 8 gray levels. Cache the truth, skip
+                // the e-ink flash.
+                let visually_same = !force_full
+                    && match self.gray.as_deref() {
+                        Some(prev) if prev.len() == gray.len() => prev
+                            .iter()
+                            .zip(gray.iter())
+                            .filter(|&(a, b)| a.abs_diff(*b) > 8)
+                            .count()
+                            < 2000,
+                        _ => false,
+                    };
+                if visually_same {
+                    plog("mirror: correction visually identical — no flash");
+                    self.gray = Some(gray);
+                    self.last_shown = Some(frame);
+                    return Action::Keep;
+                }
+                plog(&format!("mirror decode: {}ms ({}B)", decode_ms, frame.len()));
+                self.last_shown = Some(frame);
                 self.gray = Some(gray);
                 self.frame_count += 1;
                 let every = self.conf.refresh_every.unwrap_or(60);
@@ -329,9 +374,15 @@ impl MirrorScreen {
                     .map(|v| v != "0")
                     .unwrap_or(true);
                 if !changed || !settled {
+                    // Rare (settle timeout, duplicate-id mid-load): the
+                    // reply is not final truth. Poll plain GETs — never a
+                    // re-POST, that would skip a page. Escalating backoff;
+                    // genuinely slow pages need the long tail.
                     let deadline = Instant::now() + Duration::from_secs(8);
+                    let mut backoff = 150u64;
                     while Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(500));
+                        std::thread::sleep(Duration::from_millis(backoff));
+                        backoff = (backoff * 2).min(500);
                         let fp = format!("/frame.png?{}", self.frame_query());
                         match self.fetch("GET", &fp) {
                             Some(h) if h.headers.get("x-settled").map(|v| v != "0").unwrap_or(true) => {
