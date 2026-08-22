@@ -1283,8 +1283,11 @@ impl Screen for ReaderScreen {
                     return self.open_quick_settings();
                 }
 
-                // 5. Visual Bottom Footer Strip -> Open Interactive Page Scrubber & "Go to Page"
+                // 5. Visual Bottom Footer Strip -> Open Interactive Page Scrubber & "Go to Page" (or TOC for yRead)
                 if vy > vis_h - 140 && vx > 240 && vx < vis_w - 240 {
+                    if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+                        return self.open_toc_dialog();
+                    }
                     return self.open_scrubber_dialog();
                 }
 
