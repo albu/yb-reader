@@ -622,17 +622,28 @@ impl ReaderScreen {
     }
 
     fn yread_layout_config(&self, vw: u32, vh: u32) -> yread::paginate::LayoutConfig {
+        Self::yread_layout_config_for(&self.settings, vw, vh)
+    }
+
+    /// Layout config from explicit settings — shared by the reader, the
+    /// background paginator and the quick-settings live preview (they
+    /// must agree or page tables differ by regime).
+    fn yread_layout_config_for(
+        s: &ReaderSettings,
+        vw: u32,
+        vh: u32,
+    ) -> yread::paginate::LayoutConfig {
         yread::paginate::LayoutConfig {
             page_width: vw,
             page_height: vh,
-            margin_left: self.settings.margin_pad,
-            margin_right: self.settings.margin_pad,
+            margin_left: s.margin_pad,
+            margin_right: s.margin_pad,
             // Chrome overlaps the top ~85px (header) and the bottom edge
             // (progress footer) — reserve for both, matching the mupdf path.
-            margin_top: self.settings.margin_pad + if self.settings.show_header { 92 } else { 0 },
-            margin_bottom: self.settings.margin_pad + 50,
-            font_size: self.settings.font_size,
-            line_spacing: self.settings.line_spacing,
+            margin_top: s.margin_pad + if s.show_header { 92 } else { 0 },
+            margin_bottom: s.margin_pad + 50,
+            font_size: s.font_size,
+            line_spacing: s.line_spacing,
             paragraph_spacing: 0.25,
             indent_em: 1.2,
             hyphenate: true,
@@ -1098,6 +1109,21 @@ impl ReaderScreen {
         let gray = self.page_gray.clone();
         let (vw, vh) = self.visual_dims();
         let doc_rc = if is_pdf { self.doc.clone() } else { None };
+        // yread live preview: re-layout the current chapter under the
+        // SHEET's settings on every tap and render the page holding the
+        // current reading spot — the same text the post-close reflow will
+        // land on. Shape cache is shared (warms the real one); fonts and
+        // rasterizer are built once per sheet, reused across taps.
+        let yb_arc = if !is_pdf && self.settings.engine == crate::split::ReaderEngine::YRead {
+            self.ybook.clone()
+        } else {
+            None
+        };
+        let ychap = self.ychap_idx;
+        let ychar = self.y_char_offset;
+        let ycache = Arc::clone(&self.ycache);
+        let yfonts = std::cell::RefCell::new(yread::font::FontSystem::default());
+        let yraster = std::cell::RefCell::new(yread::raster::Rasterizer::new());
 
         Action::Push(Box::new(crate::quick_settings::QuickSettingsSheet::new(
             book,
@@ -1110,10 +1136,33 @@ impl ReaderScreen {
             gray,
             move |new_settings| {
                 if let Some(doc) = &doc_rc {
-                    crate::render::render_page(doc.as_ref(), page, sub, &new_settings, vw, vh)
-                } else {
-                    None
+                    return crate::render::render_page(doc.as_ref(), page, sub, &new_settings, vw, vh);
                 }
+                // yread preview (book still parsing -> keep the old bitmap)
+                let yb = yb_arc.as_ref()?;
+                if ychap >= yb.chapters.len() || yb.chapters[ychap].blocks.is_empty() {
+                    return None;
+                }
+                let cfg = Self::yread_layout_config_for(&new_settings, vw, vh);
+                let lang = Self::hypher_lang_for(&yb.meta.language);
+                let fonts = yfonts.borrow();
+                let mut cache = ycache.lock().unwrap_or_else(|p| p.into_inner());
+                let (pt, layouts) = yread::paginate::paginate_chapter_with_images(
+                    &yb.chapters[ychap],
+                    Some(&yb.image_sizes),
+                    &cfg,
+                    &*fonts,
+                    &mut cache,
+                    Some(lang),
+                );
+                drop(cache);
+                let last = layouts.len().checked_sub(1)?;
+                let page_idx = pt.page_for_char(ychar).min(last);
+                let mut fb = vec![255u8; (vw * vh) as usize];
+                yraster
+                    .borrow_mut()
+                    .render_page(yb, &layouts[page_idx], &cfg, &fonts, &mut fb, vw as usize);
+                Some(fb)
             },
         )))
     }

@@ -63,10 +63,11 @@ impl QuickSettingsSheet {
             self.total,
             self.settings,
         );
-        if self.is_pdf {
-            if let Some(new_gray) = (self.on_change)(self.settings) {
-                self.page_gray = Some(new_gray);
-            }
+        // Live preview: the reader-side closure re-renders the page under
+        // the sheet (mupdf pdf re-render, or a fresh yread layout of the
+        // current chapter). None keeps the previous bitmap.
+        if let Some(new_gray) = (self.on_change)(self.settings) {
+            self.page_gray = Some(new_gray);
         }
         Action::Redraw
     }
@@ -224,14 +225,20 @@ impl Screen for QuickSettingsSheet {
         }
         y += pt(ROW_H_PT) + pt(6.0);
 
-        // Row 4: Action Footer [ All Settings… ]  [ Done ]
+        // Row 4: Action Footer [ All Settings… ]
+        // No "Done" — every control applies live behind the sheet;
+        // dismissal is tap-above or swipe down.
         let all_btn = Rect::new(pad, y, pt(110.0), pt(BTN_H_PT));
         p.rect_outline_t(all_btn, 1, 100);
         p.text_center_in(all_btn.x, all_btn.x + all_btn.w, y + pt(15.0), 7.5, 0, "All Settings…");
 
-        let done_btn = Rect::new(w - pad - pt(70.0), y, pt(70.0), pt(BTN_H_PT));
-        p.rect(done_btn, 0);
-        p.text_center_in(done_btn.x, done_btn.x + done_btn.w, y + pt(15.0), 8.0, 255, "Done");
+        p.text_right(
+            w - pad,
+            y + pt(15.0),
+            7.0,
+            120,
+            "tap above · swipe ↓ to close",
+        );
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
@@ -358,7 +365,8 @@ impl Screen for QuickSettingsSheet {
         }
         y += pt(ROW_H_PT) + pt(6.0);
 
-        // Row 4: All Settings / Done
+        // Row 4: All Settings (Done is gone — changes apply live;
+        // dismissal is tap-above or swipe down)
         let all_btn = Rect::new(pad, y, pt(110.0), pt(BTN_H_PT));
         if all_btn.contains(vx, vy) {
             let name = self.book.clone();
@@ -368,11 +376,6 @@ impl Screen for QuickSettingsSheet {
             let s = self.settings;
             let gray = self.page_gray.clone();
             return Action::Push(Box::new(SettingsDialog::new_legacy(name, page, sub, tot, s, gray)));
-        }
-
-        let done_btn = Rect::new(w - pad - pt(70.0), y, pt(70.0), pt(BTN_H_PT));
-        if done_btn.contains(vx, vy) {
-            return Action::Pop;
         }
 
         Action::Keep
