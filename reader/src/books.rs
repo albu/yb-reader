@@ -279,7 +279,7 @@ impl Screen for ReaderScreen {
 
     fn tick_interval(&self) -> std::time::Duration {
         if !self.backend.borrow().is_ready() {
-            std::time::Duration::from_millis(150)
+            std::time::Duration::from_millis(20)
         } else {
             std::time::Duration::from_secs(10)
         }

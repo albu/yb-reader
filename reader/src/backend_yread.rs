@@ -330,9 +330,11 @@ impl ReaderBackend for YreadBackend {
             if self.yqueued_turns != 0 && !self.ylayout_wait {
                 let q = self.yqueued_turns;
                 self.yqueued_turns = 0;
-                self.turn_page(q, vw, vh, settings);
+                let res = self.turn_page(q, vw, vh, settings);
+                if matches!(res, PageTurnResult::Changed { .. }) {
+                    redraw = true;
+                }
             }
-            redraw = true;
         }
         redraw
     }

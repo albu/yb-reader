@@ -12,24 +12,24 @@ pub static NOTO_SANS_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSa
 
 #[derive(Clone)]
 pub struct FontFace {
-    pub data: Arc<Vec<u8>>,
+    pub data: &'static [u8],
     pub index: u32,
 }
 
 impl FontFace {
-    pub fn from_bytes(bytes: &[u8]) -> Self {
+    pub fn from_bytes(bytes: &'static [u8]) -> Self {
         Self {
-            data: Arc::new(bytes.to_vec()),
+            data: bytes,
             index: 0,
         }
     }
 
     pub fn as_swash(&self) -> Option<FontRef<'_>> {
-        FontRef::from_index(&self.data, self.index as usize)
+        FontRef::from_index(self.data, self.index as usize)
     }
 
     pub fn as_rustybuzz(&self) -> Option<rustybuzz::Face<'_>> {
-        rustybuzz::Face::from_slice(&self.data, self.index)
+        rustybuzz::Face::from_slice(self.data, self.index)
     }
 }
 
