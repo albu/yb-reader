@@ -151,6 +151,9 @@ impl YreadBackend {
         } else {
             char_offset
         };
+        let global_p = self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
+        self.page_no = global_p;
+        self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
         self.ylayout_wait = false;
     }
 
@@ -356,6 +359,9 @@ impl ReaderBackend for YreadBackend {
                 if let Some(l) = layouts.get(self.ychap_page) {
                     self.y_char_offset = l.start_char;
                 }
+                let global_p = self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
+                self.page_no = global_p;
+                self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
                 PageTurnResult::Changed { redraw_full: false }
             } else {
                 let total_ch = self.ybook.as_ref().map(|b| b.chapters.len()).unwrap_or(0);
@@ -372,6 +378,9 @@ impl ReaderBackend for YreadBackend {
                 if let Some(l) = layouts.get(self.ychap_page) {
                     self.y_char_offset = l.start_char;
                 }
+                let global_p = self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
+                self.page_no = global_p;
+                self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
                 PageTurnResult::Changed { redraw_full: false }
             } else if self.ychap_idx > 0 {
                 self.yread_land_at(self.ychap_idx - 1, usize::MAX, vw, vh, settings);
@@ -613,18 +622,17 @@ impl ReaderBackend for YreadBackend {
 
     fn open_toc_dialog(
         &self,
-        cur_page: usize,
+        _cur_page: usize,
         back: Option<(usize, usize)>,
         path_name: String,
         settings: ReaderSettings,
     ) -> Action {
         if let Some(book) = &self.ybook {
-            let chars_per_page = 1500.0;
             return dialogs::yread_toc_dialog(
                 &book.toc,
+                self.ychap_idx,
+                self.y_char_offset,
                 &self.ychap_offsets,
-                chars_per_page,
-                cur_page,
                 back,
                 path_name,
                 self.total,

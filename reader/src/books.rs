@@ -258,23 +258,37 @@ impl Screen for ReaderScreen {
         let pos = positions::resume_pos(&self.book_name());
         let (vw, vh) = self.visual_dims();
 
+        let mut pos_changed = false;
         if let Some(s) = pos.settings {
             if s != self.settings {
                 let old = self.settings;
                 self.settings = s;
                 self.backend.borrow_mut().apply_settings_change(&old, &s, vw, vh);
+                pos_changed = true;
             }
         }
 
-        if pos.sub_idx > 0 || !self.is_pdf() {
-            self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+        let cur_sub = self.backend.borrow().current_sub_idx();
+        let cur_page = self.backend.borrow().current_page();
+        if self.is_pdf() {
+            if pos.page != cur_page {
+                self.backend.borrow_mut().jump_to_page(pos.page, vw, vh, &self.settings);
+                pos_changed = true;
+            }
         } else {
-            self.backend.borrow_mut().jump_to_page(pos.page, vw, vh, &self.settings);
+            if pos.sub_idx != cur_sub {
+                self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+                pos_changed = true;
+            }
         }
-        self.page_gray = None;
-        self.save_progress();
 
-        Action::RedrawFull
+        if pos_changed {
+            self.page_gray = None;
+            self.save_progress();
+            Action::RedrawFull
+        } else {
+            Action::Redraw
+        }
     }
 
     fn tick_interval(&self) -> std::time::Duration {
@@ -484,7 +498,7 @@ mod tests {
 
     #[test]
     fn test_toc_resume_jumps_position() {
-        let path = std::path::PathBuf::from("/tmp/test_toc.fb2");
+        let path = std::path::PathBuf::from(format!("/tmp/test_toc_{}.fb2", std::process::id()));
         let (w, h) = (1236, 1648);
         let mut screen = ReaderScreen::new(path.clone(), 0, w, h);
         

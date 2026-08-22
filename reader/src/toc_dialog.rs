@@ -36,6 +36,7 @@ pub struct TocDialog<F: FnMut(TocAction) -> Action> {
     /// but keeps child flags, so re-expanding restores the exact view.
     expanded: Vec<bool>,
     current_page: usize,
+    active_idx: usize,
     /// Window start, in VISIBLE-row coordinates (collapsed rows hidden).
     offset: usize,
     per_page: usize,
@@ -62,26 +63,36 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
 
     pub fn from_yread_toc(
         toc: &[yread::model::TocEntry],
+        cur_chapter: usize,
+        cur_char: usize,
         offsets: &[usize],
-        chars_per_page: f32,
-        current_page: usize,
         on_action: F,
     ) -> Self {
         let mut items = Vec::new();
-        let cpp = chars_per_page.max(100.0);
         for entry in toc {
             let base_page = offsets.get(entry.chapter_idx).copied().unwrap_or(0);
-            let sec_page = (entry.char_offset as f32 / cpp).floor() as usize;
-            let page = base_page + sec_page;
             items.push(TocItem {
                 title: entry.title.clone(),
                 chapter_idx: entry.chapter_idx,
                 char_offset: entry.char_offset,
-                page,
+                page: base_page,
                 level: entry.level,
             });
         }
-        Self::with_items(items, current_page, on_action)
+
+        // Find the entry containing the current chapter and character offset
+        let mut best_idx = 0;
+        for (i, item) in items.iter().enumerate() {
+            if item.chapter_idx < cur_chapter
+                || (item.chapter_idx == cur_chapter && item.char_offset <= cur_char)
+            {
+                best_idx = i;
+            } else if item.chapter_idx > cur_chapter {
+                break;
+            }
+        }
+
+        Self::with_items_and_active(items, cur_chapter, best_idx, on_action)
     }
 
     #[allow(dead_code)]
@@ -120,6 +131,15 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
                 break;
             }
         }
+        Self::with_items_and_active(items, current_page, best_idx, on_action)
+    }
+
+    fn with_items_and_active(
+        items: Vec<TocItem>,
+        current_page: usize,
+        best_idx: usize,
+        on_action: F,
+    ) -> Self {
         let mut expanded = vec![false; items.len()];
         // Expand the ancestors (strictly shallower entries) above it so
         // "where am I" is visible on open; the entry itself stays as-is.
@@ -137,6 +157,7 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             items,
             expanded,
             current_page,
+            active_idx: best_idx,
             offset: 0,
             per_page: 8,
             dims: (1236, 1648),
@@ -303,9 +324,7 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
             let idx = vis[vpos];
             let item = &self.items[idx];
             let ry = list_top + i as i32 * row_h;
-            let is_current = idx + 1 < self.items.len()
-                && self.current_page >= item.page
-                && self.current_page < self.items[idx + 1].page;
+            let is_current = idx == self.active_idx;
 
             let row_rect = Rect::new(pad, ry, w - 2 * pad, row_h - pt(4.0));
             if is_current {
@@ -475,16 +494,16 @@ mod tests {
 
     fn book_toc() -> Vec<yread::model::TocEntry> {
         vec![
-            entry("Part One", 0, 0),       // p.0
-            entry("Ch 1", 5000, 1),        // p.5
-            entry("Sec 1.1", 9000, 2),     // p.9
-            entry("Part Two", 20000, 0),   // p.20
-            entry("Ch 2", 24000, 1),       // p.24
+            entry("Part One", 0, 0),       // char 0
+            entry("Ch 1", 5000, 1),        // char 5000
+            entry("Sec 1.1", 9000, 2),     // char 9000
+            entry("Part Two", 20000, 0),   // char 20000
+            entry("Ch 2", 24000, 1),       // char 24000
         ]
     }
 
-    fn dialog(current_page: usize) -> TocDialog<impl FnMut(TocAction) -> Action> {
-        TocDialog::from_yread_toc(&book_toc(), &[0], 1000.0, current_page, |_| Action::Keep)
+    fn dialog(current_char: usize) -> TocDialog<impl FnMut(TocAction) -> Action> {
+        TocDialog::from_yread_toc(&book_toc(), 0, current_char, &[0], |_| Action::Keep)
     }
 
     fn titles(d: &TocDialog<impl FnMut(TocAction) -> Action>) -> Vec<&str> {
@@ -496,22 +515,22 @@ mod tests {
 
     #[test]
     fn opens_collapsed_except_current_ancestors() {
-        // Reading inside Ch 1 (p.6): Part One auto-expanded, Ch 1's own
+        // Reading inside Ch 1 (char 6000): Part One auto-expanded, Ch 1's own
         // subtree stays closed, Part Two collapsed.
-        let d = dialog(6);
+        let d = dialog(6000);
         assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Part Two"]);
     }
 
     #[test]
     fn deep_position_expands_full_ancestor_chain() {
-        // Inside Sec 1.1 (p.10): both Part One and Ch 1 expanded.
-        let d = dialog(10);
+        // Inside Sec 1.1 (char 10000): both Part One and Ch 1 expanded.
+        let d = dialog(10000);
         assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Sec 1.1", "Part Two"]);
     }
 
     #[test]
     fn chevron_toggle_collapses_and_restores() {
-        let mut d = dialog(10);
+        let mut d = dialog(10000);
         assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Sec 1.1", "Part Two"]);
         // Collapse Part One (idx 0): subtree hidden, Ch 1 keeps its flag.
         d.expanded[0] = false;
@@ -523,7 +542,7 @@ mod tests {
 
     #[test]
     fn collapsed_parent_hides_grandchildren_even_if_child_open() {
-        let mut d = dialog(6); // [Part One, Ch 1, Part Two]
+        let mut d = dialog(6000); // [Part One, Ch 1, Part Two]
         d.expanded[1] = true; // open Ch 1 -> Sec 1.1 shows
         assert_eq!(titles(&d), vec!["Part One", "Ch 1", "Sec 1.1", "Part Two"]);
         d.expanded[0] = false; // close Part One: everything below hides
@@ -534,7 +553,7 @@ mod tests {
 
     #[test]
     fn has_children_boundaries() {
-        let d = dialog(6);
+        let d = dialog(6000);
         assert!(d.has_children(0)); // Part One -> Ch 1
         assert!(d.has_children(1)); // Ch 1 -> Sec 1.1
         assert!(!d.has_children(2)); // leaf
@@ -545,14 +564,14 @@ mod tests {
     fn flat_toc_shows_everything() {
         // All level 0 (from_chapters shape): no tree, no behavior change.
         let flat: Vec<yread::model::TocEntry> = (0..5).map(|i| entry(&format!("Ch {i}"), i * 10, 0)).collect();
-        let d = TocDialog::from_yread_toc(&flat, &[0], 1000.0, 3, |_| Action::Keep);
+        let d = TocDialog::from_yread_toc(&flat, 0, 30, &[0], |_| Action::Keep);
         assert_eq!(d.visible_indices().len(), 5);
     }
 
     #[test]
     fn back_row_appears_only_when_armed() {
         // No jump history: no Back row.
-        let d = dialog(6);
+        let d = dialog(6000);
         assert!(d.back_target.is_none());
         assert!(d.back_row_rect().is_none());
 

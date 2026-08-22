@@ -5,11 +5,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::split::{ContrastMode, ReaderSettings, SplitConfig, SplitPreset};
 
-const STORE: &str = "/mnt/us/extensions/reader/positions.txt";
-const GLOBAL_STORE: &str = "/mnt/us/extensions/reader/global.txt";
+fn store_path() -> &'static str {
+    if std::path::Path::new("/mnt/us/extensions/reader").exists() {
+        "/mnt/us/extensions/reader/positions.txt"
+    } else {
+        "/tmp/positions.txt"
+    }
+}
+
+fn global_store_path() -> &'static str {
+    if std::path::Path::new("/mnt/us/extensions/reader").exists() {
+        "/mnt/us/extensions/reader/global.txt"
+    } else {
+        "/tmp/global.txt"
+    }
+}
 
 pub fn global_refresh_interval() -> usize {
-    if let Ok(s) = std::fs::read_to_string(GLOBAL_STORE) {
+    if let Ok(s) = std::fs::read_to_string(global_store_path()) {
         if let Ok(v) = s.trim().parse::<usize>() {
             return v;
         }
@@ -18,7 +31,7 @@ pub fn global_refresh_interval() -> usize {
 }
 
 pub fn set_global_refresh_interval(val: usize) {
-    let _ = std::fs::write(GLOBAL_STORE, format!("{}\n", val));
+    let _ = std::fs::write(global_store_path(), format!("{}\n", val));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -110,76 +123,77 @@ fn parse(text: &str) -> HashMap<String, Pos> {
         let mut sub_idx = 0;
         let mut settings = None;
 
-        if let (
-            Some(sub_str),
-            Some(preset_str),
-            Some(rot_str),
-            Some(ov_str),
-            Some(ml_str),
-            Some(mt_str),
-            Some(mr_str),
-            Some(mb_str),
-        ) = (
-            it.next(),
-            it.next(),
-            it.next(),
-            it.next(),
-            it.next(),
-            it.next(),
-            it.next(),
-            it.next(),
-        ) {
-            if let (Ok(sub), Ok(rot), Ok(ov), Ok(ml), Ok(mt), Ok(mr), Ok(mb)) = (
-                sub_str.parse(),
-                rot_str.parse(),
-                ov_str.parse(),
-                ml_str.parse(),
-                mt_str.parse(),
-                mr_str.parse(),
-                mb_str.parse(),
-            ) {
+        if let Some(sub_str) = it.next() {
+            if let Ok(sub) = sub_str.parse() {
                 sub_idx = sub;
-                let split = SplitConfig {
-                    preset: str_to_preset(preset_str),
-                    rotation: rot,
-                    overlap: if ov > 0.035 { 0.018 } else { ov },
-                    margin_left: ml,
-                    margin_top: mt,
-                    margin_right: mr,
-                    margin_bottom: mb,
-                };
+            }
+            if let (
+                Some(preset_str),
+                Some(rot_str),
+                Some(ov_str),
+                Some(ml_str),
+                Some(mt_str),
+                Some(mr_str),
+                Some(mb_str),
+            ) = (
+                it.next(),
+                it.next(),
+                it.next(),
+                it.next(),
+                it.next(),
+                it.next(),
+                it.next(),
+            ) {
+                if let (Ok(rot), Ok(ov), Ok(ml), Ok(mt), Ok(mr), Ok(mb)) = (
+                    rot_str.parse(),
+                    ov_str.parse(),
+                    ml_str.parse(),
+                    mt_str.parse(),
+                    mr_str.parse(),
+                    mb_str.parse(),
+                ) {
+                    let split = SplitConfig {
+                        preset: str_to_preset(preset_str),
+                        rotation: rot,
+                        overlap: if ov > 0.035 { 0.018 } else { ov },
+                        margin_left: ml,
+                        margin_top: mt,
+                        margin_right: mr,
+                        margin_bottom: mb,
+                    };
 
-                let font_size = it.next().and_then(|s| s.parse().ok()).unwrap_or(11.0);
-                let contrast = it.next().map(str_to_contrast).unwrap_or_default();
-                let white_cut = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                let invert = it.next().map(|s| s == "1").unwrap_or(false);
-                // Appended last so pre-margin-field lines (and out-of-range
-                // garbage) fall back to the old hardcoded default.
-                let margin_pad = it
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .filter(|m| (16..=216).contains(m))
-                    .unwrap_or(72);
-                // Appended after margin_pad (same backward-compatible
-                // pattern): old lines without it keep the book's own
-                // leading.
-                let line_spacing = it
-                    .next()
-                    .and_then(|s| s.parse::<f32>().ok())
-                    .filter(|v| (0.8..=1.8).contains(v))
-                    .unwrap_or(1.0);
+                    let font_size = it.next().and_then(|s| s.parse().ok()).unwrap_or(11.0);
+                    let contrast = it.next().map(str_to_contrast).unwrap_or_default();
+                    let white_cut = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let invert = it.next().map(|s| s == "1").unwrap_or(false);
+                    // Appended last so pre-margin-field lines (and out-of-range
+                    // garbage) fall back to the old hardcoded default.
+                    let margin_pad = it
+                        .next()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .filter(|m| (16..=216).contains(m))
+                        .unwrap_or(72);
+                    // Appended after margin_pad (same backward-compatible
+                    // pattern): old lines without it keep the book's own
+                    // leading.
+                    let line_spacing = it
+                        .next()
+                        .and_then(|s| s.parse::<f32>().ok())
+                        .filter(|v| (0.8..=1.8).contains(v))
+                        .unwrap_or(1.0);
 
-                settings = Some(ReaderSettings {
-                    split,
-                    font_size,
-                    margin_pad,
-                    line_spacing,
-                    contrast,
-                    white_cutoff: white_cut,
-                    invert,
-                    refresh_interval: 10,
-                    show_header: true,
-                });
+                    settings = Some(ReaderSettings {
+                        split,
+                        font_size,
+                        margin_pad,
+                        line_spacing,
+                        contrast,
+                        white_cutoff: white_cut,
+                        invert,
+                        refresh_interval: 10,
+                        show_header: true,
+                    });
+                }
             }
         }
 
@@ -230,6 +244,8 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
                     s.margin_pad,
                     format!("{:.1}", s.line_spacing),
                 )
+            } else if p.sub_idx > 0 {
+                format!("{}\t{}\t{}\t{}\t{}", k, p.page, p.total, p.ts, p.sub_idx)
             } else {
                 format!("{}\t{}\t{}\t{}", k, p.page, p.total, p.ts)
             }
@@ -244,7 +260,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
 
 /// Saved pos for a book (page 0, sub 0 when never opened).
 pub fn resume_pos(name: &str) -> Pos {
-    load_at(STORE)
+    load_at(store_path())
         .get(name)
         .copied()
         .unwrap_or(Pos::simple(0, 0, 0))
@@ -253,7 +269,7 @@ pub fn resume_pos(name: &str) -> Pos {
 /// The whole store in one read — for library-level ordering (last-read
 /// first) without an O(books) pile of single-entry loads.
 pub fn all() -> HashMap<String, Pos> {
-    load_at(STORE)
+    load_at(store_path())
 }
 
 /// Saved page for a book (0 when never opened).
@@ -269,7 +285,7 @@ pub fn record_pos(
     sub_idx: usize,
     settings: Option<ReaderSettings>,
 ) {
-    let mut map = load_at(STORE);
+    let mut map = load_at(store_path());
     map.insert(
         name.to_string(),
         Pos {
@@ -280,13 +296,13 @@ pub fn record_pos(
             settings,
         },
     );
-    save_at(STORE, &map);
+    save_at(store_path(), &map);
 }
 
 /// Simple record (for books without custom settings).
 #[allow(dead_code)]
 pub fn record(name: &str, page: usize, total: usize) {
-    let mut map = load_at(STORE);
+    let mut map = load_at(store_path());
     let prev_settings = map.get(name).and_then(|p| p.settings);
     let prev_sub = map.get(name).map(|p| p.sub_idx).unwrap_or(0);
     map.insert(
@@ -299,12 +315,12 @@ pub fn record(name: &str, page: usize, total: usize) {
             settings: prev_settings,
         },
     );
-    save_at(STORE, &map);
+    save_at(store_path(), &map);
 }
 
 /// The most recently opened book, if any.
 pub fn last_read() -> Option<(String, Pos)> {
-    load_at(STORE).into_iter().max_by_key(|(_, p)| p.ts)
+    load_at(store_path()).into_iter().max_by_key(|(_, p)| p.ts)
 }
 
 #[cfg(test)]
