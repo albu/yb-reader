@@ -92,8 +92,11 @@ impl ReaderScreen {
     }
 
     fn save_progress(&self) {
-        let name = self.book_name();
         let b = self.backend.borrow();
+        if !b.is_ready() {
+            return;
+        }
+        let name = self.book_name();
         positions::record_pos(
             &name,
             b.current_page(),
@@ -260,10 +263,15 @@ impl Screen for ReaderScreen {
 
         if self.backend.borrow_mut().poll(vw, vh, &self.settings) {
             self.page_gray = None;
+            self.save_progress();
             Action::Redraw
         } else {
             Action::Keep
         }
+    }
+
+    fn on_leave(&mut self) {
+        self.save_progress();
     }
 
     fn draw(&mut self, p: &mut Painter) {
