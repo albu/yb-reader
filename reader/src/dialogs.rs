@@ -50,14 +50,16 @@ pub fn toc_dialog(
 
 pub fn yread_toc_dialog(
     chapters: &[yread::model::Chapter],
-    cur_chap: usize,
+    offsets: &[usize],
+    cur_page: usize,
     path_name: String,
     total: usize,
     settings: ReaderSettings,
 ) -> Action {
     Action::Push(Box::new(crate::toc_dialog::TocDialog::from_chapters(
         chapters,
-        cur_chap,
+        offsets,
+        cur_page,
         move |act| match act {
             crate::toc_dialog::TocAction::JumpTo(target) => {
                 record(&path_name, target, total, settings);

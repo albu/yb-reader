@@ -382,4 +382,33 @@ mod tests {
         let map = parse(good);
         assert_eq!(map["d.pdf"].settings.unwrap().margin_pad, 36);
     }
+
+    #[test]
+    fn test_yread_engine_settings_roundtrip() {
+        let mut settings = ReaderSettings::default();
+        settings.engine = crate::split::ReaderEngine::YRead;
+        settings.line_spacing = 1.3;
+
+        let mut map = HashMap::new();
+        map.insert(
+            "book.epub".to_string(),
+            Pos {
+                page: 7,
+                total: 24,
+                ts: 1700000000,
+                sub_idx: 2,
+                settings: Some(settings),
+            },
+        );
+        let path = "/tmp/yb-positions-yread-test.txt";
+        let _ = std::fs::remove_file(path);
+        save_at(path, &map);
+        let loaded = load_at(path);
+        assert_eq!(loaded["book.epub"].page, 7);
+        assert_eq!(loaded["book.epub"].sub_idx, 2);
+        let s = loaded["book.epub"].settings.unwrap();
+        assert_eq!(s.engine, crate::split::ReaderEngine::YRead);
+        assert!((s.line_spacing - 1.3).abs() < 0.01);
+        let _ = std::fs::remove_file(path);
+    }
 }
