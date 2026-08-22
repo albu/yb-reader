@@ -23,15 +23,21 @@ pub struct ShapedWord {
     pub glyphs: Vec<ShapedGlyph>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CacheKey {
-    word: String,
-    style: FontStyle,
-    size_scaled: u16, // size in 1/10th pt (e.g. 11.5pt -> 115)
+fn hash_word(word: &str, style: FontStyle, size_scaled: u16) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for &b in word.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h ^= style as u64;
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= size_scaled as u64;
+    h = h.wrapping_mul(0x100000001b3);
+    h
 }
 
 pub struct ShapeCache {
-    cache: HashMap<CacheKey, Arc<ShapedWord>>,
+    cache: HashMap<u64, (String, FontStyle, u16, Arc<ShapedWord>)>,
     hyphen_advance: HashMap<(FontStyle, u16), f32>,
     space_advance: HashMap<(FontStyle, u16), f32>,
 }
@@ -39,7 +45,7 @@ pub struct ShapeCache {
 impl Default for ShapeCache {
     fn default() -> Self {
         Self {
-            cache: HashMap::with_capacity(4096),
+            cache: HashMap::with_capacity(8192),
             hyphen_advance: HashMap::new(),
             space_advance: HashMap::new(),
         }
@@ -60,25 +66,23 @@ impl ShapeCache {
         fonts: &FontSystem,
     ) -> Arc<ShapedWord> {
         let size_scaled = (size_pt * 10.0).round() as u16;
-        let key = CacheKey {
-            word: word.to_string(),
-            style,
-            size_scaled,
-        };
+        let h = hash_word(word, style, size_scaled);
 
-        if let Some(shaped) = self.cache.get(&key) {
-            return Arc::clone(shaped);
+        if let Some((w, s, sz, shaped)) = self.cache.get(&h) {
+            if *sz == size_scaled && *s == style && w == word {
+                return Arc::clone(shaped);
+            }
         }
 
-        let face = fonts.face_for_style(style);
-        let shaped = Arc::new(shape_string_with_face(word, face, size_pt));
-        // Bound the shared cache (400MB device): ~8k entries ≈ a few MB.
-        // Wholesale clear on overflow — rewarm cost is one chapter's worth
-        // of shaping.
-        if self.cache.len() >= 8192 {
+        // Parsed once per process (see FontSystem::rustybuzz_face) — a
+        // per-call Face::from_slice parsed the 320 kB sfnt ~2.4k times
+        // per chapter on top of the metrics() hot path.
+        let rb_face = fonts.rustybuzz_face(style);
+        let shaped = Arc::new(shape_string_with_face(word, rb_face, size_pt));
+        if self.cache.len() >= 65536 {
             self.cache.clear();
         }
-        self.cache.insert(key, Arc::clone(&shaped));
+        self.cache.insert(h, (word.to_string(), style, size_scaled, Arc::clone(&shaped)));
         shaped
     }
 
@@ -117,17 +121,7 @@ impl ShapeCache {
     }
 }
 
-fn shape_string_with_face(text: &str, face: &FontFace, size_pt: f32) -> ShapedWord {
-    let rb_face = match face.as_rustybuzz() {
-        Some(f) => f,
-        None => {
-            return ShapedWord {
-                advance: 0.0,
-                glyphs: Vec::new(),
-            }
-        }
-    };
-
+fn shape_string_with_face(text: &str, rb_face: &rustybuzz::Face, size_pt: f32) -> ShapedWord {
     let upem = rb_face.units_per_em() as f32;
     let scale = (size_pt * (300.0 / 72.0)) / upem;
 
