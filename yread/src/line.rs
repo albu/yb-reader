@@ -335,7 +335,7 @@ pub fn break_paragraph_lines_streaming(
         } else {
             // Check if we can hyphenate the word before breaking
             let mut hyphenated = false;
-            if let (Some(target_lang), LineItem::Word { byte_start, byte_end, char_start, style, .. }) = (lang, &item) {
+            if let (Some(target_lang), LineItem::Word { byte_start, byte_end, char_start, style, shaped: word_shaped, .. }) = (lang, &item) {
                 if let Some(word_text) = text.get(*byte_start..*byte_end) {
                     if word_text.chars().count() >= 5 {
                         let syllables: Vec<&str> = hyphenate(word_text, target_lang).collect();
@@ -343,17 +343,31 @@ pub fn break_paragraph_lines_streaming(
                             let run_size = base_font_size * style.size_mult;
                             let hyp_adv = cache.hyphen_advance(style.font_style, run_size, fonts);
                             let mut prefix = String::new();
-                            let mut best_break: Option<(usize, usize, Arc<crate::shape::ShapedWord>)> = None;
+                            // Candidate widths come FREE from the full word's
+                            // glyph clusters — only the winning prefix is
+                            // shaped for rendering. (This used to shape every
+                            // syllable prefix per overflowing word: the last
+                            // measurable pagination cost after the font-parse
+                            // fix.) A boundary is valid only where it falls
+                            // BETWEEN clusters — never splits a ligature or
+                            // mark cluster. The estimate keeps the boundary
+                            // kern folded into the last prefix glyph's
+                            // advance, so it errs slightly wide — a rejected
+                            // break just leaves the word unhyphenated.
+                            let mut best_break: Option<(usize, usize, f32)> = None;
 
                             for &syl in &syllables[..syllables.len() - 1] {
                                 prefix.push_str(syl);
-                                let prefix_shaped = cache.shape_word(&prefix, style.font_style, run_size, fonts);
-                                if current_line_width + prefix_shaped.advance + hyp_adv <= allowed_width {
-                                    best_break = Some((prefix.len(), prefix.chars().count(), prefix_shaped));
+                                if let Some(p_adv) = advance_to_boundary(&word_shaped.glyphs, prefix.len()) {
+                                    if current_line_width + p_adv + hyp_adv <= allowed_width {
+                                        best_break = Some((prefix.len(), prefix.chars().count(), p_adv));
+                                    }
                                 }
                             }
 
-                            if let Some((pref_bytes, pref_chars, prefix_shaped)) = best_break {
+                            if let Some((pref_bytes, pref_chars, _p_adv)) = best_break {
+                                let prefix_str = &word_text[..pref_bytes];
+                                let prefix_shaped = cache.shape_word(prefix_str, style.font_style, run_size, fonts);
                                 current_line_items.push(LineItem::HyphenatedPrefix {
                                     byte_start: *byte_start,
                                     byte_end: *byte_start + pref_bytes,
@@ -512,4 +526,20 @@ fn build_line(
         start_char,
         end_char,
     }
+}
+
+/// Advance width of the byte-prefix [0, boundary) of an already-shaped
+/// word, read off its glyph clusters. None when the boundary splits a
+/// cluster (ligature / attached mark) — that hyphenation point is
+/// invalid. Clusters are monotonic for the scripts we hyphenate.
+fn advance_to_boundary(glyphs: &[crate::shape::ShapedGlyph], boundary: usize) -> Option<f32> {
+    let mut sum = 0.0f32;
+    for g in glyphs {
+        if (g.cluster as usize) < boundary {
+            sum += g.x_advance;
+        } else {
+            return if g.cluster as usize == boundary { Some(sum) } else { None };
+        }
+    }
+    None
 }
