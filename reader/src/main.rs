@@ -29,7 +29,6 @@ mod receive;
 mod render;
 mod scrubber_dialog;
 mod selection;
-mod settings_dialog;
 mod split;
 mod system;
 mod toc_dialog;

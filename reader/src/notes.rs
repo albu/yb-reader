@@ -63,6 +63,7 @@ pub fn save(book: &str, v: &[Highlight]) {
 
 /// Add a highlight (deduped by exact text). Returns false for an empty or
 /// already-known span.
+#[allow(dead_code)]
 pub fn add(book: &str, page: usize, text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
@@ -95,12 +96,7 @@ pub fn remove(book: &str, text: &str) -> bool {
     true
 }
 
-/// Match stored highlight texts against the given page's words (reading
-/// order); returns inclusive (start, end) word-index ranges to underline.
-/// Page-gated on purpose: matching every highlight's text against every
-/// rendered page underlined common short spans wherever their words
-/// appeared. The cost is that a reflow (font-size change) that moves the
-/// span off its stored page loses the underline until it's re-captured.
+#[allow(dead_code)]
 pub fn matched_spans(
     hl: &[Highlight],
     page: usize,

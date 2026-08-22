@@ -388,6 +388,7 @@ impl ReaderSettings {
 
 /// Auto-detect white margin bounding box in a grayscale pixmap.
 /// Returns (margin_left, margin_top, margin_right, margin_bottom) as fractions (0.0..0.45).
+#[allow(dead_code)]
 pub fn detect_margins(
     samples: &[u8],
     width: usize,

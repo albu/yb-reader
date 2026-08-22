@@ -398,6 +398,7 @@ impl VocabProfile {
     }
 
     /// Decide whether a candidate word should be annotated on this page.
+    #[allow(dead_code)]
     pub fn should_annotate(&self, entry: &WordEntry) -> bool {
         if self.style == AnnotationStyle::Off {
             return false;
@@ -421,6 +422,7 @@ impl VocabProfile {
 
 /// Paint the budgeted annotations in the profile's style: interlinear
 /// pills above each word, dotted underlines, or a two-line margin list.
+#[allow(dead_code)]
 pub fn draw_annotations(
     p: &mut Painter,
     annotations: &[(RectF, WordEntry)],

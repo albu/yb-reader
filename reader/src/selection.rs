@@ -14,6 +14,7 @@ pub struct SelState {
 }
 
 impl SelState {
+    #[allow(dead_code)]
     pub fn new(word: usize) -> Self {
         SelState {
             anchor: word,

@@ -8,7 +8,6 @@ use yui::Orientation;
 use yui::screen::{Action, Screen};
 
 use crate::crop_dialog::CropDialog;
-use crate::settings_dialog::SettingsDialog;
 use crate::split::{ContrastMode, ReaderSettings, SplitConfig, SplitPreset};
 
 const SHEET_H_PT: f32 = 197.0;
@@ -205,17 +204,12 @@ impl Screen for QuickSettingsSheet {
         }
         y += pt(ROW_H_PT) + pt(6.0);
 
-        // Row 4: Action Footer [ All Settings… ]
-        // No "Done" — every control applies live behind the sheet;
-        // dismissal is tap-above or swipe down.
-        let all_btn = Rect::new(pad, y, pt(110.0), pt(BTN_H_PT));
-        p.rect_outline_t(all_btn, 1, 100);
-        p.text_center_in(all_btn.x, all_btn.x + all_btn.w, y + pt(15.0), 7.5, 0, "All Settings…");
-
-        p.text_right(
+        // Row 4: Action Footer (tap above · swipe down hint)
+        p.text_center_in(
+            pad,
             w - pad,
             y + pt(15.0),
-            7.0,
+            7.5,
             120,
             "tap above · swipe ↓ to close",
         );
@@ -328,20 +322,6 @@ impl Screen for QuickSettingsSheet {
                 self.settings.contrast = *c_mode;
                 return self.apply_change();
             }
-        }
-        y += pt(ROW_H_PT) + pt(6.0);
-
-        // Row 4: All Settings (Done is gone — changes apply live;
-        // dismissal is tap-above or swipe down)
-        let all_btn = Rect::new(pad, y, pt(110.0), pt(BTN_H_PT));
-        if all_btn.contains(vx, vy) {
-            let name = self.book.clone();
-            let page = self.page_no;
-            let sub = self.sub_idx;
-            let tot = self.total;
-            let s = self.settings;
-            let gray = self.page_gray.clone();
-            return Action::Push(Box::new(SettingsDialog::new_legacy(name, page, sub, tot, s, gray)));
         }
 
         Action::Keep

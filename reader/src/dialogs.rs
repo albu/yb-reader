@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use mupdf::{Colorspace, Document, Matrix};
+use mupdf::Document;
 use yui::screen::Action;
 
 use crate::positions;
@@ -276,38 +276,6 @@ pub fn footnote_dialog_yread(
                 Action::Pop
             }
             crate::footnote_dialog::FootnoteAction::Close => Action::Pop,
-        },
-    )))
-}
-
-pub fn settings_dialog(
-    doc: Option<&Rc<Document>>,
-    page_no: usize,
-    sub_idx: usize,
-    settings: ReaderSettings,
-    is_pdf: bool,
-    path_name: String,
-    total: usize,
-) -> Action {
-    let samples = doc.and_then(|doc| {
-        let page = doc.load_page(page_no as i32).ok()?;
-        let m = Matrix::new_scale(1.0, 1.0);
-        let pm = page.to_pixmap(&m, &Colorspace::device_gray(), false, true).ok()?;
-        Some((
-            pm.samples().to_vec(),
-            pm.width() as usize,
-            pm.height() as usize,
-            pm.stride() as usize,
-        ))
-    });
-
-    Action::Push(Box::new(crate::settings_dialog::ReaderSettingsDialog::new(
-        settings,
-        is_pdf,
-        samples,
-        move |new_settings| {
-            record_sub(&path_name, page_no, sub_idx, total, new_settings);
-            Action::Pop
         },
     )))
 }

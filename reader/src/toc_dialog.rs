@@ -13,6 +13,7 @@ pub struct TocItem {
 }
 
 pub enum TocAction {
+    #[allow(dead_code)]
     JumpTo(usize),
     JumpToYRead {
         chapter_idx: usize,
@@ -83,6 +84,7 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
         Self::with_items(items, current_page, on_action)
     }
 
+    #[allow(dead_code)]
     pub fn from_chapters(
         chapters: &[yread::model::Chapter],
         current_chap: usize,

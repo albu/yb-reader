@@ -29,7 +29,9 @@ pub trait ReaderBackend {
     fn turn_page(&mut self, delta: i32, vw: u32, vh: u32, settings: &ReaderSettings) -> PageTurnResult;
 
     fn jump_to_sub(&mut self, sub_idx: usize, vw: u32, vh: u32, settings: &ReaderSettings);
+    #[allow(dead_code)]
     fn jump_to_page(&mut self, page: usize, vw: u32, vh: u32, settings: &ReaderSettings);
+    #[allow(dead_code)]
     fn jump_to_yread(&mut self, chapter_idx: usize, char_offset: usize, vw: u32, vh: u32, settings: &ReaderSettings);
 
     fn render_page(&mut self, vw: u32, vh: u32, settings: &ReaderSettings) -> RenderOutput;
@@ -64,6 +66,7 @@ pub trait ReaderBackend {
     ) -> Action;
 
     fn apply_settings_change(&mut self, old: &ReaderSettings, new: &ReaderSettings, vw: u32, vh: u32) -> bool;
+    #[allow(dead_code)]
     fn interactive_preview(&mut self, settings: &ReaderSettings, vw: u32, vh: u32) -> Option<Vec<u8>>;
 }
 

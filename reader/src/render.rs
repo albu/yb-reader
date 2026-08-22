@@ -23,6 +23,7 @@ pub const HEADER_H: u32 = 92; // px (covers clock/battery status header)
 pub const FOOTER_H: u32 = 50; // px (covers progress track and footer)
 pub const TEXT_AA_LEVEL: i32 = 8;
 
+#[allow(dead_code)]
 pub fn avail_pt(w: u32, h: u32, margin_pad: u32) -> (f32, f32) {
     (
         (w.saturating_sub(2 * margin_pad)) as f32 * 72.0 / 300.0,

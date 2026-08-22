@@ -91,6 +91,7 @@ impl CurtainScreen {
 
     /// Reader-opened curtain: adds the ROTATE pill (cycles the book's
     /// orientation, preset/crop untouched).
+    #[allow(dead_code)]
     pub fn new_with_rotation(ctx: RotateCtx) -> CurtainScreen {
         Self::build(Some(ctx))
     }
@@ -208,18 +209,6 @@ fn draw_wifi_bars(p: &mut Painter, x: i32, y: i32, online: bool) {
         let bx = x + i as i32 * (bar_w + gap);
         let by = y + pt(8.0) - bh;
         p.rect(Rect::new(bx, by, bar_w, bh), color);
-    }
-}
-
-fn draw_mem_icon(p: &mut Painter, x: i32, y: i32) {
-    let w = pt(10.0);
-    let h = pt(8.0);
-    p.rect_outline_t(Rect::new(x, y, w, h), 1, INK);
-    p.rect_outline_t(Rect::new(x + pt(2.5), y + pt(2.5), w - pt(5.0), h - pt(5.0)), 1, INK);
-    for i in 0..3 {
-        let px = x + pt(1.5) + i as i32 * pt(3.5);
-        p.rect(Rect::new(px, y - pt(1.5), 1, pt(1.5)), INK);
-        p.rect(Rect::new(px, y + h, 1, pt(1.5)), INK);
     }
 }
 
