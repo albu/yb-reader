@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use yui::screen::Action;
 use crate::split::{RectF, ReaderSettings};
 
@@ -74,7 +74,7 @@ pub fn create_backend(path: PathBuf, resume_page: usize, resume_sub: usize, w: u
         .unwrap_or(false);
 
     if is_pdf {
-        Box::new(crate::backend_mupdf::PdfBackend::new(path, resume_page, resume_sub, w, h, settings))
+        Box::new(crate::backend_mupdf::PdfBackend::new(path, resume_page, resume_sub))
     } else {
         Box::new(crate::backend_yread::YreadBackend::new(path, resume_sub, w, h, settings))
     }

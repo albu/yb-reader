@@ -27,9 +27,6 @@ impl PdfBackend {
         path: PathBuf,
         resume_page: usize,
         resume_sub: usize,
-        vw: u32,
-        vh: u32,
-        settings: &ReaderSettings,
     ) -> Self {
         let name = path
             .file_name()
@@ -38,15 +35,7 @@ impl PdfBackend {
         let pos = positions::resume_pos(&name);
         let sub_idx = if pos.page == resume_page { resume_sub } else { 0 };
 
-        let rx = doc_store::open_async(
-            path.clone(),
-            vw,
-            vh,
-            settings.font_size,
-            settings.margin_pad,
-            settings.line_spacing,
-            None,
-        );
+        let rx = doc_store::open_async(path.clone());
 
         Self {
             path,

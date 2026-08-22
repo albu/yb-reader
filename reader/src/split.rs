@@ -28,15 +28,6 @@ impl SplitPreset {
         }
     }
 
-    pub fn short_name(&self) -> &'static str {
-        match self {
-            SplitPreset::FitPage => "Fit",
-            SplitPreset::Horizontal2 => "2-Split",
-            SplitPreset::Horizontal3 => "3-Split",
-            SplitPreset::Vertical2 => "2-Col",
-            SplitPreset::Grid4 => "4-Grid",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,10 +158,6 @@ impl SplitConfig {
         }
     }
 
-    pub fn is_landscape(&self) -> bool {
-        self.rotation == 90 || self.rotation == 270
-    }
-
     /// The orientation cycle both rotation entry points (the settings
     /// dialog's button and the curtain's ROTATE pill) walk: portrait →
     /// landscape CW → landscape CCW → portrait. One function, one order —
@@ -270,19 +257,23 @@ impl SplitConfig {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn is_landscape(&self) -> bool {
+        self.rotation == 90 || self.rotation == 270
+    }
 
-    /// Total number of reading steps across the entire book.
+    #[allow(dead_code)]
     pub fn total_steps(&self, page_count: usize) -> usize {
         page_count.max(1) * self.sub_box_count()
     }
 
-    /// Maps a global linear step index (0..total_steps-1) to (page_index, sub_index).
+    #[allow(dead_code)]
     pub fn step_to_page_sub(&self, step: usize) -> (usize, usize) {
         let count = self.sub_box_count();
         (step / count, step % count)
     }
 
-    /// Maps (page_index, sub_index) to a global linear step index.
+    #[allow(dead_code)]
     pub fn page_sub_to_step(&self, page: usize, sub: usize) -> usize {
         let count = self.sub_box_count();
         page * count + sub.min(count.saturating_sub(1))

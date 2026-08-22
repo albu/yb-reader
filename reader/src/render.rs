@@ -21,32 +21,12 @@ use crate::split::{RectF, ReaderSettings};
 
 pub const HEADER_H: u32 = 92; // px (covers clock/battery status header)
 pub const FOOTER_H: u32 = 50; // px (covers progress track and footer)
+pub const TEXT_AA_LEVEL: i32 = 8;
 
-/// Crisp-text knobs (2026-08-21). The epub body font is mupdf's built-in
-/// light serif rendered with a linear AA ramp; the Boox text users
-/// compare against is a heavier weight and/or binary glyphs. Two
-/// independent variables, one-word flips — A/B on glass, not in theory.
-/// BOLD applies user CSS before layout (it changes metrics, hence
-/// pagination); AA_LEVEL applies at rasterize time on the calling
-/// thread's context (0 = no text anti-aliasing at all, graphics keep
-/// their own setting).
-pub const BOLD_EPUB_BODY: bool = false; // tried 2026-08-21: "too bold, don't like it at all"
-pub const TEXT_AA_LEVEL: i32 = 8; // 8 = full AA (0 tried 2026-08-21: "binary glyphs are also terrible")
-/// mupdf's default epub serif (Charis SIL) is a light literary cut that
-/// reads thin on e-ink; the built-in sans is a sturdy regular — the
-/// modern e-reader look (host-lab verified on the Publisher book,
-/// 2026-08-21: 3.3× the ink at the same size, smooth AA, not bold).
-/// Superseded the same night by the bundled Literata (doc_css
-/// font-patch — see document.rs): sturdy AND bookish.
-pub const SANS_EPUB_BODY: bool = false;
-
-/// The available text area in points for a reflow layout — shared by the
-/// async open/reflow paths so a warm document and a cold one lay out
-/// identically. Callers pass VISUAL dims (Orientation decides the swap).
 pub fn avail_pt(w: u32, h: u32, margin_pad: u32) -> (f32, f32) {
     (
-        (w - 2 * margin_pad) as f32 * 72.0 / 300.0,
-        (h - 2 * margin_pad - FOOTER_H - HEADER_H) as f32 * 72.0 / 300.0,
+        (w.saturating_sub(2 * margin_pad)) as f32 * 72.0 / 300.0,
+        (h.saturating_sub(2 * margin_pad + FOOTER_H + HEADER_H)) as f32 * 72.0 / 300.0,
     )
 }
 
@@ -227,7 +207,6 @@ pub fn render_page(
     // Thread-local mupdf context: set on every call so any thread that
     // rasterizes picks the knob up (contexts are per-thread clones).
     mupdf::Context::get().set_text_aa_level(TEXT_AA_LEVEL);
-    crate::document::apply_layout_css(settings.line_spacing);
     let page = doc.load_page(page_no as i32).ok()?;
     let bounds = page.bounds().ok()?;
     let geom = LayoutGeom::new(settings, bounds, sub_idx, w, h)?;
@@ -614,36 +593,6 @@ mod lab {
             let total = doc.page_count().unwrap_or(0);
             println!("{name}: {pw}x{phh} darkpx={dark} pages={total}");
         }
-        let _ = Context::get().set_user_css("");
-    }
-
-    #[test]
-    fn test_render_page_line_spacing() {
-        let book = std::path::Path::new("/tmp/lab.epub");
-        if !book.exists() {
-            return;
-        }
-        let mut doc = Document::open(book.as_os_str()).expect("open");
-        let (aw, ah) = crate::render::avail_pt(1236, 1648, 72);
-
-        // Layout at 1.0
-        crate::document::apply_layout_css(1.0);
-        let _ = doc.layout(aw, ah, 11.0);
-        let mut s1 = ReaderSettings::default();
-        s1.font_size = 11.0;
-        s1.line_spacing = 1.0;
-        let p1 = render_page(&doc, 20, 0, &s1, 1236, 1648).expect("render 1.0");
-
-        // Layout at 1.6
-        crate::document::apply_layout_css(1.6);
-        let _ = doc.layout(aw, ah, 11.0);
-        crate::document::purge_stored_html(&doc);
-        let mut s2 = s1;
-        s2.line_spacing = 1.6;
-        let p2 = render_page(&doc, 20, 0, &s2, 1236, 1648).expect("render 1.6");
-
-        // Must not be identical pixels
-        assert_ne!(p1, p2, "Render at 1.0 vs 1.6 spacing must produce different page renderings");
         let _ = Context::get().set_user_css("");
     }
 }

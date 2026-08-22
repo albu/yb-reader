@@ -1,8 +1,4 @@
-//! The reader screen: page state, the gesture grammar, and the Screen
-//! lifecycle. Delegates format-specific paging & rendering to ReaderBackend.
-
 use std::path::PathBuf;
-use std::time::Instant;
 
 use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
@@ -12,7 +8,7 @@ use crate::chrome;
 use crate::curtain::CurtainScreen;
 use crate::dialogs;
 use crate::positions;
-use crate::selection::{self, sel_bar_rects, SelState};
+use crate::selection::{self, SelState};
 use crate::split::{RectF, ReaderSettings};
 
 use yui::painter::{pt, Painter, Rect};
@@ -20,26 +16,19 @@ use yui::screen::{Action, Screen};
 use yui::Orientation;
 
 pub struct ReaderScreen {
-    path: PathBuf,
     pw: u32,
     ph: u32,
     backend: Box<dyn ReaderBackend>,
     settings: ReaderSettings,
     page_gray: Option<Vec<u8>>,
     dims: (i32, i32),
-    turns_since_full: usize,
-    pending_turns: i32,
     time_str: String,
     vocab_db: Option<&'static crate::vocab::VocabDb>,
     vocab_prof: crate::vocab::VocabProfile,
     page_words: Vec<(String, RectF)>,
-    page_annotations: Vec<(RectF, crate::vocab::WordEntry)>,
     page_links: Vec<(RectF, String)>,
-    page_start_time: Instant,
-    avg_secs_per_page: f32,
     sel_mode: bool,
     sel: Option<SelState>,
-    highlights: Vec<crate::notes::Highlight>,
     jump_history: Vec<(usize, usize)>,
 }
 
@@ -69,26 +58,19 @@ impl ReaderScreen {
         let vocab_prof = crate::vocab::VocabProfile::load();
 
         ReaderScreen {
-            path,
             pw: w,
             ph: h,
             backend,
             settings,
             page_gray: cached_snap,
             dims: (w as i32, h as i32),
-            turns_since_full: 0,
-            pending_turns: 0,
             time_str: chrome::current_time_str(),
             vocab_db,
             vocab_prof,
             page_words: Vec::new(),
-            page_annotations: Vec::new(),
             page_links: Vec::new(),
-            page_start_time: Instant::now(),
-            avg_secs_per_page: 45.0,
             sel_mode: false,
             sel: None,
-            highlights: Vec::new(),
             jump_history: Vec::new(),
         }
     }
