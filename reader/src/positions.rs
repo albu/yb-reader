@@ -168,6 +168,10 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                     .and_then(|s| s.parse::<f32>().ok())
                     .filter(|v| (0.8..=1.8).contains(v))
                     .unwrap_or(1.0);
+                let engine = match it.next() {
+                    Some("yread") => crate::split::ReaderEngine::YRead,
+                    _ => crate::split::ReaderEngine::MuPdf,
+                };
 
                 settings = Some(ReaderSettings {
                     split,
@@ -179,6 +183,7 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                     invert,
                     refresh_interval: 10,
                     show_header: true,
+                    engine,
                 });
             }
         }
@@ -210,7 +215,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
             if let Some(s) = p.settings {
                 let sc = s.split;
                 format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{}\t{}",
                     k,
                     p.page,
                     p.total,
@@ -228,7 +233,8 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
                     s.white_cutoff,
                     if s.invert { "1" } else { "0" },
                     s.margin_pad,
-                    format!("{:.1}", s.line_spacing)
+                    format!("{:.1}", s.line_spacing),
+                    if s.engine == crate::split::ReaderEngine::YRead { "yread" } else { "mupdf" },
                 )
             } else {
                 format!("{}\t{}\t{}\t{}", k, p.page, p.total, p.ts)

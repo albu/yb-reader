@@ -1164,10 +1164,12 @@ dependencies = [
 name = "yb-reader"
 version = "0.1.0"
 dependencies = [
+ "hypher",
  "libc",
  "mupdf",
  "qrcode",
  "ybdev",
+ "yread",
  "yui",
 ]
 

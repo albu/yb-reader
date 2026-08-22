@@ -11,7 +11,7 @@ use crate::crop_dialog::CropDialog;
 use crate::settings_dialog::SettingsDialog;
 use crate::split::{ContrastMode, ReaderSettings, SplitConfig, SplitPreset};
 
-const SHEET_H_PT: f32 = 197.0; // +29pt for the Spacing row (2026-08-22)
+const SHEET_H_PT: f32 = 226.0; // +29pt for the Engine row (2026-08-22)
 const PAD_PT: f32 = 16.0;
 const ROW_H_PT: f32 = 25.0;
 const BTN_H_PT: f32 = 22.0;
@@ -150,6 +150,26 @@ impl Screen for QuickSettingsSheet {
             p.rect_outline_t(sp_plus, 1, 0);
             p.text_center_in(sp_plus.x, sp_plus.x + sp_plus.w, y + pt(15.0), 10.0, 0, "+");
             y += pt(ROW_H_PT) + pt(4.0);
+
+            // Row 4: Engine selection
+            p.text(pad, y + pt(15.0), 8.5, 0, "ENGINE");
+            let engines = [
+                (crate::split::ReaderEngine::MuPdf, "MuPDF"),
+                (crate::split::ReaderEngine::YRead, "yRead \u{26a1}"),
+            ];
+            let eng_btn_w = pt(80.0);
+            for (i, (eng_mode, eng_lbl)) in engines.iter().enumerate() {
+                let bx = w - pad - (2 - i as i32) * (eng_btn_w + pt(4.0));
+                let br = Rect::new(bx, y, eng_btn_w, pt(BTN_H_PT));
+                if self.settings.engine == *eng_mode {
+                    p.rect(br, 0);
+                    p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.5, 255, eng_lbl);
+                } else {
+                    p.rect_outline_t(br, 1, 120);
+                    p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.5, 0, eng_lbl);
+                }
+            }
+            y += pt(ROW_H_PT) + pt(4.0);
         } else {
             // --- FIXED-LAYOUT (PDF / MANGA) ---
 
@@ -271,6 +291,20 @@ impl Screen for QuickSettingsSheet {
             if sp_plus.contains(vx, vy) {
                 self.settings.line_spacing =
                     (((self.settings.line_spacing + 0.1) * 10.0).round() / 10.0).min(1.8);
+                return self.apply_change();
+            }
+            y += pt(ROW_H_PT) + pt(4.0);
+
+            // Row 4: Engine
+            let eng_btn_w = pt(80.0);
+            let mupdf_btn = Rect::new(w - pad - 2 * (eng_btn_w + pt(4.0)), y, eng_btn_w, pt(BTN_H_PT));
+            let yread_btn = Rect::new(w - pad - (eng_btn_w + pt(4.0)), y, eng_btn_w, pt(BTN_H_PT));
+            if mupdf_btn.contains(vx, vy) {
+                self.settings.engine = crate::split::ReaderEngine::MuPdf;
+                return self.apply_change();
+            }
+            if yread_btn.contains(vx, vy) {
+                self.settings.engine = crate::split::ReaderEngine::YRead;
                 return self.apply_change();
             }
             y += pt(ROW_H_PT) + pt(4.0);

@@ -65,6 +65,16 @@ pub struct ReaderScreen {
     sel: Option<SelState>,
     /// Cached highlights for this book (notes store), for underlining.
     highlights: Vec<crate::notes::Highlight>,
+    // --- yRead Pure-Rust Layout Engine ---
+    ybook: Option<Rc<yread::Book>>,
+    yfonts: Option<Rc<yread::font::FontSystem>>,
+    ycache: yread::shape::ShapeCache,
+    yraster: yread::raster::Rasterizer,
+    ychap_idx: usize,
+    ychap_page: usize,
+    ychap_layouts: Option<Vec<yread::paginate::PageLayout>>,
+    ychap_page_table: Option<yread::model::ChapterPageTable>,
+    y_char_offset: usize,
 }
 
 impl ReaderScreen {
@@ -117,6 +127,15 @@ impl ReaderScreen {
             sel_mode: false,
             sel: None,
             highlights: Vec::new(),
+            ybook: None,
+            yfonts: None,
+            ycache: yread::shape::ShapeCache::new(),
+            yraster: yread::raster::Rasterizer::new(),
+            ychap_idx: 0,
+            ychap_page: 0,
+            ychap_layouts: None,
+            ychap_page_table: None,
+            y_char_offset: 0,
         }
     }
 
@@ -149,7 +168,184 @@ impl ReaderScreen {
         );
     }
 
+    fn ensure_yread_loaded(&mut self) {
+        if self.ybook.is_some() {
+            return;
+        }
+        if let Ok(data) = std::fs::read(&self.path) {
+            let ext = self
+                .path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let book_res = if ext == "fb2" || ext == "zip" {
+                yread::fb2::parse_fb2(&data)
+            } else {
+                yread::epub::parse_epub(&data)
+            };
+            if let Ok(b) = book_res {
+                self.total = b.chapters.len().max(1);
+                self.ybook = Some(Rc::new(b));
+                if self.yfonts.is_none() {
+                    self.yfonts = Some(Rc::new(yread::font::FontSystem::default()));
+                }
+            }
+        }
+    }
+
+    fn render_yread_page(&mut self) -> Option<Vec<u8>> {
+        self.ensure_yread_loaded();
+        let ybook = self.ybook.as_ref()?.clone();
+        let yfonts = self.yfonts.as_ref()?.clone();
+        if ybook.chapters.is_empty() {
+            return None;
+        }
+        if self.ychap_idx >= ybook.chapters.len() {
+            self.ychap_idx = 0;
+        }
+
+        let (vw, vh) = self.visual_dims();
+        let cfg = yread::paginate::LayoutConfig {
+            page_width: vw,
+            page_height: vh,
+            margin_left: self.settings.margin_pad,
+            margin_right: self.settings.margin_pad,
+            margin_top: self.settings.margin_pad + if self.settings.show_header { 92 } else { 0 },
+            margin_bottom: self.settings.margin_pad + 50,
+            font_size: self.settings.font_size,
+            line_spacing: self.settings.line_spacing,
+            paragraph_spacing: 0.15,
+            indent_em: 1.2,
+            hyphenate: true,
+        };
+
+        if self.ychap_layouts.is_none() {
+            let chapter = &ybook.chapters[self.ychap_idx];
+            let (pt, layouts) = yread::paginate::paginate_chapter_with_images(
+                chapter,
+                Some(&ybook.image_sizes),
+                &cfg,
+                &yfonts,
+                &mut self.ycache,
+                Some(hypher::Lang::English),
+            );
+            let p_idx = if self.y_char_offset == usize::MAX {
+                layouts.len().saturating_sub(1)
+            } else {
+                pt.page_for_char(self.y_char_offset).min(layouts.len().saturating_sub(1))
+            };
+            self.ychap_page = p_idx;
+            self.ychap_page_table = Some(pt);
+            self.ychap_layouts = Some(layouts);
+        }
+
+        let layouts = self.ychap_layouts.as_ref()?;
+        if layouts.is_empty() {
+            return None;
+        }
+        let cur_layout = &layouts[self.ychap_page.min(layouts.len().saturating_sub(1))];
+        self.y_char_offset = cur_layout.start_char;
+
+        let mut fb = vec![255u8; (vw * vh) as usize];
+        self.yraster.render_page(
+            &ybook,
+            cur_layout,
+            &cfg,
+            &yfonts,
+            &mut fb,
+            vw as usize,
+        );
+
+        // Word extraction for dictionary lookups
+        self.page_words.clear();
+        let chapter = &ybook.chapters[self.ychap_idx];
+        let origin_x = cfg.margin_left as f32;
+        let origin_y = cfg.margin_top as f32;
+        for elem in &cur_layout.elements {
+            if let yread::paginate::PageElement::Line { line, x, y } = elem {
+                let mut cur_x = origin_x + x;
+                for item in &line.items {
+                    match item {
+                        yread::line::LineItem::Word { byte_start, byte_end, shaped, .. } => {
+                            if let Some(w_str) = chapter.text.get(*byte_start..*byte_end) {
+                                let rect = RectF::new(
+                                    cur_x,
+                                    origin_y + y - line.ascender,
+                                    cur_x + shaped.advance,
+                                    origin_y + y - line.ascender + line.height,
+                                );
+                                self.page_words.push((w_str.to_string(), rect));
+                            }
+                            cur_x += shaped.advance;
+                        }
+                        yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, prefix_shaped, hyphen_adv, .. } => {
+                            if let Some(w_str) = chapter.text.get(*byte_start..*byte_end) {
+                                let rect = RectF::new(
+                                    cur_x,
+                                    origin_y + y - line.ascender,
+                                    cur_x + prefix_shaped.advance + hyphen_adv,
+                                    origin_y + y - line.ascender + line.height,
+                                );
+                                self.page_words.push((w_str.to_string(), rect));
+                            }
+                            cur_x += prefix_shaped.advance + hyphen_adv;
+                        }
+                        yread::line::LineItem::Space { adv, .. } => {
+                            cur_x += *adv;
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(fb)
+    }
+
     fn turn(&mut self, forward: bool) -> Action {
+        if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+            self.ensure_yread_loaded();
+            if let Some(ref yb) = self.ybook {
+                if forward {
+                    let cur_len = self.ychap_layouts.as_ref().map(|l| l.len()).unwrap_or(1);
+                    if self.ychap_page + 1 < cur_len {
+                        self.ychap_page += 1;
+                        if let Some(ref layouts) = self.ychap_layouts {
+                            self.y_char_offset = layouts[self.ychap_page].start_char;
+                        }
+                    } else if self.ychap_idx + 1 < yb.chapters.len() {
+                        self.ychap_idx += 1;
+                        self.ychap_page = 0;
+                        self.y_char_offset = 0;
+                        self.ychap_layouts = None;
+                        self.ychap_page_table = None;
+                    }
+                } else {
+                    if self.ychap_page > 0 {
+                        self.ychap_page -= 1;
+                        if let Some(ref layouts) = self.ychap_layouts {
+                            self.y_char_offset = layouts[self.ychap_page].start_char;
+                        }
+                    } else if self.ychap_idx > 0 {
+                        self.ychap_idx -= 1;
+                        self.y_char_offset = usize::MAX;
+                        self.ychap_layouts = None;
+                        self.ychap_page_table = None;
+                    }
+                }
+                self.page_gray = None;
+                self.save_progress();
+                self.turns_since_full += 1;
+                let global_interval = positions::global_refresh_interval();
+                if global_interval > 0 && self.turns_since_full >= global_interval {
+                    self.turns_since_full = 0;
+                    return Action::RedrawFull;
+                } else {
+                    return Action::Redraw;
+                }
+            }
+        }
+
         let total_steps = self.settings.split.total_steps(self.total);
         let cur_step = self
             .settings
@@ -553,6 +749,13 @@ impl Screen for ReaderScreen {
                 self.page_words.clear();
                 self.page_annotations.clear();
 
+                if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+                    self.ychap_layouts = None;
+                    self.ychap_page_table = None;
+                    self.page_gray = None;
+                    return Action::Redraw;
+                }
+
                 if !self.is_pdf() {
                     if self.page_words.is_empty() {
                         self.extract_words_and_links();
@@ -714,7 +917,24 @@ impl Screen for ReaderScreen {
             return;
         }
 
-        if let Some(doc) = &mut self.doc {
+        if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
+            if self.page_gray.is_none() {
+                let t0 = Instant::now();
+                if let Some(gray) = self.render_yread_page() {
+                    plog(&format!(
+                        "yread render chap {} p {}: {}ms",
+                        self.ychap_idx,
+                        self.ychap_page,
+                        t0.elapsed().as_millis(),
+                    ));
+                    self.page_gray = Some(gray);
+                } else {
+                    self.err = Some("yRead render failed".to_string());
+                    p.text_center(h / 2, 10.0, fg_color, "yRead render failed");
+                    return;
+                }
+            }
+        } else if let Some(doc) = &mut self.doc {
             if self.page_gray.is_none() {
                 let t0 = Instant::now();
                 let page = render_page(
@@ -760,7 +980,7 @@ impl Screen for ReaderScreen {
         }
 
         // Word/link extraction for selection & lookups
-        if self.doc.is_some() && self.page_words.is_empty() {
+        if self.doc.is_some() && self.page_words.is_empty() && self.settings.engine != crate::split::ReaderEngine::YRead {
             self.extract_words_and_links();
         }
 

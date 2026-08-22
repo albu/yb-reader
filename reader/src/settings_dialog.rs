@@ -159,6 +159,28 @@ impl Screen for ReaderSettingsDialog {
                 let ref_btn = Rect::new(dx + dw - pt(90.0), y, pt(76.0), pt(BTN_H_PT));
                 p.rect_outline_t(ref_btn, 1, 0);
                 p.text_center_in(ref_btn.x, ref_btn.x + ref_btn.w, y + pt(15.0), 7.5, 0, ref_str);
+
+                // 5. Engine (for reflowables)
+                if !self.is_pdf {
+                    y += pt(ROW_H_PT) + pt(4.0);
+                    p.text(dx + pt(14.0), y + pt(15.0), 8.5, 0, "READER ENGINE");
+                    let engines = [
+                        (crate::split::ReaderEngine::MuPdf, "MuPDF"),
+                        (crate::split::ReaderEngine::YRead, "yRead \u{26a1}"),
+                    ];
+                    let eng_btn_w = (dw - pt(28.0)) / 2;
+                    for (i, (eng_mode, eng_lbl)) in engines.iter().enumerate() {
+                        let bx = dx + pt(14.0) + i as i32 * eng_btn_w;
+                        let br = Rect::new(bx, y, eng_btn_w - pt(3.0), pt(BTN_H_PT));
+                        if self.settings.engine == *eng_mode {
+                            p.rect(br, 0);
+                            p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.5, 255, eng_lbl);
+                        } else {
+                            p.rect_outline_t(br, 1, 120);
+                            p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.5, 0, eng_lbl);
+                        }
+                    }
+                }
             }
 
             1 => {
@@ -305,6 +327,21 @@ impl Screen for ReaderSettingsDialog {
                                 _ => 10,
                             };
                             return Action::Redraw;
+                        }
+
+                        if !self.is_pdf {
+                            py += pt(ROW_H_PT) + pt(4.0);
+                            let eng_btn_w = (dw - pt(28.0)) / 2;
+                            let mu_btn = Rect::new(dx + pt(14.0), py, eng_btn_w - pt(3.0), pt(BTN_H_PT));
+                            let yread_btn = Rect::new(dx + pt(14.0) + eng_btn_w, py, eng_btn_w - pt(3.0), pt(BTN_H_PT));
+                            if mu_btn.contains(tx, ty) {
+                                self.settings.engine = crate::split::ReaderEngine::MuPdf;
+                                return Action::Redraw;
+                            }
+                            if yread_btn.contains(tx, ty) {
+                                self.settings.engine = crate::split::ReaderEngine::YRead;
+                                return Action::Redraw;
+                            }
                         }
                     }
 
