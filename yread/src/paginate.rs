@@ -62,6 +62,11 @@ pub enum PageElement {
         y: f32,
         size_pt: f32,
     },
+    CircleBullet {
+        x: f32,
+        y: f32,
+        radius: f32,
+    },
     QuoteBar {
         x: f32,
         y0: f32,
@@ -133,12 +138,16 @@ pub fn paginate_chapter_with_images(
                 let em_px = config.font_size * (300.0 / 72.0);
                 let left_margin_px = *left_margin_em * em_px;
 
-                let (bullet_shaped, bullet_adv) = if let Some(ref bullet_str) = bullet_prefix {
-                    let shaped = cache.shape_word(bullet_str, FontStyle::Bold, config.font_size, fonts);
-                    let adv = shaped.advance.max(em_px * 0.9);
-                    (Some(shaped), adv)
+                let (bullet_shaped, is_circle_bullet, bullet_adv) = if let Some(ref bullet_str) = bullet_prefix {
+                    if bullet_str.contains('•') {
+                        (None, true, em_px * 0.9)
+                    } else {
+                        let shaped = cache.shape_word(bullet_str, FontStyle::Bold, config.font_size, fonts);
+                        let adv = shaped.advance.max(em_px * 0.9);
+                        (Some(shaped), false, adv)
+                    }
                 } else {
-                    (None, 0.0)
+                    (None, false, 0.0)
                 };
 
                 let avail_w = (content_w - left_margin_px - bullet_adv).max(100.0);
@@ -184,7 +193,13 @@ pub fn paginate_chapter_with_images(
                     let baseline = cur_y + line.ascender;
 
                     if l_idx == 0 {
-                        if let Some(ref b_shaped) = bullet_shaped {
+                        if is_circle_bullet {
+                            cur_page.elements.push(PageElement::CircleBullet {
+                                x: left_margin_px + em_px * 0.25,
+                                y: baseline - em_px * 0.28,
+                                radius: (em_px * 0.12).max(2.5),
+                            });
+                        } else if let Some(ref b_shaped) = bullet_shaped {
                             cur_page.elements.push(PageElement::Bullet {
                                 shaped: std::sync::Arc::clone(b_shaped),
                                 x: left_margin_px,

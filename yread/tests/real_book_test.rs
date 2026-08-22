@@ -112,7 +112,21 @@ fn test_render_real_sample_book() {
         let render_time = t3.elapsed();
 
         let dark_px = fb.iter().filter(|&&px| px < 128).count();
-        println!("Page {} render time: {:?}, dark pixels: {}", p, render_time, dark_px);
+        println!("Page {} render time: {:?}, dark pixels: {}, element count: {}", p, render_time, dark_px, layouts[p].elements.len());
+        for elem in &layouts[p].elements {
+            match elem {
+                yread::paginate::PageElement::CircleBullet { x, y, radius } => {
+                    println!("  -> CircleBullet at x={:.1}, y={:.1}, r={:.1}", x, y, radius);
+                }
+                yread::paginate::PageElement::Bullet { x, y, size_pt, .. } => {
+                    println!("  -> TextBullet at x={:.1}, y={:.1}, size={:.1}", x, y, size_pt);
+                }
+                yread::paginate::PageElement::QuoteBar { x, y0, y1 } => {
+                    println!("  -> QuoteBar at x={:.1}, y0={:.1}, y1={:.1}", x, y0, y1);
+                }
+                _ => {}
+            }
+        }
         assert!(dark_px > 500, "Page should have rendered ink");
 
         let img_gray = image::GrayImage::from_raw(1236, 1648, fb.clone()).expect("GrayImage");

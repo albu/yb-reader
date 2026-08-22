@@ -268,26 +268,28 @@ impl<'a> EpubParser<'a> {
                             in_li = true;
                             let level = list_stack.len().max(1);
                             li_margin_em = (level as f32) * 1.2;
-                            if let Some(last) = list_stack.last_mut() {
+                            let bullet_str = if let Some(last) = list_stack.last_mut() {
                                 match last {
                                     ListType::Ordered(count) => {
-                                        li_bullet = Some(format!("{}. ", count));
+                                        let b = format!("{}. ", count);
                                         *count += 1;
+                                        b
                                     }
                                     ListType::Unordered => {
-                                        li_bullet = Some(if level > 1 { "– ".to_string() } else { "• ".to_string() });
+                                        if level > 1 { "– ".to_string() } else { "• ".to_string() }
                                     }
                                 }
                             } else {
-                                li_bullet = Some("• ".to_string());
-                            }
+                                "• ".to_string()
+                            };
+                            li_bullet = Some(bullet_str);
 
                             // Start a block for the list item if not already in one
                             current_runs.clear();
                             in_block = true;
                             current_style = Style::default();
                             current_style.indent = false;
-                            cur_bullet = li_bullet.take();
+                            cur_bullet = li_bullet.clone();
                             cur_margin_em = li_margin_em;
                             cur_is_quote = false;
                             block_align = parse_align_from_attrs(e).unwrap_or(TextAlign::Left);
@@ -422,8 +424,6 @@ impl<'a> EpubParser<'a> {
                         }
                         "li" => {
                             in_li = false;
-                            li_bullet = None;
-                            li_margin_em = 0.0;
                             in_block = false;
                             if !current_runs.is_empty() {
                                 chapter.blocks.push(Block::Paragraph {
@@ -431,10 +431,12 @@ impl<'a> EpubParser<'a> {
                                     indent: false,
                                     align: block_align,
                                     left_margin_em: cur_margin_em,
-                                    bullet_prefix: cur_bullet.take(),
+                                    bullet_prefix: cur_bullet.take().or_else(|| li_bullet.take()),
                                     is_quote: cur_is_quote,
                                 });
                             }
+                            li_bullet = None;
+                            li_margin_em = 0.0;
                         }
                         "p" | "div" | "pre" => {
                             in_block = false;

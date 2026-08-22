@@ -71,6 +71,26 @@ impl Rasterizer {
                         p_height,
                     );
                 }
+                PageElement::CircleBullet { x, y, radius } => {
+                    let cx = (origin_x + x).round() as i32;
+                    let cy = (origin_y + y).round() as i32;
+                    let r = radius.round() as i32;
+                    let r2 = r * r;
+                    for dy in -r..=r {
+                        let row = cy + dy;
+                        if row >= 0 && row < p_height as i32 {
+                            let dst_row = row as usize * stride;
+                            for dx in -r..=r {
+                                if dx * dx + dy * dy <= r2 {
+                                    let col = cx + dx;
+                                    if col >= 0 && col < p_width as i32 {
+                                        fb[dst_row + col as usize] = 0; // solid black dot
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 PageElement::QuoteBar { x, y0, y1 } => {
                     let bar_x = (origin_x + x).round() as usize;
                     let row0 = (origin_y + y0).round() as usize;
