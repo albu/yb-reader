@@ -133,10 +133,10 @@ fn test_render_real_sample_book() {
             }
         }
 
-    // Search for "Outline of Th" across all chapters
-    println!("\n=== Searching for 'Outline of Th' across all chapters ===");
+    // Search for "Data Structures That Power" across all chapters
+    println!("\n=== Searching for 'Data Structures That Power' across all chapters ===");
     for (idx, ch) in book.chapters.iter().enumerate() {
-        if let Some(pos) = ch.text.to_lowercase().find("outline of th") {
+        if let Some(pos) = ch.text.to_lowercase().find("data structures that power") {
             println!("Found match in Chapter #{}: '{}' at char {}", idx, ch.title, pos);
             let snippet_start = pos.saturating_sub(50);
             let snippet_end = (pos + 100).min(ch.text.len());
@@ -190,9 +190,9 @@ fn test_render_real_sample_book() {
                             }
                         }
                     }
-                    if s.to_lowercase().contains("outline") || s.to_lowercase().contains("book") {
-                        println!("  Line: \"{}\"", s);
-                        println!("  Line details: align={:?}, width={}, max_width={}", line.align, line.width, line.max_width);
+                    println!("  Line: \"{}\"", s);
+                    println!("  Line details: align={:?}, width={}, max_width={}", line.align, line.width, line.max_width);
+                    if false {
                         for it in &line.items {
                             match it {
                                 yread::line::LineItem::Word { byte_start, byte_end, shaped, style, .. } => {

@@ -1,6 +1,6 @@
 //! Font management, fallback chain, and font metrics.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use swash::FontRef;
 use crate::model::FontStyle;
 

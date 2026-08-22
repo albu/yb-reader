@@ -487,6 +487,33 @@ fn knuth_plass(
         return Some(Vec::new());
     }
 
+    // Prefix sums so each DP (break × active) measurement is O(1): the
+    // naive re-sum of every candidate slice made paragraph breaking
+    // quadratic, and is_orphan_punctuation re-scanned text per pair.
+    // cum_word[i] = Σ advance of words[0..i]; cum_space[i] = Σ of the
+    // inter-word space advances after words[0..i).
+    let n_words = words.len();
+    let mut cum_word = Vec::with_capacity(n_words + 1);
+    let mut cum_space = Vec::with_capacity(n_words + 1);
+    let mut orphan = Vec::with_capacity(n_words);
+    let mut w_acc = 0.0f32;
+    let mut s_acc = 0.0f32;
+    cum_word.push(0.0);
+    cum_space.push(0.0);
+    for (i, w) in words.iter().enumerate() {
+        orphan.push(is_orphan_punctuation(text, w));
+        w_acc += w.advance();
+        cum_word.push(w_acc);
+        if i + 1 < n_words {
+            if let LineItem::Word { style, .. } = w {
+                let run_size = base_font_size * style.size_mult;
+                s_acc += cache.space_advance(style.font_style, run_size, fonts);
+            }
+        }
+        cum_space.push(s_acc);
+    }
+    let sums = SliceSums { cum_word, cum_space, orphan };
+
     // Append terminal EndOfParagraph break
     break_points.push(BreakPoint::EndOfParagraph);
 
@@ -521,25 +548,19 @@ fn knuth_plass(
             };
 
             // Calculate content width from `act.break_idx` to `b_idx`
-            let (content_w, space_count, is_hyphen_break, valid) = measure_slice(
-                text,
-                &words,
-                &break_points,
-                act.break_idx,
-                b_idx,
-                base_font_size,
-                fonts,
-                cache,
-            );
+            let (content_w, space_total, is_hyphen_break, valid) =
+                measure_slice(&sums, n_words, &break_points, act.break_idx, b_idx);
 
             if !valid {
                 continue;
             }
 
             let slack = target_w - content_w;
-            let normal_space = base_font_size * 0.25 * (300.0 / 72.0);
-            let stretch_capacity = (space_count as f32 * normal_space * 0.50).max(1.0);
-            let shrink_capacity = (space_count as f32 * normal_space * 0.33).max(1.0);
+            // Capacity from the REAL space advance the line contains —
+            // the old count × hardcoded 0.25 em judged a different line
+            // than the one measured (and rendered).
+            let stretch_capacity = (space_total * 0.50).max(1.0);
+            let shrink_capacity = (space_total * 0.33).max(1.0);
 
             let ratio = if slack >= 0.0 {
                 if is_terminal {
@@ -702,82 +723,68 @@ fn is_orphan_punctuation(text: &str, item: &LineItem) -> bool {
     }
 }
 
-/// Measure pixel advance width and space count between two break candidates.
+/// Per-paragraph prefix sums for O(1) DP slice measurement.
+struct SliceSums {
+    cum_word: Vec<f32>,
+    cum_space: Vec<f32>,
+    /// Word i may not START a line (punctuation-only token).
+    orphan: Vec<bool>,
+}
+
+/// O(1) measurement between two break candidates via prefix sums:
+/// (word width incl. hyphen suffix, total REAL inter-word space advance,
+/// is_hyphen, valid).
 fn measure_slice(
-    text: &str,
-    words: &[LineItem],
+    sums: &SliceSums,
+    words_len: usize,
     break_points: &[BreakPoint],
     from_break: usize,
     to_break: usize,
-    base_font_size: f32,
-    fonts: &FontSystem,
-    cache: &mut ShapeCache,
-) -> (f32, usize, bool, bool) {
+) -> (f32, f32, bool, bool) {
     let (start_word, start_prefix_adv) = if from_break == 0 {
         (0, 0.0f32)
     } else {
         match &break_points[from_break - 1] {
             BreakPoint::SpaceAfterWord { word_idx } => (word_idx + 1, 0.0),
             BreakPoint::HyphenInsideWord { word_idx, prefix_adv, .. } => (*word_idx, *prefix_adv),
-            BreakPoint::EndOfParagraph => return (0.0, 0, false, false),
+            BreakPoint::EndOfParagraph => return (0.0, 0.0, false, false),
         }
     };
 
     // A line can never start with orphan punctuation (comma, period, etc.)
-    if start_word < words.len() && start_prefix_adv == 0.0 && is_orphan_punctuation(text, &words[start_word]) {
-        return (0.0, 0, false, false);
+    if start_word < words_len && start_prefix_adv == 0.0 && sums.orphan[start_word] {
+        return (0.0, 0.0, false, false);
     }
 
     let (end_word, end_suffix_adv, is_hyphen) = if to_break == break_points.len() {
-        (words.len(), 0.0f32, false)
+        (words_len, 0.0f32, false)
     } else {
         match &break_points[to_break - 1] {
             BreakPoint::SpaceAfterWord { word_idx } => (word_idx + 1, 0.0, false),
             BreakPoint::HyphenInsideWord { word_idx, prefix_adv, hyphen_adv, .. } => {
                 (*word_idx, *prefix_adv + *hyphen_adv, true)
             }
-            BreakPoint::EndOfParagraph => (words.len(), 0.0, false),
+            BreakPoint::EndOfParagraph => (words_len, 0.0, false),
         }
     };
 
-    if start_word > end_word || (start_word == end_word && start_prefix_adv >= end_suffix_adv && is_hyphen) {
-        return (0.0, 0, false, false);
+    if start_word > end_word || (start_word == end_word && is_hyphen) {
+        return (0.0, 0.0, false, false);
     }
 
-    let mut total_w = 0.0f32;
-    let mut spaces = 0usize;
-
-    if start_word == end_word && is_hyphen {
-        // Break starts and ends within the same word suffix/prefix (invalid)
-        return (0.0, 0, false, false);
+    let mut total_w = sums.cum_word[end_word] - sums.cum_word[start_word];
+    if start_prefix_adv > 0.0 {
+        total_w = (total_w - start_prefix_adv).max(0.0);
     }
-
-    for w_idx in start_word..end_word {
-        if w_idx >= words.len() {
-            break;
-        }
-        let w_adv = words[w_idx].advance();
-        if w_idx == start_word && start_prefix_adv > 0.0 {
-            total_w += (w_adv - start_prefix_adv).max(0.0);
-        } else {
-            total_w += w_adv;
-        }
-
-        if w_idx + 1 < end_word {
-            if let LineItem::Word { style, .. } = &words[w_idx] {
-                let run_size = base_font_size * style.size_mult;
-                let sp_adv = cache.space_advance(style.font_style, run_size, fonts);
-                total_w += sp_adv;
-            }
-            spaces += 1;
-        }
-    }
-
     if is_hyphen {
         total_w += end_suffix_adv;
     }
-
-    (total_w, spaces, is_hyphen, true)
+    let space_total = if end_word > start_word {
+        sums.cum_space[end_word - 1] - sums.cum_space[start_word]
+    } else {
+        0.0
+    };
+    (total_w, space_total, is_hyphen, true)
 }
 
 /// Extract materialized `LineItem`s for a finalized line slice.

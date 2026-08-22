@@ -21,6 +21,36 @@ pub struct LayoutConfig {
     pub hyphenate: bool,
 }
 
+impl LayoutConfig {
+    /// The reader-app layout, parameterized exactly like the app's
+    /// settings — the ONE place the margins/spacing recipe lives so the
+    /// app backend and the profiling tools cannot drift apart (they did:
+    /// rendertest measured 54/146/104-px margins while the app rendered
+    /// 72/164/122).
+    pub fn reader(
+        vw: u32,
+        vh: u32,
+        margin_pad: u32,
+        font_size: f32,
+        line_spacing: f32,
+        show_header: bool,
+    ) -> Self {
+        Self {
+            page_width: vw,
+            page_height: vh,
+            margin_left: margin_pad,
+            margin_right: margin_pad,
+            margin_top: margin_pad + if show_header { 92 } else { 0 },
+            margin_bottom: margin_pad + 50,
+            font_size,
+            line_spacing,
+            paragraph_spacing: 0.25,
+            indent_em: 1.2,
+            hyphenate: true,
+        }
+    }
+}
+
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
@@ -228,9 +258,11 @@ pub fn paginate_chapter_with_images(
                     if lines_that_fit == 1 {
                         max_lines_for_cur_page = 0;
                     }
-                    // 2. Widow suppression: single line at top of next page -> pull 1 extra line to next page
+                    // 2. Widow suppression: single line at top of next page -> pull 1 extra line to next page.
+                    //    For a 3-line paragraph that pull would strand ONE line at the bottom — the very
+                    //    orphan rule 1 exists to prevent — so push the whole paragraph instead.
                     else if lines_that_fit == n_lines - 1 && n_lines >= 3 {
-                        max_lines_for_cur_page = n_lines - 2;
+                        max_lines_for_cur_page = if n_lines - 2 == 1 { 0 } else { n_lines - 2 };
                     }
                 }
 
