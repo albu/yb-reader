@@ -45,19 +45,54 @@ pub fn list_books() -> Vec<PathBuf> {
     v
 }
 
-/// --- Real titles/authors ---
-
-/// One mupdf open. None = no usable title (absent, error, empty after
-/// sanitizing, or a placeholder like mupdf's "Unknown") — the caller
-/// falls back to the filename.
+/// Extract title and author metadata from book files.
+/// Uses yread's native pure-Rust parsers for EPUB/FB2 and MuPDF for PDF.
 pub fn book_meta(path: &Path) -> Option<(String, String)> {
-    let doc = Document::open(path).ok()?;
-    let title = sanitize(&doc.metadata(MetadataName::Title).unwrap_or_default());
-    if !usable_title(&title) {
-        return None;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    match ext.as_str() {
+        "epub" => {
+            if let Ok(book) = yread::epub::parse_epub_file(path) {
+                let title = sanitize(&book.meta.title);
+                if usable_title(&title) {
+                    let author = sanitize(&book.meta.authors.join(", "));
+                    return Some((title, author));
+                }
+            }
+        }
+        "fb2" => {
+            if let Ok(book) = yread::fb2::parse_fb2_path(path) {
+                let title = sanitize(&book.meta.title);
+                if usable_title(&title) {
+                    let author = sanitize(&book.meta.authors.join(", "));
+                    return Some((title, author));
+                }
+            }
+        }
+        "pdf" | "cbz" => {
+            if let Ok(doc) = Document::open(path) {
+                let title = sanitize(&doc.metadata(MetadataName::Title).unwrap_or_default());
+                if usable_title(&title) {
+                    let author = sanitize(&doc.metadata(MetadataName::Author).unwrap_or_default());
+                    return Some((title, author));
+                }
+            }
+        }
+        _ => {
+            if let Ok(doc) = Document::open(path) {
+                let title = sanitize(&doc.metadata(MetadataName::Title).unwrap_or_default());
+                if usable_title(&title) {
+                    let author = sanitize(&doc.metadata(MetadataName::Author).unwrap_or_default());
+                    return Some((title, author));
+                }
+            }
+        }
     }
-    let author = sanitize(&doc.metadata(MetadataName::Author).unwrap_or_default());
-    Some((title, author))
+    None
 }
 
 /// Empty or loader-placeholder titles (mupdf answers "Unknown" for azw3
