@@ -242,7 +242,35 @@ impl Screen for ReaderScreen {
             }
         }
 
-        self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+        if pos.sub_idx > 0 || !self.is_pdf() {
+            self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+        } else {
+            self.backend.borrow_mut().jump_to_page(pos.page, vw, vh, &self.settings);
+        }
+        self.page_gray = None;
+        self.save_progress();
+
+        Action::RedrawFull
+    }
+
+    fn on_resume(&mut self) -> Action {
+        self.time_str = chrome::current_time_str();
+        let pos = positions::resume_pos(&self.book_name());
+        let (vw, vh) = self.visual_dims();
+
+        if let Some(s) = pos.settings {
+            if s != self.settings {
+                let old = self.settings;
+                self.settings = s;
+                self.backend.borrow_mut().apply_settings_change(&old, &s, vw, vh);
+            }
+        }
+
+        if pos.sub_idx > 0 || !self.is_pdf() {
+            self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+        } else {
+            self.backend.borrow_mut().jump_to_page(pos.page, vw, vh, &self.settings);
+        }
         self.page_gray = None;
         self.save_progress();
 
@@ -447,5 +475,25 @@ impl Screen for ReaderScreen {
             }
             _ => Action::Keep,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_toc_resume_jumps_position() {
+        let path = std::path::PathBuf::from("/tmp/test_toc.fb2");
+        let (w, h) = (1236, 1648);
+        let mut screen = ReaderScreen::new(path.clone(), 0, w, h);
+        
+        let book_name = screen.book_name();
+        // Record jump to chapter 3
+        let target_sub = 3 * 1_000_000 + 42;
+        positions::record_pos(&book_name, 10, 50, target_sub, None);
+
+        let action = screen.on_resume();
+        assert!(matches!(action, Action::RedrawFull));
     }
 }
