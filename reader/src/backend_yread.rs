@@ -129,11 +129,7 @@ impl YreadBackend {
     }
 
     fn decode_yread_sub(sub: usize) -> (usize, usize) {
-        if sub >= 1_000_000 {
-            (sub / 1_000_000, sub % 1_000_000)
-        } else {
-            (0, 0)
-        }
+        (sub / 1_000_000, sub % 1_000_000)
     }
 
     fn yread_land_at(&mut self, chapter: usize, char_offset: usize, vw: u32, vh: u32, settings: &ReaderSettings) {

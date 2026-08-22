@@ -189,11 +189,6 @@ impl ReaderScreen {
     fn open_word_dialog(&mut self, entry: crate::vocab::WordEntry) -> Action {
         dialogs::word_dialog(entry, self.vocab_prof.clone(), self.page_gray.clone())
     }
-
-    fn touch_to_visual(&self, x: u32, y: u32) -> (i32, i32) {
-        let orient = Orientation::from_rotation(self.settings.split.rotation);
-        orient.point_to_visual(self.pw, self.ph, x as i32, y as i32)
-    }
 }
 
 impl Screen for ReaderScreen {
@@ -215,18 +210,14 @@ impl Screen for ReaderScreen {
                 let old = self.settings;
                 self.settings = s;
                 self.backend.apply_settings_change(&old, &s, vw, vh);
-                self.page_gray = None;
             }
         }
 
         self.backend.jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+        self.page_gray = None;
         self.save_progress();
 
-        if self.page_gray.is_none() {
-            Action::RedrawFull
-        } else {
-            Action::Redraw
-        }
+        Action::RedrawFull
     }
 
     fn tick_interval(&self) -> std::time::Duration {
@@ -347,32 +338,35 @@ impl Screen for ReaderScreen {
                             return if redraw_full { Action::RedrawFull } else { Action::Redraw };
                         }
                     }
+                    SwipeDir::North => {
+                        return self.open_quick_settings_sheet();
+                    }
                     _ => {}
                 }
                 Action::Keep
             }
             Gesture::Tap { x, y } => {
-                let (vx, vy) = self.touch_to_visual(x, y);
+                let (vx, vy) = (x as i32, y as i32);
 
                 // Bookmark toggle in top right
-                if vx > vis_w - pt(64.0) && vy < pt(34.0) {
+                if vx > vis_w - pt(64.0) && vy < pt(40.0) {
                     self.sel_mode = !self.sel_mode;
                     self.sel = None;
                     return Action::Redraw;
                 }
 
                 // Header TOC icon in top left
-                if vx < pt(60.0) && vy < pt(34.0) {
+                if vx < pt(70.0) && vy < pt(40.0) {
                     return self.open_toc_dialog();
                 }
 
                 // Bottom Left -> Quick Settings Sheet
-                if vx < pt(80.0) && vy > vis_h - pt(45.0) {
+                if vx < pt(100.0) && vy > vis_h - pt(45.0) {
                     return self.open_quick_settings_sheet();
                 }
 
-                // Bottom Center -> Scrubber / Seek
-                if vx >= pt(80.0) && vx <= vis_w - pt(80.0) && vy > vis_h - pt(45.0) {
+                // Bottom Center / Right -> Scrubber / Seek
+                if vx >= pt(100.0) && vy > vis_h - pt(45.0) {
                     return self.open_scrubber_dialog();
                 }
 
@@ -398,7 +392,7 @@ impl Screen for ReaderScreen {
                 Action::Keep
             }
             Gesture::LongPress { x, y } => {
-                let (vx, vy) = self.touch_to_visual(x, y);
+                let (vx, vy) = (x as i32, y as i32);
                 if let Some((word_text, _rect)) = self.find_word_at_pos(vx as f32, vy as f32) {
                     if word_text.starts_with('*') || word_text.starts_with('[') {
                         if let Some((_, uri)) = self.find_link_at_pos(vx as f32, vy as f32) {
