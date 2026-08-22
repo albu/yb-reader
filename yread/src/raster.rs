@@ -7,6 +7,27 @@ use crate::line::{LayoutLine, LineItem};
 use crate::model::{Book, FontStyle, TextAlign};
 use crate::paginate::{LayoutConfig, PageElement, PageLayout};
 
+/// Non-linear E-ink alpha quantization table.
+/// Maps subpixel coverage to stem-darkened alpha to prevent fuzzy edges
+/// when the EPDC quantizes to 16 discrete grayscale levels.
+const EINK_ALPHA_LUT: [u8; 256] = {
+    let mut lut = [0u8; 256];
+    let mut i = 0;
+    while i < 256 {
+        // Below 14 coverage: discard faint fringe
+        // Above 14 coverage: apply mild stem darkening for crisp e-ink edges
+        let a = if i < 14 {
+            0
+        } else {
+            let val = (i * 268) / 255;
+            if val > 255 { 255 } else { val as u8 }
+        };
+        lut[i] = a;
+        i += 1;
+    }
+    lut
+};
+
 #[derive(Clone)]
 struct CachedGlyph {
     left: i32,
@@ -374,19 +395,25 @@ impl Rasterizer {
                     }
                     let dst_row_idx = dst_y as usize * stride;
 
-                    for col in 0..g_width {
-                        let dst_x = glyph_left + col as i32;
-                        if dst_x < 0 || dst_x >= p_width as i32 {
-                            continue;
-                        }
+                    let dst_x0 = glyph_left.max(0) as usize;
+                    let dst_x1 = ((glyph_left + g_width as i32).max(0) as usize).min(p_width);
+                    if dst_x1 <= dst_x0 {
+                        continue;
+                    }
 
-                        let coverage = cached.data[row * g_width + col];
+                    let src_col_offset = (dst_x0 as i32 - glyph_left) as usize;
+                    let count = dst_x1 - dst_x0;
+                    let src_row = &cached.data[row * g_width + src_col_offset..row * g_width + src_col_offset + count];
+                    let dst_row = &mut fb[dst_row_idx + dst_x0..dst_row_idx + dst_x1];
+
+                    for (dst_pixel, &coverage) in dst_row.iter_mut().zip(src_row.iter()) {
                         if coverage > 0 {
-                            let dst_idx = dst_row_idx + dst_x as usize;
-                            let curr = fb[dst_idx] as u32;
-                            let alpha = coverage as u32;
-                            let blended = ((255 - alpha) * curr) / 255;
-                            fb[dst_idx] = blended as u8;
+                            let alpha = EINK_ALPHA_LUT[coverage as usize] as u32;
+                            if alpha > 0 {
+                                let curr = *dst_pixel as u32;
+                                let blended = ((255 - alpha) * curr) / 255;
+                                *dst_pixel = blended as u8;
+                            }
                         }
                     }
                 }
