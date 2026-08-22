@@ -45,6 +45,12 @@ pub struct Style {
     pub align: TextAlign,
     /// First line indentation (e.g. true for standard body paragraphs)
     pub indent: bool,
+    /// Superscript (e.g. exponents, footnote markers)
+    pub is_sup: bool,
+    /// Subscript (e.g. chemical indices)
+    pub is_sub: bool,
+    /// Inline code / monospace styling
+    pub is_code: bool,
     /// Is this run a footnote reference link?
     pub footnote_ref: Option<String>,
 }
@@ -56,6 +62,9 @@ impl Default for Style {
             size_mult: 1.0,
             align: TextAlign::Justify,
             indent: false,
+            is_sup: false,
+            is_sub: false,
+            is_code: false,
             footnote_ref: None,
         }
     }
@@ -76,10 +85,16 @@ pub enum Block {
         runs: Vec<Run>,
         indent: bool,
         align: TextAlign,
+        left_margin_em: f32,
+        bullet_prefix: Option<String>,
+        is_quote: bool,
     },
     Heading {
         level: u8,
         runs: Vec<Run>,
+    },
+    CodeBlock {
+        code: String,
     },
     Image {
         id: String,

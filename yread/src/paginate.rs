@@ -56,6 +56,17 @@ pub enum PageElement {
         x: f32,
         y: f32, // baseline Y
     },
+    Bullet {
+        shaped: std::sync::Arc<crate::shape::ShapedWord>,
+        x: f32,
+        y: f32,
+        size_pt: f32,
+    },
+    QuoteBar {
+        x: f32,
+        y0: f32,
+        y1: f32,
+    },
     Image {
         id: String,
         x: f32,
@@ -79,6 +90,7 @@ pub struct PageLayout {
 }
 
 use std::collections::HashMap;
+use crate::model::FontStyle;
 
 /// Paginate a single chapter and return both its PageTable and precalculated PageLayouts.
 pub fn paginate_chapter(
@@ -117,13 +129,26 @@ pub fn paginate_chapter_with_images(
 
     for (b_idx, block) in chapter.blocks.iter().enumerate() {
         match block {
-            Block::Paragraph { runs, indent, align } => {
-                let first_indent = if *indent { indent_px } else { 0.0 };
+            Block::Paragraph { runs, indent, align, left_margin_em, bullet_prefix, is_quote } => {
+                let em_px = config.font_size * (300.0 / 72.0);
+                let left_margin_px = *left_margin_em * em_px;
+
+                let (bullet_shaped, bullet_adv) = if let Some(ref bullet_str) = bullet_prefix {
+                    let shaped = cache.shape_word(bullet_str, FontStyle::Bold, config.font_size, fonts);
+                    let adv = shaped.advance.max(em_px * 0.9);
+                    (Some(shaped), adv)
+                } else {
+                    (None, 0.0)
+                };
+
+                let avail_w = (content_w - left_margin_px - bullet_adv).max(100.0);
+                let first_indent = if *indent && bullet_prefix.is_none() { indent_px } else { 0.0 };
+
                 let lines = break_paragraph_lines(
                     &chapter.text,
                     runs,
                     first_indent,
-                    content_w,
+                    avail_w,
                     config.font_size,
                     config.line_spacing,
                     *align,
@@ -131,6 +156,8 @@ pub fn paginate_chapter_with_images(
                     cache,
                     target_lang,
                 );
+
+                let block_start_y = cur_y;
 
                 for (l_idx, line) in lines.into_iter().enumerate() {
                     let line_h = line.height;
@@ -154,8 +181,20 @@ pub fn paginate_chapter_with_images(
                         cur_block_idx = b_idx;
                     }
 
-                    let x_offset = if l_idx == 0 && *indent { first_indent } else { 0.0 };
                     let baseline = cur_y + line.ascender;
+
+                    if l_idx == 0 {
+                        if let Some(ref b_shaped) = bullet_shaped {
+                            cur_page.elements.push(PageElement::Bullet {
+                                shaped: std::sync::Arc::clone(b_shaped),
+                                x: left_margin_px,
+                                y: baseline,
+                                size_pt: config.font_size,
+                            });
+                        }
+                    }
+
+                    let x_offset = left_margin_px + bullet_adv + if l_idx == 0 { first_indent } else { 0.0 };
 
                     cur_page.elements.push(PageElement::Line {
                         line,
@@ -165,7 +204,46 @@ pub fn paginate_chapter_with_images(
                     cur_y += line_h;
                 }
 
+                if *is_quote && cur_y > block_start_y {
+                    cur_page.elements.push(PageElement::QuoteBar {
+                        x: (left_margin_px - em_px * 0.4).max(0.0),
+                        y0: block_start_y + 2.0,
+                        y1: cur_y - 2.0,
+                    });
+                }
+
                 // Paragraph spacing
+                cur_y += config.font_size * config.paragraph_spacing;
+            }
+            Block::CodeBlock { code } => {
+                // Code block formatting
+                let em_px = config.font_size * (300.0 / 72.0);
+                let left_margin_px = em_px * 1.0;
+                let line_h = config.font_size * (300.0 / 72.0) * 1.1;
+
+                for c_line in code.lines() {
+                    if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
+                        pages.push(cur_page);
+                        page_breaks.push(PageBreak {
+                            block_idx: cur_block_idx,
+                            byte_offset: cur_page_start_byte,
+                            char_offset: cur_page_start_char,
+                        });
+                        cur_page = PageLayout::default();
+                        cur_page.page_idx = pages.len();
+                        cur_y = 0.0;
+                        cur_block_idx = b_idx;
+                    }
+
+                    let shaped = cache.shape_word(c_line, FontStyle::Regular, config.font_size * 0.9, fonts);
+                    cur_page.elements.push(PageElement::Bullet {
+                        shaped,
+                        x: left_margin_px,
+                        y: cur_y + line_h * 0.8,
+                        size_pt: config.font_size * 0.9,
+                    });
+                    cur_y += line_h;
+                }
                 cur_y += config.font_size * config.paragraph_spacing;
             }
             Block::Heading { level, runs } => {

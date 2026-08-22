@@ -329,6 +329,9 @@ impl<R: BufRead> Fb2Parser<R> {
                             runs,
                             indent: tag_name == "p" || tag_name == "v",
                             align: self.current_style.align,
+                            left_margin_em: if tag_name == "text-author" { 1.5 } else { 0.0 },
+                            bullet_prefix: None,
+                            is_quote: tag_name == "text-author",
                         }
                     };
 

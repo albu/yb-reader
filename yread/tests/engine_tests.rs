@@ -50,6 +50,7 @@ fn test_fb2_pagination_and_char_offset_invariance() {
         margin_bottom: 36,
         font_size: 11.0,
         line_spacing: 1.2,
+        paragraph_spacing: 0.15,
         indent_em: 1.5,
         hyphenate: true,
     };

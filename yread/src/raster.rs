@@ -57,6 +57,30 @@ impl Rasterizer {
                         p_height,
                     );
                 }
+                PageElement::Bullet { shaped, x, y, size_pt } => {
+                    let face = fonts.face_for_style(crate::model::FontStyle::Bold);
+                    self.render_shaped_word(
+                        shaped,
+                        origin_x + x,
+                        origin_y + y,
+                        *size_pt,
+                        face,
+                        fb,
+                        stride,
+                        p_width,
+                        p_height,
+                    );
+                }
+                PageElement::QuoteBar { x, y0, y1 } => {
+                    let bar_x = (origin_x + x).round() as usize;
+                    let row0 = (origin_y + y0).round() as usize;
+                    let row1 = (origin_y + y1).round() as usize;
+                    for row in row0..row1.min(p_height) {
+                        for col in bar_x..(bar_x + 3).min(p_width) {
+                            fb[row * stride + col] = 80;
+                        }
+                    }
+                }
                 PageElement::Rule { x, y, width } => {
                     let rx = (origin_x + x).round() as usize;
                     let ry = (origin_y + y).round() as usize;
@@ -144,10 +168,16 @@ impl Rasterizer {
                 LineItem::Word { shaped, style, .. } => {
                     let run_size = base_font_size * style.size_mult;
                     let face = fonts.face_for_style(style.font_style);
+                    let mut baseline = baseline_y;
+                    if style.is_sup {
+                        baseline -= run_size * (300.0 / 72.0) * 0.35;
+                    } else if style.is_sub {
+                        baseline += run_size * (300.0 / 72.0) * 0.20;
+                    }
                     self.render_shaped_word(
                         shaped,
                         cur_x,
-                        baseline_y,
+                        baseline,
                         run_size,
                         face,
                         fb,
