@@ -337,7 +337,7 @@ impl Rasterizer {
                     .scale_ctx
                     .builder(swash_font)
                     .size(px_size)
-                    .hint(false)
+                    .hint(true)
                     .build();
 
                 let rendered = Render::new(&[

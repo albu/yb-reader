@@ -202,12 +202,40 @@ pub fn paginate_chapter_with_images(
                     &mut cur_char_offset,
                 );
 
+                let n_lines = lines.len();
+
+                // Widow & Orphan control (2-line rule)
+                let mut max_lines_for_cur_page = usize::MAX;
+                if !cur_page.elements.is_empty() && n_lines >= 2 {
+                    let mut lines_that_fit = 0;
+                    let mut test_y = cur_y;
+                    for line in &lines {
+                        if test_y + line.height <= content_h {
+                            lines_that_fit += 1;
+                            test_y += line.height;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // 1. Orphan suppression: single line at bottom of page -> push whole paragraph to next page
+                    if lines_that_fit == 1 {
+                        max_lines_for_cur_page = 0;
+                    }
+                    // 2. Widow suppression: single line at top of next page -> pull 1 extra line to next page
+                    else if lines_that_fit == n_lines - 1 && n_lines >= 3 {
+                        max_lines_for_cur_page = n_lines - 2;
+                    }
+                }
+
                 let block_start_y = cur_y;
 
                 for (l_idx, line) in lines.into_iter().enumerate() {
                     let line_h = line.height;
+                    let force_break = l_idx >= max_lines_for_cur_page;
+
                     // Does this line fit on current page?
-                    if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
+                    if (cur_y + line_h > content_h || force_break) && !cur_page.elements.is_empty() {
                         // Finish current page
                         cur_page.end_char = line.start_char;
                         finish_page(
@@ -228,6 +256,7 @@ pub fn paginate_chapter_with_images(
                         cur_page_start_char = line.start_char;
                         cur_page_start_byte = line.start_byte;
                         cur_block_idx = b_idx;
+                        max_lines_for_cur_page = usize::MAX;
                     }
 
                     // First text on a page that began at a non-text block
@@ -338,10 +367,13 @@ pub fn paginate_chapter_with_images(
                     &mut cur_char_offset,
                 );
 
-                let heading_h: f32 = lines.iter().map(|l| l.height).sum::<f32>() + config.font_size * 1.0;
+                let em_px = config.font_size * (300.0 / 72.0);
+                let body_line_h = em_px * config.line_spacing;
+                let heading_h: f32 = lines.iter().map(|l| l.height).sum::<f32>() + config.font_size * 0.9;
+                let min_heading_room = heading_h + 2.0 * body_line_h;
 
-                // Orphan prevention: if heading + spacing doesn't leave room on page, break early
-                if cur_y + heading_h > content_h && !cur_page.elements.is_empty() {
+                // Heading keep_with_next: must have room for heading + at least 2 body lines
+                if cur_y + min_heading_room > content_h && !cur_page.elements.is_empty() {
                     cur_page.end_char = lines.first().map(|l| l.start_char).unwrap_or(last_char_pos);
                     finish_page(
                         &mut pages,
