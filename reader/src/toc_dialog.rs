@@ -29,6 +29,17 @@ pub enum TocAction {
     Close,
 }
 
+/// The two list modes the header toggle cycles between. Chevrons stay
+/// orthogonal — the mode sets every flag at once, per-node taps still
+/// fine-tune afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TocMode {
+    /// Only top-level rows (everything collapsed).
+    TopLevel,
+    /// The whole tree expanded.
+    Full,
+}
+
 pub struct TocDialog<F: FnMut(TocAction) -> Action> {
     items: Vec<TocItem>,
     /// Per-item expansion state (tree rows with children). Rows without
@@ -43,6 +54,10 @@ pub struct TocDialog<F: FnMut(TocAction) -> Action> {
     /// Previous reading position from the jump history, when one exists —
     /// rendered as a pinned "Back" row above the chapter list.
     back_target: Option<(usize, usize)>,
+    /// Any row owns a subtree (the mode toggle is pointless on flat
+    /// TOCs, so it hides).
+    has_tree: bool,
+    mode: TocMode,
     on_action: F,
 }
 
@@ -152,6 +167,12 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             }
         }
         let mut dlg = TocDialog {
+            has_tree: items.iter().enumerate().any(|(i, _)| {
+                items
+                    .get(i + 1)
+                    .map(|next| next.level > items[i].level)
+                    .unwrap_or(false)
+            }),
             items,
             expanded,
             active_idx: best_idx,
@@ -159,6 +180,7 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             per_page: 8,
             dims: (1236, 1648),
             back_target: None,
+            mode: TocMode::TopLevel,
             on_action,
         };
         let vis = dlg.visible_indices();
@@ -168,6 +190,38 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             .unwrap_or(0);
         dlg.offset = vis_pos.saturating_sub(2);
         dlg
+    }
+
+    /// The header toggle's pill, left of Close. Hidden on flat TOCs.
+    fn mode_row_rect(&self) -> Option<Rect> {
+        if !self.has_tree {
+            return None;
+        }
+        let (w, _h) = self.dims;
+        let close_w = pt(55.0);
+        let mode_w = pt(74.0);
+        Some(Rect::new(
+            w - pt(12.0) - close_w - pt(8.0) - mode_w,
+            pt(8.0),
+            mode_w,
+            pt(24.0),
+        ))
+    }
+
+    /// Stamp the current mode over every expansion flag.
+    fn apply_mode(&mut self) {
+        match self.mode {
+            TocMode::TopLevel => {
+                for e in self.expanded.iter_mut() {
+                    *e = false;
+                }
+            }
+            TocMode::Full => {
+                for i in 0..self.items.len() {
+                    self.expanded[i] = self.has_children(i);
+                }
+            }
+        }
     }
 
     /// Does this row own a subtree (next entry is deeper)?
@@ -281,6 +335,17 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
         let close_rect = Rect::new(close_x, close_y, close_w, close_h);
         p.rect_outline_t(close_rect, 1, 100);
         p.text_center_in(close_x, close_x + close_w, close_y + pt(16.0), 8.5, 0, "Close");
+
+        // Mode toggle (All ⇄ Top level), left of Close. The label shows
+        // the mode tapping will switch TO.
+        if let Some(r) = self.mode_row_rect() {
+            let label = match self.mode {
+                TocMode::TopLevel => "Expand all",
+                TocMode::Full => "Top level",
+            };
+            p.rect_outline_t(r, 1, 100);
+            p.text_center_in(r.x, r.x + r.w, r.y + pt(16.0), 8.5, 0, label);
+        }
 
         // Back row — pinned above the list, only when the reader has a
         // previous jump to return to. The arrow is DRAWN (two lines + a
@@ -400,6 +465,28 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
                     return (self.on_action)(TocAction::Close);
                 }
 
+                // Mode toggle tap: TopLevel ⇄ Full over every flag, then
+                // re-anchor the window on the active row so the list
+                // doesn't scroll somewhere unhelpful.
+                if self
+                    .mode_row_rect()
+                    .map(|r| r.contains(px, py))
+                    .unwrap_or(false)
+                {
+                    self.mode = match self.mode {
+                        TocMode::TopLevel => TocMode::Full,
+                        TocMode::Full => TocMode::TopLevel,
+                    };
+                    self.apply_mode();
+                    let vis = self.visible_indices();
+                    let vis_pos = vis
+                        .iter()
+                        .position(|&i| i >= self.active_idx)
+                        .unwrap_or(0);
+                    self.offset = vis_pos.saturating_sub(2);
+                    return Action::Redraw;
+                }
+
                 // Back row tap — checked before the empty-list guard so a
                 // book without a TOC can still return from a jump.
                 if let Some((back_page, back_sub)) = self.back_target {
@@ -441,7 +528,7 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
                             let cx = w - pad - pt(34.0);
                             if px >= cx - pt(18.0) {
                                 self.expanded[idx] = !self.expanded[idx];
-                                return Action::RedrawFull;
+                                return Action::Redraw;
                             }
                         }
                         let it = &self.items[idx];
@@ -456,15 +543,17 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
                 Action::Keep
             }
 
+            // Scroll and tree toggles use partial refreshes — a full
+            // e-ink flash per scroll step made the list barely usable.
             Gesture::Swipe { dir: SwipeDir::North, .. } => {
                 let vis_len = self.visible_indices().len();
                 self.offset = (self.offset + self.per_page.max(1)).min(vis_len.saturating_sub(1));
-                Action::RedrawFull
+                Action::Redraw
             }
             Gesture::Swipe { dir: SwipeDir::South, .. } => {
                 if self.offset > 0 {
                     self.offset = self.offset.saturating_sub(self.per_page);
-                    Action::RedrawFull
+                    Action::Redraw
                 } else {
                     Action::Keep
                 }
@@ -562,6 +651,33 @@ mod tests {
         // All level 0 (from_chapters shape): no tree, no behavior change.
         let flat: Vec<yread::model::TocEntry> = (0..5).map(|i| entry(&format!("Ch {i}"), i * 10, 0)).collect();
         let d = TocDialog::from_yread_toc(&flat, 0, 30, &[0], |_| Action::Keep);
+        assert_eq!(d.visible_indices().len(), 5);
+    }
+
+    #[test]
+    fn mode_toggle_stamps_all_then_top_level() {
+        let mut d = dialog(10000);
+        assert_eq!(d.mode, TocMode::TopLevel);
+        assert!(d.mode_row_rect().is_some());
+        d.mode = TocMode::Full;
+        d.apply_mode();
+        assert_eq!(
+            titles(&d),
+            vec!["Part One", "Ch 1", "Sec 1.1", "Part Two", "Ch 2"]
+        );
+        // Top-level mode: only level-0 doors remain.
+        d.mode = TocMode::TopLevel;
+        d.apply_mode();
+        assert_eq!(titles(&d), vec!["Part One", "Part Two"]);
+    }
+
+    #[test]
+    fn mode_toggle_hidden_on_flat_toc() {
+        let flat: Vec<yread::model::TocEntry> = (0..5).map(|i| entry(&format!("Ch {i}"), i * 10, 0)).collect();
+        let mut d = TocDialog::from_yread_toc(&flat, 0, 30, &[0], |_| Action::Keep);
+        assert!(d.mode_row_rect().is_none());
+        // Stamping is still a no-op-safe call on flat lists.
+        d.apply_mode();
         assert_eq!(d.visible_indices().len(), 5);
     }
 
