@@ -299,6 +299,8 @@ impl Screen for ReaderScreen {
             self.page_gray = Some(gray);
         } else if let Some(cached) = &self.page_gray {
             p.blit_gray(0, 0, vw as i32, vh as i32, cached, vw as usize);
+        } else {
+            p.clear(255);
         }
 
         self.page_words = render_output.words;

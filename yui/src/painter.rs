@@ -82,6 +82,7 @@ impl<'a> Painter<'a> {
         font: &'a Font,
     ) -> Painter<'a> {
         let (vw, vh) = orientation.visual_dims(pw, ph);
+        canvas.fill(255);
         Painter {
             canvas,
             panel,
