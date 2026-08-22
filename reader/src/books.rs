@@ -194,6 +194,42 @@ impl ReaderScreen {
         }
     }
 
+    /// Point the yread view at (chapter, char_offset). The next render
+    /// resolves the exact page via `landing_char` (page_for_char) once the
+    /// chapter layout exists. `y_char_offset` is snapped to the best-known
+    /// value NOW so an immediate save_progress() records a sane
+    /// (chapter, char) — the render then refines it to the page start.
+    /// `usize::MAX` char = last page of the chapter (backward crossing):
+    /// resolved from cache when the neighbor is already paginated, else
+    /// the chapter start. Every yread view move goes through here —
+    /// scattered assignments in this family have caused four landing bugs.
+    fn yread_land_at(&mut self, chapter: usize, char_offset: usize) {
+        let max_ch = self
+            .ybook
+            .as_ref()
+            .map(|b| b.chapters.len())
+            .unwrap_or(1)
+            .saturating_sub(1);
+        self.ychap_idx = chapter.min(max_ch);
+        self.ychap_page = 0;
+        self.landing_char = Some(char_offset);
+        self.y_char_offset = if char_offset == usize::MAX {
+            self.ychap_cache
+                .get(&self.ychap_idx)
+                .and_then(|(_, layouts)| layouts.last())
+                .map(|l| l.start_char)
+                .unwrap_or(0)
+        } else {
+            char_offset
+        };
+    }
+
+    /// Land at a persisted position (chapter*1_000_000 + char offset).
+    fn yread_land_at_sub(&mut self, sub: usize) {
+        let (ch, char_off) = Self::decode_yread_sub(sub);
+        self.yread_land_at(ch, char_off);
+    }
+
     /// Hyphenation language from the book's declared metadata. Used by both
     /// the foreground and background paginators — they must agree or page
     /// tables differ by regime.
@@ -266,7 +302,6 @@ impl ReaderScreen {
                     doc_store::avail_mib()
                 ));
                 self.ychap_chars = b.chapters.iter().map(|c| c.char_count()).collect();
-                let n_ch = b.chapters.len();
                 self.ybook = Some(Arc::new(b));
                 if self.yfonts.is_none() {
                     self.yfonts = Some(Rc::new(yread::font::FontSystem::default()));
@@ -278,11 +313,7 @@ impl ReaderScreen {
                 // fire here (constructed state already matches the saved
                 // position), so apply (chapter, char) at delivery.
                 let pos = positions::resume_pos(&self.book_name());
-                let (ch, char_off) = Self::decode_yread_sub(pos.sub_idx);
-                let max_ch = n_ch.saturating_sub(1);
-                self.ychap_idx = ch.min(max_ch);
-                self.ychap_page = 0;
-                self.landing_char = if char_off > 0 { Some(char_off) } else { None };
+                self.yread_land_at_sub(pos.sub_idx);
                 true
             }
             Ok(Err(e)) => {
@@ -391,6 +422,10 @@ impl ReaderScreen {
         self.ychap_idx = best_chap;
         let offset = self.ychap_offsets[best_chap];
         self.ychap_page = g.saturating_sub(offset);
+        // Chapter not paginated yet (scrub far from the reading window):
+        // reset the char offset rather than keep the old chapter's value —
+        // a save in that state recorded the wrong (chapter, char) pair.
+        self.y_char_offset = 0;
         if let Some((_, layouts)) = self.ychap_cache.get(&self.ychap_idx) {
             if let Some(l) = layouts.get(self.ychap_page) {
                 self.y_char_offset = l.start_char;
@@ -578,10 +613,7 @@ impl ReaderScreen {
                             self.y_char_offset = layouts[self.ychap_page].start_char;
                         }
                     } else if self.ychap_idx + 1 < yb.chapters.len() {
-                        self.ychap_idx += 1;
-                        self.ychap_page = 0;
-                        self.y_char_offset = 0;
-                        self.landing_char = Some(0);
+                        self.yread_land_at(self.ychap_idx + 1, 0);
                     } else {
                         return Action::Keep;
                     }
@@ -592,8 +624,10 @@ impl ReaderScreen {
                             self.y_char_offset = layouts[self.ychap_page].start_char;
                         }
                     } else if self.ychap_idx > 0 {
-                        self.ychap_idx -= 1;
-                        self.landing_char = Some(usize::MAX);
+                        // usize::MAX = last page of the previous chapter;
+                        // land_at resolves its char from cache so the
+                        // save below records a true position.
+                        self.yread_land_at(self.ychap_idx - 1, usize::MAX);
                     } else {
                         return Action::Keep;
                     }
@@ -951,11 +985,7 @@ impl Screen for ReaderScreen {
 
         if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
             self.ensure_yread_loaded();
-            let (ch, char_off) = Self::decode_yread_sub(pos.sub_idx);
-            let max_ch = self.ybook.as_ref().map(|b| b.chapters.len()).unwrap_or(1).saturating_sub(1);
-            self.ychap_idx = ch.min(max_ch);
-            self.ychap_page = 0;
-            self.landing_char = if char_off > 0 { Some(char_off) } else { None };
+            self.yread_land_at_sub(pos.sub_idx);
             self.page_no = pos.page;
             self.sub_idx = pos.sub_idx;
             self.page_gray = None;
@@ -1032,12 +1062,8 @@ impl Screen for ReaderScreen {
             self.page_no = pos.page;
             self.sub_idx = pos.sub_idx;
             if self.settings.engine == crate::split::ReaderEngine::YRead && !self.is_pdf() {
-                let (ch, char_off) = Self::decode_yread_sub(pos.sub_idx);
-                let max_ch = self.ybook.as_ref().map(|b| b.chapters.len()).unwrap_or(1).saturating_sub(1);
-                self.ychap_idx = ch.min(max_ch);
-                self.ychap_page = 0;
                 // Land on the exact saved text, not the chapter start.
-                self.landing_char = if char_off > 0 { Some(char_off) } else { None };
+                self.yread_land_at_sub(pos.sub_idx);
             }
             self.page_gray = None;
             self.page_words.clear();
@@ -1064,8 +1090,10 @@ impl Screen for ReaderScreen {
                 if layout_changed {
                     // Re-pagination must land on the same text. Run it on a
                     // worker with the "Reflowing…" screen up — never a
-                    // frozen or silently stale page.
-                    self.landing_char = Some(self.y_char_offset);
+                    // frozen or silently stale page. If a stored position
+                    // was applied just above, y_char_offset already holds
+                    // it — landing there keeps both changes.
+                    self.yread_land_at(self.ychap_idx, self.y_char_offset);
                     self.ensure_yread_loaded();
                     self.ybg_rx = None; // drop any in-flight prefetch
                     self.ychap_cache.clear();
