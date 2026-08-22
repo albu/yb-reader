@@ -132,22 +132,13 @@ impl YreadBackend {
         (sub / 1_000_000, sub % 1_000_000)
     }
 
-    fn yread_land_at(&mut self, chapter: usize, char_offset: usize, vw: u32, vh: u32, settings: &ReaderSettings) {
+    fn yread_land_at(&mut self, chapter: usize, char_offset: usize, _vw: u32, _vh: u32, _settings: &ReaderSettings) {
         let target_ch = if let Some(b) = &self.ybook {
             let max_ch = b.chapters.len().saturating_sub(1);
             chapter.min(max_ch)
         } else {
             chapter
         };
-        if target_ch != self.ychap_idx && !self.ychap_cache.contains_key(&target_ch) {
-            self.ybg_rx = None;
-            self.ylayout_wait = true;
-            if self.ybook.is_some() {
-                self.ychap_idx = target_ch;
-                let cfg = self.yread_layout_config(settings, vw, vh);
-                self.spawn_yread_background_paginator(&cfg);
-            }
-        }
         self.ychap_idx = target_ch;
         self.ychap_page = 0;
         self.landing_char = Some(char_offset);
@@ -160,6 +151,7 @@ impl YreadBackend {
         } else {
             char_offset
         };
+        self.ylayout_wait = false;
     }
 
     fn yread_land_at_sub(&mut self, sub: usize, vw: u32, vh: u32, settings: &ReaderSettings) {
