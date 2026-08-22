@@ -49,6 +49,16 @@ impl EpubParser<std::io::BufReader<std::fs::File>> {
         let file = std::fs::File::open(path).map_err(|e| format!("Cannot open EPUB '{}': {}", path.display(), e))?;
         Self::with_reader(std::io::BufReader::new(file))
     }
+
+    /// Metadata-only parse for library listings: container.xml + OPF —
+    /// no spine document is ever read (the full parse walks every
+    /// chapter, which made a first library scan a whole-shelf parse).
+    pub fn open_metadata(path: &Path) -> Result<crate::model::BookMetadata, String> {
+        let mut parser = Self::open(path)?;
+        parser.locate_opf()?;
+        parser.parse_opf()?;
+        Ok(parser.book.meta)
+    }
 }
 
 impl<R: Read + Seek> EpubParser<R> {

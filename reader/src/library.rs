@@ -56,10 +56,11 @@ pub fn book_meta(path: &Path) -> Option<(String, String)> {
 
     match ext.as_str() {
         "epub" => {
-            if let Ok(book) = yread::epub::parse_epub_file(path) {
-                let title = sanitize(&book.meta.title);
+            // Metadata-only: container.xml + OPF, never a spine document.
+            if let Ok(meta) = yread::epub::EpubParser::open_metadata(path) {
+                let title = sanitize(&meta.title);
                 if usable_title(&title) {
-                    let author = sanitize(&book.meta.authors.join(", "));
+                    let author = sanitize(&meta.authors.join(", "));
                     return Some((title, author));
                 }
             }
@@ -73,15 +74,7 @@ pub fn book_meta(path: &Path) -> Option<(String, String)> {
                 }
             }
         }
-        "pdf" | "cbz" => {
-            if let Ok(doc) = Document::open(path) {
-                let title = sanitize(&doc.metadata(MetadataName::Title).unwrap_or_default());
-                if usable_title(&title) {
-                    let author = sanitize(&doc.metadata(MetadataName::Author).unwrap_or_default());
-                    return Some((title, author));
-                }
-            }
-        }
+        // PDF/CBZ and anything else mupdf can open share one path.
         _ => {
             if let Ok(doc) = Document::open(path) {
                 let title = sanitize(&doc.metadata(MetadataName::Title).unwrap_or_default());
