@@ -214,4 +214,3 @@ fn test_render_real_sample_book() {
         }
     }
 }
-

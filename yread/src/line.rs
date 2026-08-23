@@ -316,10 +316,16 @@ fn break_segment(
         return Vec::new();
     }
 
-    // Knuth-Plass optimal line breaking is strictly for fully-justified text.
-    // For centered, left-aligned, or right-aligned text (like headings and lists),
-    // use greedy ragged line breaking to preserve natural word spacing.
-    if align == TextAlign::Justify {
+    // Knuth-Plass is OFF (rolled back 2026-08-23, its first day on a
+    // real book): it accepts tight lines assuming the renderer will
+    // squeeze spaces (the renderer didn't — lines ran past the right
+    // margin), drops the space before hyphenated line-ends, and the
+    // squeeze fix for the first defect collapsed spaces outright at
+    // some font sizes on-device. Greedy is the proven months-old
+    // breaker. Re-land KP only with per-font-size verification against
+    // real books (see justified_tight_lines_respect_the_measure).
+    const KP_ENABLED: bool = false;
+    if KP_ENABLED && align == TextAlign::Justify {
         if let Some(lines) = knuth_plass(
             text,
             &tokens,
@@ -779,8 +785,12 @@ fn measure_slice(
     if is_hyphen {
         total_w += end_suffix_adv;
     }
+    // Spaces rendered on the line: after words start..end-2, plus — at a
+    // hyphen end break, where word `end` participates as a prefix — the
+    // one before it. cum_space[i] = Σ spaces after words 0..i.
     let space_total = if end_word > start_word {
-        sums.cum_space[end_word - 1] - sums.cum_space[start_word]
+        let last_space_after = if is_hyphen { end_word } else { end_word - 1 };
+        sums.cum_space[last_space_after] - sums.cum_space[start_word]
     } else {
         0.0
     };
@@ -823,6 +833,9 @@ fn extract_line_items(
     };
 
     let mut items = Vec::new();
+    // At a hyphen end break the word AT end_word participates in the
+    // line (as its prefix), so a space before it belongs on the line too.
+    let end_is_hyphen = end_split.is_some();
 
     for w_idx in start_word..=end_word {
         if w_idx >= words.len() {
@@ -869,7 +882,13 @@ fn extract_line_items(
             items.push(base_word.clone());
         }
 
-        if w_idx + 1 < end_word {
+        // The space after this word renders whenever the NEXT word is on
+        // this line — including the hyphenated word at a hyphen end break.
+        // Missing that case glued every hyphen-broken line's last two
+        // words together (словоexam-).
+        let next_word_on_line =
+            w_idx + 1 < end_word || (end_is_hyphen && w_idx + 1 == end_word);
+        if next_word_on_line {
             if let LineItem::Word { style, .. } = base_word {
                 let run_size = base_font_size * style.size_mult;
                 let sp_adv = cache.space_advance(style.font_style, run_size, fonts);

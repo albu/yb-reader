@@ -542,3 +542,161 @@ fn test_orphan_punctuation_never_breaks_alone_on_next_line() {
     }
 }
 
+
+#[test]
+fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // Regression (2026-08-23): a line ending in a hyphenated word dropped
+    // the space BEFORE it, gluing the last two words together on every
+    // hyphen-broken line of justified text.
+    let html = "<p>Долгими зимними вечерами электроэнергетическая \
+                промышленность южных регионов продолжала работать \
+                устойчиво и надёжно каждый single day</p>";
+    let book = yread::epub::parse_epub(&epub_with_body(html)).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let lang = yread::hypher_lang("ru");
+
+    let mut hyphen_breaks = 0;
+    for width in [90.0, 110.0, 130.0, 150.0, 170.0, 190.0, 230.0] {
+        let lines = break_paragraph_lines(
+            &ch.text, runs, 0.0, width, 10.0, 1.2, TextAlign::Justify,
+            &fonts, &mut cache, Some(lang),
+        );
+        for (li, line) in lines.iter().enumerate() {
+            // A rendered space is missing when two word items are
+            // adjacent but the SOURCE has whitespace between them
+            // (legit punctuation joins like "(sharding" have none).
+            let mut prev: Option<&yread::line::LineItem> = None;
+            for it in &line.items {
+                let wordish = !it.is_space();
+                if wordish {
+                    if let Some(p) = prev {
+                        let ranges = |x: &yread::line::LineItem| match x {
+                            yread::line::LineItem::Word { byte_start, byte_end, .. }
+                            | yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, .. } =>
+                                Some((*byte_start, *byte_end)),
+                            _ => None,
+                        };
+                        if let (Some((_, pe)), Some((cb, _))) = (ranges(p), ranges(it)) {
+                            if cb > pe && ch.text[pe..cb].contains(' ') {
+                                panic!(
+                                    "width {} line {}: missing space between {:?} and {:?}",
+                                    width, li, &ch.text[pe..(pe + 8).min(cb)], &ch.text[cb..(cb + 8).min(ch.text.len())]
+                                );
+                            }
+                        }
+                    }
+                }
+                prev = Some(it);
+            }
+        }
+        // next.start_byte == cur.end_byte (no whitespace gap in the
+        // source) is exactly a hyphen break — the setup must produce
+        // some, or this test guards nothing.
+        for pair in lines.iter().zip(lines.iter().skip(1)) {
+            let (cur, next) = pair;
+            if next.start_byte == cur.end_byte {
+                hyphen_breaks += 1;
+            }
+        }
+    }
+    assert!(
+        hyphen_breaks > 0,
+        "test setup must force hyphenated line ends"
+    );
+
+    // Real prose, English hyphenation: the missing space shows up when
+    // a hyphenated word sits mid-line, which synthetic text at a few
+    // widths can miss.
+    let book = parse_fb2(WAR_AND_PEACE_FB2.as_bytes()).expect("parse");
+    let ch = &book.chapters[0];
+    let lang = yread::hypher_lang("en");
+    for width in (160..400).step_by(17) {
+        for block in &ch.blocks {
+            let Block::Paragraph { runs, .. } = block else { continue };
+            let lines = break_paragraph_lines(
+                &ch.text, runs, 18.0, width as f32, 12.0, 1.2,
+                TextAlign::Justify, &fonts, &mut cache, Some(lang),
+            );
+            for (li, line) in lines.iter().enumerate() {
+                let mut prev_wordish = false;
+                for it in &line.items {
+                    let wordish = !it.is_space();
+                    if wordish && prev_wordish {
+                        panic!(
+                            "width {} line {}: two words with no space \
+                             between them",
+                            width, li
+                        );
+                    }
+                    prev_wordish = wordish;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn justified_tight_lines_respect_the_measure() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+    use yread::raster::alignment_adjust;
+
+    // Regression (2026-08-23): Knuth-Plass admits tight lines up to
+    // shrink capacity past the measure (ratio >= -1) and expects the
+    // renderer to squeeze — but alignment_adjust only ever stretched,
+    // so every tight line rendered past the right margin.
+    let book = parse_fb2(WAR_AND_PEACE_FB2.as_bytes()).expect("parse");
+    let ch = &book.chapters[0];
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let lang = yread::hypher_lang("en");
+
+    let mut tight_lines = 0;
+    for width in (220..420).step_by(20) {
+        for block in &ch.blocks {
+            let Block::Paragraph { runs, .. } = block else { continue };
+            let lines = break_paragraph_lines(
+                &ch.text, runs, 20.0, width as f32, 12.0, 1.2,
+                TextAlign::Justify, &fonts, &mut cache, Some(lang),
+            );
+            for (li, line) in lines.iter().enumerate() {
+                if line.is_last_in_paragraph {
+                    continue; // ragged by design
+                }
+                let n = line.items.iter().filter(|i| i.is_space()).count();
+                if n == 0 {
+                    continue;
+                }
+                if line.width > line.max_width {
+                    tight_lines += 1;
+                }
+                let (off, extra) = alignment_adjust(line);
+                assert_eq!(off, 0.0, "justify never offsets the line start");
+                let rendered = line.width + extra * n as f32;
+                assert!(
+                    rendered <= line.max_width + 0.6,
+                    "width {} line {} renders {:.1} > measure {:.1} \
+                     (natural {:.1}, extra/space {:.2})",
+                    width, li, rendered, line.max_width, line.width, extra
+                );
+            }
+        }
+    }
+    // KP is rolled back (line.rs KP_ENABLED): greedy never packs past
+    // the measure, so there is nothing to exercise. When KP is re-landed,
+    // this assertion is the tripwire — delete this guard with the flag.
+    if tight_lines == 0 {
+        println!("KP disabled — no tight lines by construction; skipping");
+        return;
+    }
+}
