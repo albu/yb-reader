@@ -86,44 +86,50 @@ fn draw_icon(p: &mut Painter, icon: Icon, x: i32, y: i32, color: u8) {
         Icon::Home => {
             let mid = x + w / 2;
             let roof_top = y + pt(1.0);
-            let eaves_y = y + h / 2 - pt(1.0);
-            // Chimney
-            p.rect(Rect::new(x + w - pt(5.0), roof_top + pt(2.0), pt(2.5), pt(5.0)), color);
-            // Roof peak lines
-            p.line_w(x + pt(1.0), eaves_y, mid, roof_top, 3, color);
-            p.line_w(mid, roof_top, x + w - pt(1.0), eaves_y, 3, color);
-            // House body
-            let body_x = x + pt(3.0);
-            let body_w = w - pt(6.0);
-            let body_y = eaves_y;
-            let body_h = h - (eaves_y - y) - pt(1.0);
+            let eaves_y = y + h / 2 - pt(0.5);
+
+            // Roof lines with overhang
+            p.line_w(x, eaves_y, mid, roof_top, 3, color);
+            p.line_w(mid, roof_top, x + w, eaves_y, 3, color);
+            // House body walls
+            let body_x = x + pt(2.5);
+            let body_w = w - pt(5.0);
+            let body_y = eaves_y + pt(1.0);
+            let body_h = h - (body_y - y);
             p.rect_outline_t(Rect::new(body_x, body_y, body_w, body_h), 2, color);
-            // Centered Door
-            let door_w = pt(4.5);
-            let door_h = pt(6.5);
-            let door_x = x + (w - door_w) / 2;
+            // Doorway outline
+            let door_w = pt(4.0);
+            let door_h = pt(5.5);
+            let door_x = mid - door_w / 2;
             let door_y = body_y + body_h - door_h;
-            p.rect(Rect::new(door_x, door_y, door_w, door_h), color);
+            p.rect(Rect::new(door_x, door_y, door_w, door_h), 255);
+            p.line_w(door_x, door_y + door_h, door_x, door_y, 2, color);
+            p.line_w(door_x, door_y, door_x + door_w, door_y, 2, color);
+            p.line_w(door_x + door_w, door_y, door_x + door_w, door_y + door_h, 2, color);
         }
         Icon::Books => {
             let mid = x + w / 2;
-            let pad_y = pt(2.0);
+            let pad_y = pt(1.5);
             let book_h = h - 2 * pad_y;
             // Central spine
             p.line_w(mid, y + pad_y, mid, y + pad_y + book_h, 3, color);
-            // Left page curve
-            p.line_w(mid, y + pad_y, x + pt(2.0), y + pad_y + pt(2.0), 2, color);
-            p.line_w(x + pt(2.0), y + pad_y + pt(2.0), x + pt(2.0), y + pad_y + book_h - pt(1.0), 2, color);
-            p.line_w(x + pt(2.0), y + pad_y + book_h - pt(1.0), mid, y + pad_y + book_h, 2, color);
-            // Right page curve
-            p.line_w(mid, y + pad_y, x + w - pt(2.0), y + pad_y + pt(2.0), 2, color);
-            p.line_w(x + w - pt(2.0), y + pad_y + pt(2.0), x + w - pt(2.0), y + pad_y + book_h - pt(1.0), 2, color);
-            p.line_w(x + w - pt(2.0), y + pad_y + book_h - pt(1.0), mid, y + pad_y + book_h, 2, color);
-            // Text line hints on pages
-            p.hline_t(y + pad_y + pt(5.0), x + pt(4.5), mid - pt(3.0), 1, color);
-            p.hline_t(y + pad_y + pt(8.0), x + pt(4.5), mid - pt(3.0), 1, color);
-            p.hline_t(y + pad_y + pt(5.0), mid + pt(3.0), x + w - pt(4.5), 1, color);
-            p.hline_t(y + pad_y + pt(8.0), mid + pt(3.0), x + w - pt(4.5), 1, color);
+            // Left page top curve (mid -> mid_pt -> left)
+            p.line_w(mid, y + pad_y, x + pt(4.5), y + pad_y - pt(1.5), 2, color);
+            p.line_w(x + pt(4.5), y + pad_y - pt(1.5), x + pt(1.5), y + pad_y + pt(0.5), 2, color);
+            // Left page outer edge
+            p.line_w(x + pt(1.5), y + pad_y + pt(0.5), x + pt(1.5), y + pad_y + book_h - pt(0.5), 2, color);
+            // Left page bottom curve
+            p.line_w(x + pt(1.5), y + pad_y + book_h - pt(0.5), x + pt(4.5), y + pad_y + book_h - pt(2.0), 2, color);
+            p.line_w(x + pt(4.5), y + pad_y + book_h - pt(2.0), mid, y + pad_y + book_h, 2, color);
+
+            // Right page top curve
+            p.line_w(mid, y + pad_y, x + w - pt(4.5), y + pad_y - pt(1.5), 2, color);
+            p.line_w(x + w - pt(4.5), y + pad_y - pt(1.5), x + w - pt(1.5), y + pad_y + pt(0.5), 2, color);
+            // Right page outer edge
+            p.line_w(x + w - pt(1.5), y + pad_y + pt(0.5), x + w - pt(1.5), y + pad_y + book_h - pt(0.5), 2, color);
+            // Right page bottom curve
+            p.line_w(x + w - pt(1.5), y + pad_y + book_h - pt(0.5), x + w - pt(4.5), y + pad_y + book_h - pt(2.0), 2, color);
+            p.line_w(x + w - pt(4.5), y + pad_y + book_h - pt(2.0), mid, y + pad_y + book_h, 2, color);
         }
     }
 }

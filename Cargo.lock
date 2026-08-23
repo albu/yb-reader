@@ -1169,6 +1169,7 @@ dependencies = [
  "hypher",
  "libc",
  "mupdf",
+ "png 0.17.16",
  "qrcode",
  "ybdev",
  "yread",

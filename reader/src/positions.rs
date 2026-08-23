@@ -252,10 +252,8 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
         })
         .collect();
     lines.sort();
-    let tmp = format!("{}.tmp", path);
-    if std::fs::write(&tmp, lines.join("\n") + "\n").is_ok() {
-        let _ = std::fs::rename(&tmp, path);
-    }
+    // Atomic + fsync'd swap — contract and rationale in ybdev::atomic.
+    let _ = ybdev::atomic::write(path, (lines.join("\n") + "\n").as_bytes());
 }
 
 /// Saved pos for a book (page 0, sub 0 when never opened).
@@ -277,6 +275,18 @@ pub fn resume_page(name: &str) -> usize {
     resume_pos(name).page
 }
 
+/// Record into a store, skipping the write when the entry is already
+/// identical — save_progress fires in bursts (open, turn, leave, busy
+/// ticks) and a same-second duplicate must not become a flash write.
+fn record_at(path: &str, name: &str, pos: Pos) {
+    let mut map = load_at(path);
+    if map.get(name) == Some(&pos) {
+        return;
+    }
+    map.insert(name.to_string(), pos);
+    save_at(path, &map);
+}
+
 /// Record progress with settings; stamps the entry now.
 pub fn record_pos(
     name: &str,
@@ -285,9 +295,9 @@ pub fn record_pos(
     sub_idx: usize,
     settings: Option<ReaderSettings>,
 ) {
-    let mut map = load_at(store_path());
-    map.insert(
-        name.to_string(),
+    record_at(
+        store_path(),
+        name,
         Pos {
             page,
             total,
@@ -296,7 +306,6 @@ pub fn record_pos(
             settings,
         },
     );
-    save_at(store_path(), &map);
 }
 
 /// Simple record (for books without custom settings).
@@ -321,6 +330,27 @@ pub fn record(name: &str, page: usize, total: usize) {
 /// The most recently opened book, if any.
 pub fn last_read() -> Option<(String, Pos)> {
     load_at(store_path()).into_iter().max_by_key(|(_, p)| p.ts)
+}
+
+/// Drop entries whose files are gone — the library scan owns this;
+/// positions never self-clean otherwise. Never prunes against an empty
+/// live set: a documents/ directory that failed to read is a failed
+/// scan, not an empty library, and must not wipe the store.
+fn prune_at(path: &str, live: &[String]) {
+    if live.is_empty() {
+        return;
+    }
+    let mut map = load_at(path);
+    let before = map.len();
+    map.retain(|name, _| live.contains(name));
+    if map.len() != before {
+        save_at(path, &map);
+    }
+}
+
+/// Prune the real store against the currently listed books.
+pub fn prune(live: &[String]) {
+    prune_at(store_path(), live);
 }
 
 #[cfg(test)]
@@ -417,6 +447,51 @@ mod tests {
         assert_eq!(loaded["book.epub"].sub_idx, 2);
         let s = loaded["book.epub"].settings.unwrap();
         assert!((s.line_spacing - 1.3).abs() < 0.01);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn record_skips_identical_entries_but_writes_changes() {
+        let path = "/tmp/yb-positions-dedupe-test.txt";
+        let _ = std::fs::remove_file(path);
+        let pos = Pos::simple(3, 30, 1000);
+        record_at(path, "a.epub", pos);
+        // Tamper externally with an UNPARSEABLE line: if the second,
+        // identical record is a no-op the content survives; if it wrote,
+        // the reload would drop the bad line and the rewrite would
+        // remove it.
+        std::fs::write(path, "a.epub\t3\t30\t1000\nsentinel\tx\t1\t1\n").unwrap();
+        record_at(path, "a.epub", pos);
+        assert!(
+            std::fs::read_to_string(path).unwrap().contains("sentinel"),
+            "identical record must not rewrite the store"
+        );
+        // A real change still writes (and the tampered line is gone).
+        record_at(path, "a.epub", Pos::simple(4, 30, 1001));
+        let after = std::fs::read_to_string(path).unwrap();
+        assert!(!after.contains("sentinel"));
+        assert!(after.contains("a.epub\t4\t30\t1001"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn prune_drops_dead_books_but_refuses_empty_live_sets() {
+        let mut map = HashMap::new();
+        map.insert("keep.epub".to_string(), Pos::simple(1, 10, 1));
+        map.insert("gone.epub".to_string(), Pos::simple(2, 10, 2));
+        let path = "/tmp/yb-positions-prune-test.txt";
+        let _ = std::fs::remove_file(path);
+        save_at(path, &map);
+
+        prune_at(path, &["keep.epub".to_string()]);
+        let after = load_at(path);
+        assert_eq!(after.len(), 1);
+        assert!(after.contains_key("keep.epub"));
+
+        // An empty live set is a failed scan (unreadable documents/),
+        // not an empty library: prune must leave the store alone.
+        prune_at(path, &[]);
+        assert_eq!(load_at(path).len(), 1);
         let _ = std::fs::remove_file(path);
     }
 }

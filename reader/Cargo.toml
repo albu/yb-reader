@@ -11,3 +11,8 @@ hypher = "0.1"
 libc = "0.2"
 mupdf = { version = "0.7", default-features = false, features = ["epub", "cbz", "img"] }
 qrcode = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+# UI snapshot dumps (renders_both_tabs_to_png) — already in the lockfile
+# as a transitive dep, so this adds no new build.
+png = "0.17"
