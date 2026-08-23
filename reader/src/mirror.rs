@@ -102,6 +102,11 @@ pub struct MirrorScreen {
     /// Control mode: taps click, swipes scroll.
     control: bool,
     preset: TurnPreset,
+    /// Settle correction in flight: the frame from the last action is on
+    /// glass, but the server did not confirm it settled. on_tick fetches
+    /// the settled frame until it does (or the deadline passes); taps
+    /// stay live the whole time.
+    settle_deadline: Option<Instant>,
 }
 
 impl MirrorScreen {
@@ -126,6 +131,7 @@ impl MirrorScreen {
             gray: None,
             control: false,
             preset,
+            settle_deadline: None,
         }
     }
 
@@ -373,25 +379,22 @@ impl MirrorScreen {
                     .get("x-settled")
                     .map(|v| v != "0")
                     .unwrap_or(true);
-                if !changed || !settled {
-                    // Rare (settle timeout, duplicate-id mid-load): the
-                    // reply is not final truth. Poll plain GETs — never a
-                    // re-POST, that would skip a page. Escalating backoff;
-                    // genuinely slow pages need the long tail.
-                    let deadline = Instant::now() + Duration::from_secs(8);
-                    let mut backoff = 150u64;
-                    while Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(backoff));
-                        backoff = (backoff * 2).min(500);
-                        let fp = format!("/frame.png?{}", self.frame_query());
-                        match self.fetch("GET", &fp) {
-                            Some(h) if h.headers.get("x-settled").map(|v| v != "0").unwrap_or(true) => {
-                                break;
-                            }
-                            None => break,
-                            _ => {}
-                        }
+                if !settled {
+                    // The reply is not final truth, but the frame it
+                    // carries is usually the page already (a sparse
+                    // chapter end never "settles": the server's loader
+                    // heuristic misreads it). Show it NOW and let on_tick
+                    // fetch the settled correction — the old inline poll
+                    // blocked the gesture handler, freezing the previous
+                    // page and dropping taps for its whole 8 s window.
+                    self.settle_deadline =
+                        Some(Instant::now() + Duration::from_secs(3));
+                    if changed {
+                        return self.present_last(false);
                     }
+                    // No change observed: nothing new to show yet; the
+                    // settle ticks deliver it when it lands.
+                    return Action::Keep;
                 }
                 self.present_last(false)
             }
@@ -573,6 +576,30 @@ impl Screen for MirrorScreen {
 
     fn on_tick(&mut self) -> Action {
         self.ping_tick();
+        // Settle correction: one frame fetch per tick until the server
+        // confirms settled or the deadline passes. Byte-identical frames
+        // flash nothing (present_last skips them), so this is quiet on
+        // final pages and self-corrects genuine loaders.
+        let Some(deadline) = self.settle_deadline else {
+            return Action::Keep;
+        };
+        if Instant::now() >= deadline {
+            self.settle_deadline = None;
+            return Action::Keep;
+        }
+        let fp = format!("/frame.png?{}", self.frame_query());
+        if let Some(resp) = self.fetch("GET", &fp) {
+            let settled = resp
+                .headers
+                .get("x-settled")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            let a = self.present_last(false);
+            if settled {
+                self.settle_deadline = None;
+            }
+            return a;
+        }
         Action::Keep
     }
 
