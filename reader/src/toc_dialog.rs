@@ -448,7 +448,14 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
-        let (w, _h) = self.dims;
+        let (w, h) = self.dims;
+
+        // Corner-back (up-swipe from the bottom-right) is Back everywhere.
+        // default_edges() is false here, so App's global corner-back never
+        // fires and without this the swipe scrolled the list instead.
+        if g.corner_back_in(w as u32, h as u32) {
+            return (self.on_action)(TocAction::Close);
+        }
 
         match g {
             Gesture::Tap { x, y } => {

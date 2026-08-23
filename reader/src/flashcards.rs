@@ -82,6 +82,16 @@ impl Flashcard {
 
         self.due_timestamp = now + (self.interval_days as u64 * 86400);
     }
+
+    /// What `interval_days` would become for `grade`, without mutating.
+    /// The grade buttons render these so their labels state what a tap
+    /// actually does — SM-2's output depends on repetitions/ease and never
+    /// matched the old fixed "1d/3d/6d/12d" table.
+    pub fn preview_interval(&self, grade: u8) -> u32 {
+        let mut probe = self.clone();
+        probe.apply_sm2(grade);
+        probe.interval_days
+    }
 }
 
 /// The collection of flashcards persisted on the device.
@@ -133,7 +143,9 @@ impl FlashcardDeck {
                 c.word, c.repetitions, c.interval_days, c.ease_factor, c.due_timestamp, c.last_reviewed
             ));
         }
-        let _ = fs::write(FLASHCARDS_PATH, buf);
+        // Atomic + fsync'd swap (ybdev::atomic): truncation here would
+        // reset every card.
+        let _ = ybdev::atomic::write(FLASHCARDS_PATH, buf.as_bytes());
     }
 
 
@@ -365,14 +377,20 @@ impl Screen for FlashcardsScreen {
                 let spacing = pt(8.0);
                 let btn_w = (w - pt(36.0) - (spacing * 3)) / 4;
 
-                let grades = [
-                    ("1. Again", "1d"),
-                    ("2. Hard", "3d"),
-                    ("3. Good", "6d"),
-                    ("4. Easy", "12d"),
-                ];
+                // Sub-labels are the REAL next intervals for this card per
+                // grade — SM-2 derives them from repetitions and ease, so
+                // any fixed table would lie.
+                let names = ["1. Again", "2. Hard", "3. Good", "4. Easy"];
+                let intervals: [String; 4] = std::array::from_fn(|i| {
+                    match self.deck.cards.get(cur_word.as_str()) {
+                        Some(card) => format!("{}d", card.preview_interval(i as u8)),
+                        None => "1d".to_string(),
+                    }
+                });
 
-                for (i, (label, interval)) in grades.iter().enumerate() {
+                for i in 0..4 {
+                    let label = names[i];
+                    let interval = &intervals[i];
                     let bx = pt(18.0) + i as i32 * (btn_w + spacing);
                     let brect = Rect::new(bx, btn_y, btn_w, btn_h);
 

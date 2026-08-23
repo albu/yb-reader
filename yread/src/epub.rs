@@ -10,7 +10,10 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use zip::ZipArchive;
 
-use crate::model::{Block, Book, Chapter, FontStyle, Run, Style, TextAlign};
+use crate::model::{
+    over_cap, push_capped, read_capped, Block, Book, Chapter, FontStyle, Run, Style, TextAlign,
+    MAX_ENTRY_BYTES, MAX_NEST_DEPTH,
+};
 
 pub struct EpubParser<R: Read + Seek> {
     archive: ZipArchive<R>,
@@ -128,16 +131,24 @@ impl<R: Read + Seek + Send + 'static> EpubParser<R> {
 
 impl<R: Read + Seek> EpubParser<R> {
     fn read_file_to_string(&mut self, path: &str) -> Result<String, String> {
-        let mut file = self.archive.by_name(path).map_err(|e| format!("Cannot find file '{}' in EPUB: {:?}", path, e))?;
-        let mut content = String::new();
-        file.read_to_string(&mut content).map_err(|e| format!("Cannot read file '{}': {:?}", path, e))?;
-        Ok(content)
+        let bytes = self.read_file_to_bytes(path)?;
+        String::from_utf8(bytes).map_err(|_| format!("Entry '{}' is not valid UTF-8", path))
     }
 
     fn read_file_to_bytes(&mut self, path: &str) -> Result<Vec<u8>, String> {
-        let mut file = self.archive.by_name(path).map_err(|e| format!("Cannot find file '{}' in EPUB: {:?}", path, e))?;
-        let mut content = Vec::new();
-        file.read_to_end(&mut content).map_err(|e| format!("Cannot read file '{}': {:?}", path, e))?;
+        let file = self
+            .archive
+            .by_name(path)
+            .map_err(|e| format!("Cannot find file '{}' in EPUB: {:?}", path, e))?;
+        // Bounded on the actual decompressed stream (read_capped): the
+        // header's declared size is a claim, not a limit the zip reader
+        // enforces — a crafted "zip bomb" entry must fail here, not OOM
+        // the device on open.
+        let content = read_capped(file, MAX_ENTRY_BYTES)
+            .map_err(|e| format!("Cannot read file '{}': {:?}", path, e))?;
+        if over_cap(content.len(), MAX_ENTRY_BYTES) {
+            return Err(format!("Entry '{}' too large", path));
+        }
         Ok(content)
     }
 
@@ -192,21 +203,24 @@ impl<R: Read + Seek> EpubParser<R> {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).to_lowercase();
-                    if name.ends_with("title") {
+                    // Exact names: a suffix match also catches <subtitle>,
+                    // which would then become the book title whenever the
+                    // OPF lists it before <dc:title>.
+                    if name == "dc:title" || name == "title" {
                         in_title = true;
-                    } else if name.ends_with("creator") {
+                    } else if name == "dc:creator" || name == "creator" {
                         in_creator = true;
-                    } else if name.ends_with("language") {
+                    } else if name == "dc:language" || name == "language" {
                         in_language = true;
                     }
                 }
                 Ok(Event::End(ref e)) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).to_lowercase();
-                    if name.ends_with("title") {
+                    if name == "dc:title" || name == "title" {
                         in_title = false;
-                    } else if name.ends_with("creator") {
+                    } else if name == "dc:creator" || name == "creator" {
                         in_creator = false;
-                    } else if name.ends_with("language") {
+                    } else if name == "dc:language" || name == "language" {
                         in_language = false;
                     }
                 }
@@ -304,6 +318,7 @@ impl<R: Read + Seek> EpubParser<R> {
         let mut current_char_count = 0usize;
         let mut in_pre = false;
         let mut pre_buf = String::new();
+        let mut parse_failed = false;
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -334,9 +349,9 @@ impl<R: Read + Seek> EpubParser<R> {
                             });
                         }
                     } else if n.eq_ignore_ascii_case(b"ul") {
-                        list_stack.push(ListType::Unordered);
+                        push_capped(&mut list_stack, ListType::Unordered, MAX_NEST_DEPTH);
                     } else if n.eq_ignore_ascii_case(b"ol") {
-                        list_stack.push(ListType::Ordered(1));
+                        push_capped(&mut list_stack, ListType::Ordered(1), MAX_NEST_DEPTH);
                     } else if n.eq_ignore_ascii_case(b"blockquote") || n.eq_ignore_ascii_case(b"aside") {
                         in_blockquote = true;
                     } else if n.eq_ignore_ascii_case(b"figure") {
@@ -418,30 +433,30 @@ impl<R: Read + Seek> EpubParser<R> {
                         block_align = parse_align_from_attrs(e).unwrap_or(TextAlign::Center);
                         current_style.align = block_align;
                     } else if n.eq_ignore_ascii_case(b"b") || n.eq_ignore_ascii_case(b"strong") {
-                        style_stack.push(current_style.clone());
+                        push_capped(&mut style_stack, current_style.clone(), MAX_NEST_DEPTH);
                         current_style.font_style = match current_style.font_style {
                             FontStyle::Italic | FontStyle::BoldItalic => FontStyle::BoldItalic,
                             _ => FontStyle::Bold,
                         };
                     } else if n.eq_ignore_ascii_case(b"i") || n.eq_ignore_ascii_case(b"em") {
-                        style_stack.push(current_style.clone());
+                        push_capped(&mut style_stack, current_style.clone(), MAX_NEST_DEPTH);
                         current_style.font_style = match current_style.font_style {
                             FontStyle::Bold | FontStyle::BoldItalic => FontStyle::BoldItalic,
                             _ => FontStyle::Italic,
                         };
                     } else if n.eq_ignore_ascii_case(b"sup") {
-                        style_stack.push(current_style.clone());
+                        push_capped(&mut style_stack, current_style.clone(), MAX_NEST_DEPTH);
                         current_style.is_sup = true;
                         current_style.size_mult *= 0.75;
                     } else if n.eq_ignore_ascii_case(b"sub") {
-                        style_stack.push(current_style.clone());
+                        push_capped(&mut style_stack, current_style.clone(), MAX_NEST_DEPTH);
                         current_style.is_sub = true;
                         current_style.size_mult *= 0.75;
                     } else if n.eq_ignore_ascii_case(b"code") || n.eq_ignore_ascii_case(b"tt") {
-                        style_stack.push(current_style.clone());
+                        push_capped(&mut style_stack, current_style.clone(), MAX_NEST_DEPTH);
                         current_style.is_code = true;
                     } else if n.eq_ignore_ascii_case(b"a") {
-                        style_stack.push(current_style.clone());
+                        push_capped(&mut style_stack, current_style.clone(), MAX_NEST_DEPTH);
                         let mut target_href: Option<String> = None;
                         let mut is_note_ref = false;
                         for attr in e.attributes().flatten() {
@@ -585,13 +600,25 @@ impl<R: Read + Seek> EpubParser<R> {
                     }
                 }
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(format!("XHTML parse error in '{}': {:?}", href, e)),
+                Err(_) => {
+                    // A malformed document degrades to whatever parsed
+                    // before the error — never aborts the whole book.
+                    parse_failed = true;
+                    break;
+                }
                 _ => {}
             }
             buf.clear();
         }
 
-        if !chapter.blocks.is_empty() || !chapter.text.is_empty() {
+        // A failed document still lands a placeholder chapter: TOC entries
+        // resolve chapters by href, and skipping one silently shifts every
+        // later item's index. A blank page beats an unreadable book.
+        if chapter.blocks.is_empty() && chapter.text.is_empty() {
+            if parse_failed {
+                self.book.chapters.push(chapter);
+            }
+        } else {
             self.book.chapters.push(chapter);
         }
 
@@ -903,7 +930,10 @@ pub fn unescape_html_lossy(input: &str) -> String {
                 if let Some(dec) = decode_entity(&entity) {
                     out.push_str(dec);
                 } else if let Some(code) = decode_numeric_entity(&entity) {
-                    if let Some(ch) = char::from_u32(code) {
+                    // Reject NUL alongside surrogates/out-of-range: a
+                    // literal '\0' inside chapter text invites slicing and
+                    // C-interop bugs downstream for zero reading value.
+                    if let Some(ch) = char::from_u32(code).filter(|&c| c != '\0') {
                         out.push(ch);
                     } else {
                         out.push('&');

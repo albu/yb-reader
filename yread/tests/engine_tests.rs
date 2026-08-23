@@ -646,3 +646,69 @@ fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
         }
     }
 }
+
+#[test]
+fn test_fb2_anchor_char_offsets_survive_multibyte() {
+    // Anchors are char offsets into chapter.text; the parser maintains them
+    // incrementally (cur_char_count). Multibyte content must not drift the
+    // count from ground truth, and successive anchors must land exactly on
+    // their own paragraphs.
+    let fb2 = r##"<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+<description>
+  <title-info>
+    <book-title>T</book-title>
+  </title-info>
+</description>
+<body>
+  <section id="s1">
+    <p id="p1">First—café</p>
+    <p id="p2">Second 日本語 text</p>
+    <p id="p3">Third</p>
+  </section>
+</body>
+</FictionBook>"##;
+    let book = parse_fb2(fb2.as_bytes()).expect("parse fb2");
+    assert!(!book.chapters.is_empty(), "expected a chapter");
+    let ch = &book.chapters[0];
+
+    let o1 = *ch.anchors.get("p1").expect("p1 anchor");
+    let o2 = *ch.anchors.get("p2").expect("p2 anchor");
+    let o3 = *ch.anchors.get("p3").expect("p3 anchor");
+    assert!(o1 < o2 && o2 < o3, "anchors must strictly increase: {o1} {o2} {o3}");
+
+    let from = |off: usize| -> String { ch.text.chars().skip(off).collect() };
+    assert!(from(o1).starts_with("First—café"), "p1 lands wrong: {:?}", from(o1));
+    assert!(from(o2).starts_with("Second 日本語 text"), "p2 lands wrong: {:?}", from(o2));
+    assert!(from(o3).starts_with("Third"), "p3 lands wrong: {:?}", from(o3));
+
+    // Counter must equal a full rescan at end of parse.
+    assert_eq!(from(o3), "Third");
+}
+
+#[test]
+fn test_epub_malformed_chapter_degrades_not_dies() {
+    // Chapter 1 contains a mismatched end tag (quick-xml hard error);
+    // chapter 2 is fine. The book must still open, keep BOTH spine
+    // positions (ch1 as a placeholder), and chapter 2's content intact —
+    // one bad file must not cost the reader the whole book.
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    let mut buf = Vec::new();
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+    let options = SimpleFileOptions::default();
+    zip.start_file("META-INF/container.xml", options).unwrap();
+    zip.write_all(br#"<container><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
+    zip.start_file("content.opf", options).unwrap();
+    zip.write_all(br#"<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>T</dc:title><dc:language>en</dc:language></metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#).unwrap();
+
+    zip.start_file("c1.xhtml", options).unwrap();
+    zip.write_all(b"<html><body><p>Broken </wrongtag></body></html>").unwrap();
+    zip.start_file("c2.xhtml", options).unwrap();
+    zip.write_all(b"<html><body><p>Surviving chapter text</p></body></html>").unwrap();
+    zip.finish().unwrap();
+
+    let book = parse_epub(&buf).expect("book with one bad chapter must still parse");
+    assert_eq!(book.chapters.len(), 2, "placeholder keeps spine indices stable");
+    let c2 = &book.chapters[1];
+    assert!(c2.text.contains("Surviving chapter text"));
+}

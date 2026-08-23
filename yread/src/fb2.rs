@@ -10,7 +10,8 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
 use crate::model::{
-    Block, Book, Chapter, FontStyle, Run, Style, TextAlign,
+    over_cap, push_capped, read_capped, Block, Book, Chapter, FontStyle, Run, Style, TextAlign,
+    MAX_ENTRY_BYTES, MAX_NEST_DEPTH,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,11 @@ pub struct Fb2Parser<R: BufRead> {
     in_notes: bool,
     current_note_id: Option<String>,
     current_note_text: String,
+    /// Chars accumulated into `current_chapter.text` so far. Maintained
+    /// incrementally at the single append site because anchors/TOC need the
+    /// count per tag; calling `Chapter::char_count()` there rescanned the
+    /// whole chapter text every time (quadratic on anchored documents).
+    cur_char_count: usize,
 }
 
 impl<R: BufRead> Fb2Parser<R> {
@@ -76,6 +82,7 @@ impl<R: BufRead> Fb2Parser<R> {
             in_notes: false,
             current_note_id: None,
             current_note_text: String::new(),
+            cur_char_count: 0,
         }
     }
 
@@ -121,6 +128,7 @@ impl<R: BufRead> Fb2Parser<R> {
             let idx = self.book.chapters.len() + 1;
             let chap_title = title.unwrap_or_else(|| format!("Chapter {}", idx));
             self.current_chapter = Some(Chapter::new(format!("ch_{}", idx), chap_title));
+            self.cur_char_count = 0;
         }
     }
 
@@ -183,7 +191,7 @@ impl<R: BufRead> Fb2Parser<R> {
                     }
                     self.ensure_chapter(None);
                     if let (Some(id), Some(ref mut chap)) = (section_id, &mut self.current_chapter) {
-                        let char_cnt = chap.char_count();
+                        let char_cnt = self.cur_char_count;
                         chap.anchors.insert(id, char_cnt);
                     }
                 } else {
@@ -223,8 +231,8 @@ impl<R: BufRead> Fb2Parser<R> {
                             }
                             self.current_note_id = Some(id_val);
                         } else {
-                            let char_cnt = self.current_chapter.as_ref().map(|c| c.char_count()).unwrap_or(0);
                             self.ensure_chapter(None);
+                            let char_cnt = self.cur_char_count;
                             if let Some(ref mut chap) = self.current_chapter {
                                 chap.anchors.insert(id_val, char_cnt);
                             }
@@ -247,21 +255,21 @@ impl<R: BufRead> Fb2Parser<R> {
                 self.current_style = style;
             }
             "strong" | "b" => {
-                self.style_stack.push(self.current_style.clone());
+                push_capped(&mut self.style_stack, self.current_style.clone(), MAX_NEST_DEPTH);
                 self.current_style.font_style = match self.current_style.font_style {
                     FontStyle::Italic | FontStyle::BoldItalic => FontStyle::BoldItalic,
                     _ => FontStyle::Bold,
                 };
             }
             "emphasis" | "em" | "i" => {
-                self.style_stack.push(self.current_style.clone());
+                push_capped(&mut self.style_stack, self.current_style.clone(), MAX_NEST_DEPTH);
                 self.current_style.font_style = match self.current_style.font_style {
                     FontStyle::Bold | FontStyle::BoldItalic => FontStyle::BoldItalic,
                     _ => FontStyle::Italic,
                 };
             }
             "a" => {
-                self.style_stack.push(self.current_style.clone());
+                push_capped(&mut self.style_stack, self.current_style.clone(), MAX_NEST_DEPTH);
                 let mut target: Option<String> = None;
                 let mut is_note = false;
                 for attr in e.attributes().flatten() {
@@ -371,7 +379,7 @@ impl<R: BufRead> Fb2Parser<R> {
                 let title_text = self.extract_runs_text(&self.title_runs);
                 if !title_text.is_empty() {
                     let ch_idx = self.book.chapters.len();
-                    let char_offset = self.current_chapter.as_ref().map(|c| c.char_count()).unwrap_or(0);
+                    let char_offset = self.cur_char_count;
                     self.book.toc.push(crate::model::TocEntry {
                         title: title_text.clone(),
                         chapter_idx: ch_idx,
@@ -475,6 +483,7 @@ impl<R: BufRead> Fb2Parser<R> {
                                 let start = chap.text.len();
                                 chap.text.push_str(&normalized);
                                 let end = chap.text.len();
+                                self.cur_char_count += normalized.chars().count();
                                 self.current_runs.push(Run {
                                     start,
                                     end,
@@ -527,10 +536,17 @@ pub fn parse_fb2(data: &[u8]) -> Result<Book, String> {
         let cursor = Cursor::new(data);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("Zip error: {:?}", e))?;
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i).map_err(|e| format!("Zip file error: {:?}", e))?;
+            let file = archive.by_index(i).map_err(|e| format!("Zip file error: {:?}", e))?;
             if file.name().ends_with(".fb2") || file.name().ends_with(".xml") {
-                let mut xml_data = Vec::new();
-                file.read_to_end(&mut xml_data).map_err(|e| format!("Read zip entry error: {:?}", e))?;
+                // Cap decompression on the actual stream (read_capped), not
+                // the declared size: a bomb entry must fail the parse, not
+                // OOM the device.
+                let entry_name = file.name().to_string();
+                let xml_data = read_capped(file, MAX_ENTRY_BYTES)
+                    .map_err(|e| format!("Read zip entry error: {:?}", e))?;
+                if over_cap(xml_data.len(), MAX_ENTRY_BYTES) {
+                    return Err(format!("Zip entry '{}' too large", entry_name));
+                }
                 let parser = Fb2Parser::new(Cursor::new(xml_data));
                 return parser.parse();
             }

@@ -3,18 +3,34 @@
 //! chapter-aware time-left, and the selection-mode bookmark ribbon.
 
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use ybdev::sysinfo;
 use yui::painter::{pt, Painter, Rect};
 
+/// Cached (epoch-minute, rendered "HH:MM"). The reader screen re-renders
+/// its header on busy ticks; forking /bin/date each time cost ~10 execs/sec
+/// while a chapter laid out. The shell-out stays — it is what makes the
+/// clock respect the device timezone — but runs at most once per minute.
+fn clock_cache() -> &'static Mutex<(u128, String)> {
+    static CACHE: OnceLock<Mutex<(u128, String)>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new((u128::MAX, "--:--".to_string())))
+}
+
 pub fn current_time_str() -> String {
-    Command::new("date")
-        .arg("+%H:%M")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| "--:--".to_string())
+    let now_minute = ybdev::log::now_ms() / 60_000;
+    let mut cache = clock_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.0 != now_minute {
+        let fresh = Command::new("date")
+            .arg("+%H:%M")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|| "--:--".to_string());
+        *cache = (now_minute, fresh);
+    }
+    cache.1.clone()
 }
 
 /// Status header: clock + truncated title + battery along the visual top

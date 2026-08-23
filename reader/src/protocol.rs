@@ -13,6 +13,14 @@ pub const DISCOVER_PORT: u16 = DEFAULT_PORT + 1;
 pub const FETCH_PORT: u16 = DEFAULT_PORT + 2;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling on one response body. Legit payloads are frame PNGs (well under
+/// 1 MB); anything larger is hostile or broken and must fail closed rather
+/// than stream into memory unbounded.
+pub const MAX_BODY_BYTES: i64 = 16 * 1024 * 1024;
+/// Ceiling on a single status/header line. Real lines are tiny; without a
+/// cap a peer can trickle bytes with no newline forever and grow the heap
+/// until the allocator aborts.
+const MAX_LINE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -161,6 +169,13 @@ impl Conn {
             self.close();
             return Err(Stage::Headers);
         }
+        if clen > MAX_BODY_BYTES {
+            // Reject before `as usize`: on 32-bit ARM a huge i64 truncates
+            // and the body loop would under-read, leaving the keep-alive
+            // stream desynced instead of failing cleanly.
+            self.close();
+            return Err(Stage::Headers);
+        }
         if clen > 0 {
             let mut remaining = clen as usize;
             let mut chunk = vec![0u8; 16384];
@@ -240,6 +255,12 @@ impl Conn {
             if b == b'\n' {
                 return Ok(out);
             }
+            if out.len() >= MAX_LINE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "line too long",
+                ));
+            }
             out.push(b as char);
         }
     }
@@ -292,4 +313,68 @@ pub fn discover(timeout: Duration) -> Option<(String, u16)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serve one canned response on a loopback listener, hand the client a
+    /// Conn pointed at it.
+    fn conn_against(response: Vec<u8>) -> Conn {
+        use std::io::Write as _;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut s, &mut buf);
+            s.write_all(&response).unwrap();
+            // Hold the socket open briefly so the client sees EOF only
+            // after processing, not a race with accept.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+        let mut c = Conn::new(&addr.ip().to_string(), addr.port());
+        assert!(c.open());
+        c
+    }
+
+    #[test]
+    fn rejects_oversized_content_length() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n";
+        let mut c = conn_against(resp.to_vec());
+        let mut sink = |_: &[u8]| true;
+        assert_eq!(c.request("GET", "/frame.png", &mut sink).err(), Some(Stage::Headers));
+    }
+
+    #[test]
+    fn rejects_unterminated_line_instead_of_growing_forever() {
+        // No newline anywhere: read_line must give up at MAX_LINE_BYTES,
+        // not buffer until the heap dies. The response is bigger than the
+        // cap precisely so the old code would have tripped it.
+        let resp = vec![b'a'; 64 * 1024];
+        let mut c = conn_against(resp);
+        let mut sink = |_: &[u8]| true;
+        assert_eq!(c.request("GET", "/", &mut sink).err(), Some(Stage::Status));
+    }
+
+    #[test]
+    fn happy_path_still_works() {
+        let body = b"hello frame";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut resp = resp.into_bytes();
+        resp.extend_from_slice(body);
+        let mut c = conn_against(resp);
+        let mut got = Vec::new();
+        let mut sink = |chunk: &[u8]| {
+            got.extend_from_slice(chunk);
+            true
+        };
+        let r = c.request("GET", "/frame.png", &mut sink).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(got, body);
+    }
 }

@@ -66,7 +66,22 @@ pub fn book_meta(path: &Path) -> Option<(String, String)> {
             }
         }
         "fb2" => {
-            if let Ok(book) = yread::fb2::parse_fb2_path(path) {
+            // Same contract as the reader's open worker (backend_yread.rs):
+            // a malformed FB2 can panic inside the parser, so the scan must
+            // catch it and fall back to filename-only metadata instead of
+            // unwinding out of HomeScreen.
+            let parsed =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    yread::fb2::parse_fb2_path(path)
+                }))
+                .unwrap_or_else(|p| {
+                    ybdev::log::plog(&format!(
+                        "fb2 meta parse panicked: {}",
+                        crate::backend::panic_message(&p)
+                    ));
+                    Err(String::new())
+                });
+            if let Ok(book) = parsed {
                 let title = sanitize(&book.meta.title);
                 if usable_title(&title) {
                     let author = sanitize(&book.meta.authors.join(", "));
@@ -164,7 +179,9 @@ fn save_cache(c: &Cache) {
         .map(|(n, (mt, sz, meta))| fmt_line(n, *mt, *sz, meta))
         .collect();
     lines.sort();
-    let _ = std::fs::write(META_PATH, lines.join("\n") + "\n");
+    // Atomic + fsync'd swap (ybdev::atomic) — a torn cache would forget
+    // every book's extracted title on the next scan.
+    let _ = ybdev::atomic::write(META_PATH, (lines.join("\n") + "\n").as_bytes());
 }
 
 /// Cache lookup with lazy extraction: same mtime+size = hit (the

@@ -8,12 +8,14 @@
 //! Delivery semantics match fetch.rs: a file counts as received only after
 //! the full body is written, fsynced and renamed into documents/.
 
+use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::os::unix::io::FromRawFd;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use qrcode::{Color, QrCode};
 use ybdev::config::{sanitize_fetch_name, urldecode};
@@ -33,6 +35,13 @@ fn save_dir() -> String {
 /// documents/ but never appear in the library.
 const OK_EXTS: [&str; 7] = ["epub", "pdf", "mobi", "azw3", "fb2", "txt", "cbz"];
 const MAX_BODY: u64 = 512 * 1024 * 1024;
+/// Wall-clock caps bounding a whole transaction, not just one read(). The
+/// per-read 60s socket timeout resets on every byte, so a client dripping
+/// 1 B/59 s could otherwise pin the single-threaded accept loop forever.
+/// Headers are tiny: 30 s. Bodies ride a generous half hour — enough for
+/// MAX_BODY over slow Wi-Fi — after which the connection is dropped.
+const HEADER_PHASE_CAP: Duration = Duration::from_secs(30);
+const BODY_PHASE_CAP: Duration = Duration::from_secs(30 * 60);
 const HDR_CAP: usize = 16 * 1024;
 const PORT: u16 = 8080;
 const IPTABLES: &str = "/usr/sbin/iptables";
@@ -90,6 +99,14 @@ impl ReceiveServer {
     /// port — the QR always carries the real one. `stop` is shared with the
     /// screen so shutdown works even while setup is still running.
     fn start(stop: Arc<AtomicBool>) -> Option<ReceiveServer> {
+        if stop.load(Ordering::Relaxed) {
+            // The screen was popped while Wi-Fi was still coming up.
+            // Binding now would create a listener nobody adopts and a
+            // firewall rule nobody closes — exactly the leak this early
+            // out prevents.
+            plog("receive: setup aborted before bind");
+            return None;
+        }
         let listener = TcpListener::bind(("0.0.0.0", PORT))
             .or_else(|_| TcpListener::bind(("0.0.0.0", 0)))
             .ok()?;
@@ -131,6 +148,12 @@ impl ReceiveServer {
                     }
                 }
             }
+            // This thread's loop opened the rule at start(); it always
+            // closes it here — whether the exit was shutdown(), a screen
+            // dropped mid-setup, or an accept error. Double-close with
+            // shutdown()'s immediate removal is harmless (-D is idempotent
+            // and errors are ignored).
+            firewall_port(port, false);
             plog("receive: listener stopped");
         });
 
@@ -162,6 +185,24 @@ impl ReceiveServer {
         firewall_port(self.port, false);
         self.stop.store(true, Ordering::Relaxed);
         self.handle.take();
+    }
+}
+
+/// Ports this process currently holds an INPUT/ACCEPT rule open for.
+/// The panic/TERM guard cannot know which ephemeral port a leaked server
+/// picked, so every successful open is recorded here and
+/// [`emergency_cleanup`] sweeps them all.
+static OPEN_RULES: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+
+fn track_rule(port: u16, open: bool) {
+    if let Ok(mut v) = OPEN_RULES.lock() {
+        if open {
+            if !v.contains(&port) {
+                v.push(port);
+            }
+        } else {
+            v.retain(|&p| p != port);
+        }
     }
 }
 
@@ -199,11 +240,16 @@ fn firewall_port(port: u16, open: bool) {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            if !ok {
+            if ok {
+                track_rule(port, true);
+            } else {
                 plog("receive: could not open firewall port — uploads will time out");
             }
+        } else {
+            track_rule(port, true);
         }
     } else {
+        track_rule(port, false);
         // Tolerate an absent rule (teardown after a reboot resets).
         let _ = Command::new(IPTABLES)
             .args(["-D", "INPUT"])
@@ -225,6 +271,15 @@ fn local_ip() -> Option<String> {
 /// signal): drop the firewall rule and any half-written upload, so a dead
 /// process leaves the network closed and documents/ clean.
 pub fn emergency_cleanup() {
+    // Close every rule this process opened — the fixed default port AND
+    // any ephemeral fallback a leaked server picked before it died.
+    let ports: Vec<u16> = OPEN_RULES
+        .lock()
+        .map(|v| v.as_slice().to_vec())
+        .unwrap_or_default();
+    for p in ports {
+        firewall_port(p, false);
+    }
     firewall_port(PORT, false);
     if let Ok(rd) = std::fs::read_dir(save_dir()) {
         for e in rd.flatten() {
@@ -242,12 +297,17 @@ fn handle_conn(mut stream: TcpStream, last: &Arc<Mutex<Option<String>>>, receive
     // Accumulate until the blank line; the tail of the buffer (if any) is
     // the start of the body — browsers may send both in one packet.
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
+    let hdr_started = Instant::now();
     let hdr_end = loop {
         if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             break i;
         }
         if buf.len() > HDR_CAP {
             respond(&mut stream, 431, "Request Header Fields Too Large", "text/plain", "too large");
+            return;
+        }
+        if hdr_started.elapsed() > HEADER_PHASE_CAP {
+            plog("receive: header phase exceeded cap — dropping slow client");
             return;
         }
         let mut chunk = [0u8; 4096];
@@ -278,9 +338,6 @@ fn handle_conn(mut stream: TcpStream, last: &Arc<Mutex<Option<String>>>, receive
     if method != "POST" {
         respond(&mut stream, 200, "OK", "text/html; charset=utf-8", PAGE);
         return;
-    }
-    if expect_continue {
-        let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
     }
 
     let Some(len) = content_length else {
@@ -315,6 +372,18 @@ fn handle_conn(mut stream: TcpStream, last: &Arc<Mutex<Option<String>>>, receive
     let dir = save_dir();
     let final_path = format!("{}/{}", dir, name);
     let part_path = format!("{}.part", final_path);
+    // Never clobber an existing book: the sender picks names casually
+    // (drag-drop), and shared Wi-Fi means "casual" includes hostile.
+    if std::path::Path::new(&final_path).exists() {
+        plog(&format!("receive: REFUSED {} — already exists", name));
+        respond(&mut stream, 409, "Conflict", "text/plain", "file already exists\n");
+        return;
+    }
+    // 100-continue only after every validation: an early rejection now
+    // reaches Expect:-style clients as a status instead of a body-cut RST.
+    if expect_continue {
+        let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+    }
     let body_prefix = buf[hdr_end + 4..].to_vec();
     let t0 = now_ms();
 
@@ -349,10 +418,29 @@ fn write_body(
     part: &str,
     final_path: &str,
 ) -> Result<(), String> {
-    let mut out = std::fs::File::create(part).map_err(|e| format!("create: {}", e))?;
+    // O_NOFOLLOW: the HTTP side can't plant symlinks, but another local
+    // process could pre-create `<name>.part` as one and make us write
+    // through it. Fail with ELOOP instead of following.
+    let c_part = std::ffi::CString::new(part).map_err(|_| "bad part path".to_string())?;
+    let fd = unsafe {
+        libc::open(
+            c_part.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW,
+            0o644,
+        )
+    };
+    if fd < 0 {
+        return Err(format!("create: {}", std::io::Error::last_os_error()));
+    }
+    let mut out = unsafe { File::from_raw_fd(fd) };
     let mut remaining = len;
     let mut pos = 0usize;
+    let started = Instant::now();
     while remaining > 0 {
+        if started.elapsed() > BODY_PHASE_CAP {
+            // Caller's Err path removes the .part; the socket just dies.
+            return Err("upload exceeded time cap".into());
+        }
         let take = remaining.min((prefix.len() - pos) as u64) as usize;
         if take > 0 {
             out.write_all(&prefix[pos..pos + take])
@@ -371,6 +459,13 @@ fn write_body(
     }
     out.sync_all().map_err(|e| format!("fsync: {}", e))?;
     drop(out);
+    // Final guard before the swap: the early exists() check happened
+    // before the body arrived; re-check at commit time so the window is
+    // as close to zero as the single-threaded accept loop allows.
+    if std::path::Path::new(final_path).exists() {
+        let _ = std::fs::remove_file(part);
+        return Err("file appeared during upload".into());
+    }
     std::fs::rename(part, final_path).map_err(|e| format!("rename: {}", e))?;
     Ok(())
 }

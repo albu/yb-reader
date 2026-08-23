@@ -367,7 +367,10 @@ impl VocabProfile {
         out.push_str(&format!("known {}\n", known_list.join(",")));
         out.push_str(&format!("learning {}\n", learning_list.join(",")));
 
-        let _ = fs::write(path, out);
+        // Atomic + fsync'd swap (ybdev::atomic): a power loss mid-write
+        // must cost at most the previous state, not the whole learning
+        // history.
+        let _ = ybdev::atomic::write(path, out.as_bytes());
     }
 
 

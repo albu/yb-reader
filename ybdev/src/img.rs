@@ -6,7 +6,9 @@
 /// sub-byte depths *packed* (a 4-bit frame is w*h/2 bytes) and the caller
 /// indexes out of bounds at the nibble boundary. EXPAND normalizes palette
 /// and <8-bit grayscale to 8-bit samples, and lets us rely on the color
-/// branches below as written.
+/// branches below as written. 16-bit PNGs are rejected: EXPAND leaves them
+/// at depth 16, where the byte-per-sample indexing and the `1u16 << depth`
+/// scale math below would be wrong / panic.
 pub fn decode_png_gray(data: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     use png::ColorType;
     let cursor = std::io::Cursor::new(data);
@@ -14,6 +16,9 @@ pub fn decode_png_gray(data: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     decoder.set_transformations(png::Transformations::EXPAND);
     let mut reader = decoder.read_info().ok()?;
     let info = reader.info();
+    if info.bit_depth == png::BitDepth::Sixteen {
+        return None;
+    }
     let (iw, ih) = (info.width, info.height);
     if iw != w || ih != h {
         return None;
@@ -76,6 +81,9 @@ pub fn load_png_fitted(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
     decoder.set_transformations(png::Transformations::EXPAND);
     let mut reader = decoder.read_info().ok()?;
     let info = reader.info();
+    if info.bit_depth == png::BitDepth::Sixteen {
+        return None;
+    }
     let (src_w, src_h) = (info.width as usize, info.height as usize);
     if src_w == 0 || src_h == 0 {
         return None;
@@ -208,6 +216,33 @@ mod tests {
             let expect = ((i % 16) as u32 * 255 / 15) as u8;
             assert_eq!(v, expect, "sample {} should be {}", i, expect);
         }
+    }
+
+    /// Build a 16-bit grayscale PNG. EXPAND does not normalize these, so
+    /// they must be rejected rather than decoded through the byte-per-sample
+    /// path (shift overflow / divide-by-zero before the guard existed).
+    fn make_gray16_png(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = Encoder::new(&mut out, w, h);
+            enc.set_color(ColorType::Grayscale);
+            enc.set_depth(BitDepth::Sixteen);
+            let mut writer = enc.write_header().unwrap();
+            let mut data = vec![0u8; (w * h) as usize * 2];
+            for (i, b) in data.iter_mut().enumerate() {
+                *b = (i % 251) as u8;
+            }
+            writer.write_image_data(&data).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn rejects_16bit_gray_without_panic() {
+        let (w, h) = (16u32, 8u32);
+        let png = make_gray16_png(w, h);
+        assert!(decode_png_gray(&png, w, h).is_none());
+        assert!(super::load_png_fitted(&png, w, h).is_none());
     }
 
     #[test]

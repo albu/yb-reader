@@ -298,7 +298,6 @@ impl Screen for ReaderScreen {
     fn on_enter(&mut self) -> Action {
         self.time_str = chrome::current_time_str();
         let pos = positions::resume_pos(&self.book_name());
-        let (vw, vh) = self.visual_dims();
 
         // The cached page (if any) was rendered for exactly this resume
         // position — keep it on screen so the book opens instantly while
@@ -308,11 +307,16 @@ impl Screen for ReaderScreen {
             if s != self.settings {
                 let old = self.settings;
                 self.settings = s;
+                // Dims must be taken AFTER adopting: visual_dims reads
+                // self.settings, so capturing earlier would paginate the
+                // incoming rotation with the stale viewport.
+                let (vw, vh) = self.visual_dims();
                 self.backend.borrow_mut().apply_settings_change(&old, &s, vw, vh);
                 // The cached bitmap was rendered with the old settings.
                 snapshot_valid = false;
             }
         }
+        let (vw, vh) = self.visual_dims();
 
         if pos.sub_idx > 0 || !self.is_pdf() {
             self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
@@ -331,7 +335,6 @@ impl Screen for ReaderScreen {
     fn on_resume(&mut self) -> Action {
         self.time_str = chrome::current_time_str();
         let pos = positions::resume_pos(&self.book_name());
-        let (vw, vh) = self.visual_dims();
         // Highlights can change underneath us (the highlights dialog),
         // and a jump leaves a pending selection pointing at a dead page.
         self.highlights = crate::notes::load(&self.book_name());
@@ -343,10 +346,15 @@ impl Screen for ReaderScreen {
             if s != self.settings {
                 let old = self.settings;
                 self.settings = s;
+                // Dims AFTER adoption — see on_enter. Capturing before the
+                // swap laid out the whole visible book for the stale
+                // rotation and cached those pages.
+                let (vw, vh) = self.visual_dims();
                 self.backend.borrow_mut().apply_settings_change(&old, &s, vw, vh);
                 pos_changed = true;
             }
         }
+        let (vw, vh) = self.visual_dims();
 
         let cur_sub = self.backend.borrow().current_sub_idx();
         let cur_page = self.backend.borrow().current_page();

@@ -20,6 +20,11 @@ pub struct PdfBackend {
     sub_idx: usize,
     total: usize,
     sub_box_count: usize,
+    /// Turn deltas that arrived while the document was still opening,
+    /// replayed on ready. Returning Queued without storing them made taps
+    /// during open vanish silently — the yread engine queues, this one
+    /// must too.
+    queued_turns: i32,
 }
 
 impl PdfBackend {
@@ -46,6 +51,7 @@ impl PdfBackend {
             sub_idx,
             total: pos.total.max(1),
             sub_box_count: 1,
+            queued_turns: 0,
         }
     }
 }
@@ -94,7 +100,7 @@ impl ReaderBackend for PdfBackend {
         self.err.as_deref()
     }
 
-    fn poll(&mut self, _vw: u32, _vh: u32, _settings: &ReaderSettings) -> bool {
+    fn poll(&mut self, vw: u32, vh: u32, settings: &ReaderSettings) -> bool {
         let Some(rx) = &self.loading else {
             return false;
         };
@@ -104,6 +110,25 @@ impl ReaderBackend for PdfBackend {
                 self.total = ready.total;
                 self.page_no = self.page_no.min(self.total.saturating_sub(1));
                 self.loading = None;
+                // Drain taps buffered during open. Same discipline as the
+                // yread drain: one step per call, AtBoundary discards the
+                // rest so the queue can never wedge non-empty.
+                let mut guard = 0;
+                while self.queued_turns != 0 && guard < 128 {
+                    guard += 1;
+                    let step = self.queued_turns.signum();
+                    match self.turn_page(step, vw, vh, settings) {
+                        PageTurnResult::Changed { .. } => self.queued_turns -= step,
+                        PageTurnResult::AtBoundary => {
+                            self.queued_turns = 0;
+                            break;
+                        }
+                        PageTurnResult::Queued => break,
+                    }
+                }
+                self.queued_turns = 0;
+                // The document just became ready: repaint regardless of
+                // whether any queued taps applied.
                 true
             }
             Ok(Err(e)) => {
@@ -124,6 +149,7 @@ impl ReaderBackend for PdfBackend {
 
     fn turn_page(&mut self, delta: i32, _vw: u32, _vh: u32, settings: &ReaderSettings) -> PageTurnResult {
         if self.doc.is_none() {
+            self.queued_turns += delta;
             return PageTurnResult::Queued;
         }
 

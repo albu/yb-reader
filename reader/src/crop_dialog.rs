@@ -296,6 +296,13 @@ impl Screen for CropDialog {
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
         let (w, h) = self.dims;
+
+        // Corner-back exits WITHOUT applying: edits so far live only in
+        // this dialog's copy and are recorded solely by apply_crop().
+        if g.corner_back_in(w as u32, h as u32) {
+            return Action::Pop;
+        }
+
         let (vx, vy) = match g {
             Gesture::Tap { x, y } | Gesture::LongPress { x, y } | Gesture::Drag { x, y } => {
                 (x as i32, y as i32)

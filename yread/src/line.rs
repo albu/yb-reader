@@ -143,7 +143,12 @@ pub fn break_paragraph_lines_streaming(
         };
 
         if run.start > *cur_byte_offset {
-            *cur_char_offset += text[*cur_byte_offset..run.start].chars().count();
+            // Same .get() guard as the run slice above: safe only while
+            // runs arrive in text order at char boundaries — degrade to a
+            // skip instead of panicking if that invariant is ever broken.
+            if let Some(gap) = text.get(*cur_byte_offset..run.start) {
+                *cur_char_offset += gap.chars().count();
+            }
             *cur_byte_offset = run.start;
         }
 
@@ -391,10 +396,11 @@ fn greedy_break(
                             let hyp_adv = cache.hyphen_advance(style.font_style, run_size, fonts);
                             let mut prefix = String::new();
                             let mut best_break: Option<(usize, usize, f32)> = None;
+                            let boundaries = BoundaryAdvances::new(&word_shaped.glyphs);
 
                             for &syl in &syllables[..syllables.len() - 1] {
                                 prefix.push_str(syl);
-                                if let Some(p_adv) = advance_to_boundary(&word_shaped.glyphs, prefix.len()) {
+                                if let Some(p_adv) = boundaries.advance(prefix.len()) {
                                     if current_line_width + p_adv + hyp_adv <= allowed_width {
                                         best_break = Some((prefix.len(), prefix.chars().count(), p_adv));
                                     }
@@ -560,18 +566,39 @@ fn build_line(
     }
 }
 
-/// Advance width of the byte-prefix [0, boundary) of an already-shaped
-/// word, read off its glyph clusters. None when the boundary splits a
-/// cluster (ligature / attached mark) — that hyphenation point is
-/// invalid. Clusters are monotonic for the scripts we hyphenate.
-fn advance_to_boundary(glyphs: &[crate::shape::ShapedGlyph], boundary: usize) -> Option<f32> {
-    let mut sum = 0.0f32;
-    for g in glyphs {
-        if (g.cluster as usize) < boundary {
-            sum += g.x_advance;
+/// Prefix-advance lookup over one shaped word's glyph clusters. Built once
+/// per hyphenated word so each syllable-boundary query is O(log G); the old
+/// per-syllable rescan from glyph 0 made an oversized word O(syllables ×
+/// glyphs) — effectively quadratic, enough to hang pagination on a huge
+/// unbroken token.
+struct BoundaryAdvances {
+    /// cum[i] = total x_advance of glyphs[..i]
+    cum: Vec<f32>,
+    clusters: Vec<u32>,
+}
+
+impl BoundaryAdvances {
+    fn new(glyphs: &[crate::shape::ShapedGlyph]) -> Self {
+        let mut cum = Vec::with_capacity(glyphs.len() + 1);
+        let mut clusters = Vec::with_capacity(glyphs.len());
+        cum.push(0.0);
+        for g in glyphs {
+            cum.push(cum.last().copied().unwrap_or(0.0) + g.x_advance);
+            clusters.push(g.cluster);
+        }
+        Self { cum, clusters }
+    }
+
+    /// Advance width of the byte-prefix [0, boundary) of the word, read off
+    /// its glyph clusters. None when the boundary splits a cluster
+    /// (ligature / attached mark) — that hyphenation point is invalid.
+    /// Clusters are monotonic for the scripts we hyphenate.
+    fn advance(&self, boundary: usize) -> Option<f32> {
+        let i = self.clusters.partition_point(|&c| (c as usize) < boundary);
+        if i < self.clusters.len() && self.clusters[i] as usize == boundary {
+            Some(self.cum[i])
         } else {
-            return if g.cluster as usize == boundary { Some(sum) } else { None };
+            None
         }
     }
-    None
 }

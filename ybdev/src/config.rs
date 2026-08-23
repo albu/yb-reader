@@ -71,18 +71,19 @@ pub fn parse_server(s: &str) -> (Option<String>, u16) {
     }
 }
 
-/// %XX -> byte, '+' -> space; byte-transparent for UTF-8 names.
+/// %XX -> byte; byte-transparent for UTF-8 names.
+///
+/// '+' is intentionally left alone: every client we serve (QR URL, upload
+/// page) builds queries with `encodeURIComponent`, which emits `%20` for
+/// spaces and `%2B` for plus. Mapping '+' to space here only corrupted
+/// manually-typed names like `name=c++.pdf`.
 pub fn urldecode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() + 0 && i + 2 < bytes.len() => {
+            b'%' if i + 2 < bytes.len() => {
                 let hi = hex_val(bytes[i + 1]);
                 let lo = hex_val(bytes[i + 2]);
                 if let (Some(h), Some(l)) = (hi, lo) {

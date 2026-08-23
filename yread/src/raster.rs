@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 
 use crate::font::FontSystem;
@@ -41,6 +42,11 @@ struct CachedGlyph {
 /// caches rewarm in a page or two of reading.
 const GLYPH_CACHE_CAP: usize = 4096;
 const IMAGE_CACHE_CAP: usize = 10;
+/// Strict decode ceiling for embedded book images. The panel is ~2 MP and
+/// images are downscaled to draw size anyway, so anything larger is wasted —
+/// and a header declaring e.g. 60000×60000 would allocate gigabytes at
+/// render time (a "decode bomb" that imports cleanly, then bricks the page).
+const IMAGE_MAX_DIM: u32 = 4096;
 
 pub struct Rasterizer {
     scale_ctx: ScaleContext,
@@ -208,7 +214,21 @@ impl Rasterizer {
                     } else {
                         // Eager store or lazy archive load, memoized in Book.
                         let Some(raw_data) = book.get_image(id) else { continue };
-                        let Ok(dyn_img) = image::load_from_memory(raw_data.as_slice()) else { continue };
+                        // Strict limits: `load_from_memory` would run with
+                        // unlimited width/height, letting a crafted header
+                        // allocate gigabytes before the resize shrinks it.
+                        let mut limits = image::Limits::default();
+                        limits.max_image_width = Some(IMAGE_MAX_DIM);
+                        limits.max_image_height = Some(IMAGE_MAX_DIM);
+                        limits.max_alloc = Some(64 * 1024 * 1024);
+                        let mut rdr =
+                            image::ImageReader::new(std::io::Cursor::new(raw_data.as_slice()));
+                        rdr.limits(limits);
+                        let dyn_img = match rdr.with_guessed_format() {
+                            Ok(r) => r.decode(),
+                            Err(_) => continue,
+                        };
+                        let Ok(dyn_img) = dyn_img else { continue };
                         let gray = dyn_img
                             .resize_exact(img_w as u32, img_h as u32, image::imageops::FilterType::Lanczos3)
                             .to_luma8();
@@ -383,13 +403,27 @@ impl Rasterizer {
                 ])
                 .render(&mut scaler, glyph.glyph_id);
 
-                let entry = rendered.map(|img| Arc::new(CachedGlyph {
-                    left: img.placement.left,
-                    top: img.placement.top,
-                    width: img.placement.width as usize,
-                    height: img.placement.height as usize,
-                    data: img.data,
-                }));
+                let entry = rendered.map(|img| {
+                    // Normalize to 1 byte/px coverage. Color sources (emoji)
+                    // yield 4 B/px RGBA; the blit below would have read the
+                    // red channel as alpha coverage and stamped garbage.
+                    // Keep each pixel's alpha — e-ink shows shape, not hue.
+                    let data = match img.content {
+                        Content::Color | Content::SubpixelMask => img
+                            .data
+                            .chunks_exact(4)
+                            .map(|px| px[3])
+                            .collect(),
+                        Content::Mask => img.data,
+                    };
+                    Arc::new(CachedGlyph {
+                        left: img.placement.left,
+                        top: img.placement.top,
+                        width: img.placement.width as usize,
+                        height: img.placement.height as usize,
+                        data,
+                    })
+                });
                 if self.glyph_cache.len() >= GLYPH_CACHE_CAP {
                     self.glyph_cache.clear();
                 }

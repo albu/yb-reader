@@ -77,6 +77,19 @@ impl Screen for QuickSettingsSheet {
         Some(Orientation::from_rotation(self.settings.split.rotation))
     }
 
+    fn on_resume(&mut self) -> Action {
+        // CropDialog mutates its own copy and records it before popping.
+        // Adopt what was persisted, or the next sheet control would
+        // re-record this stale pre-crop copy and silently wipe the crop.
+        if let Some(s) = crate::positions::resume_pos(&self.book).settings {
+            if s != self.settings {
+                self.settings = s;
+                return self.apply_change();
+            }
+        }
+        Action::Redraw
+    }
+
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
         self.dims = (w, h);
@@ -233,7 +246,10 @@ impl Screen for QuickSettingsSheet {
         let (vx, vy) = match g {
             Gesture::Tap { x, y } => (x as i32, y as i32),
             Gesture::Swipe { dir, .. } if dir == ybdev::input::SwipeDir::South => return Action::Pop,
-            _ => (0, 0),
+            // Long-press, drags and north/east/west swipes mean nothing
+            // here; they must not fall through to (0,0) — which sits above
+            // the sheet and read as "tap outside", dismissing it.
+            _ => return Action::Keep,
         };
 
         let sheet_h = pt(SHEET_H_PT);

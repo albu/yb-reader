@@ -112,6 +112,44 @@ pub enum Block {
     Spacer(u32),
 }
 
+/// Push onto a parser nesting stack, refusing growth past `cap`.
+/// Crafted documents can nest `<b>`/`<ul>` thousands of levels deep without
+/// closing; the stack would otherwise hold one entry per tag (~16 MB per
+/// MB of input). Deeper nesting is also semantically meaningless — styles
+/// that deep are invisible.
+pub fn push_capped<T>(stack: &mut Vec<T>, item: T, cap: usize) {
+    if stack.len() < cap {
+        stack.push(item);
+    }
+}
+
+/// Depth limit shared by the EPUB and FB2 parsers' style/list stacks.
+pub const MAX_NEST_DEPTH: usize = 64;
+
+/// Hard ceiling for one decompressed archive entry (EPUB chapter, FB2
+/// payload, embedded image). Legit entries sit far below this; a crafted
+/// entry — a "zip bomb" — would otherwise OOM the device.
+pub const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read `src` to EOF but never past `cap + 1` bytes, so the caller can
+/// detect an oversized stream by length alone. This is the actual
+/// enforcement point for [`MAX_ENTRY_BYTES`]: the zip header's declared
+/// size is a claim the reader does not check, and a lying entry (or a
+/// streamed zip whose size lives in a data descriptor) must not be able
+/// to decompress unbounded.
+pub fn read_capped<R: std::io::Read>(src: R, cap: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    src.take(cap + 1).read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// Length half of the [`read_capped`] contract: true when the stream ran
+/// past the cap (the `cap + 1` byte made it into the buffer).
+pub fn over_cap(len: usize, cap: u64) -> bool {
+    len as u64 > cap
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Chapter {
     pub id: String,
@@ -226,9 +264,13 @@ impl LazyImages {
         let path = self.entries.get(id)?;
         let mut guard = self.archive.lock().ok()?;
         let archive = guard.as_mut()?;
-        let mut file = archive.by_name(path).ok()?;
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut bytes).ok()?;
+        let file = archive.by_name(path).ok()?;
+        // Bounded on the actual decompressed stream (see read_capped):
+        // a crafted image entry must fail here, not OOM at render time.
+        let bytes = read_capped(file, MAX_ENTRY_BYTES).ok()?;
+        if over_cap(bytes.len(), MAX_ENTRY_BYTES) {
+            return None;
+        }
         let arc = std::sync::Arc::new(bytes);
         if let Ok(mut loaded) = self.loaded.lock() {
             if loaded.len() >= 24 {
@@ -458,14 +500,22 @@ impl ChapterPageTable {
         self.pages.len().max(1)
     }
 
-    /// Find which page contains the given character offset (binary search).
+    /// Find which page contains the given character offset.
+    ///
+    /// Uses partition_point rather than binary_search: consecutive
+    /// image-only pages resolve their sentinel start to the SAME char
+    /// offset (no text advanced), so the table can hold duplicates and
+    /// binary_search would pick an arbitrary match among them. Stepping
+    /// back from the first strictly-greater entry deterministically
+    /// returns the LAST page starting at or before the offset — i.e. the
+    /// page reading actually reached.
     pub fn page_for_char(&self, char_offset: usize) -> usize {
         if self.pages.is_empty() {
             return 0;
         }
-        match self.pages.binary_search_by_key(&char_offset, |p| p.char_offset) {
-            Ok(idx) => idx,
-            Err(idx) => idx.saturating_sub(1),
+        match self.pages.partition_point(|p| p.char_offset <= char_offset) {
+            0 => 0,
+            n => n - 1,
         }
     }
 
@@ -475,5 +525,61 @@ impl ChapterPageTable {
             .get(page_idx)
             .map(|p| p.char_offset)
             .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cap is enforced on what the stream actually yields, never on
+    /// what any header claims about it: a source bigger than the cap
+    /// stops at cap+1 (so `over_cap` flags it), one smaller reads whole.
+    #[test]
+    fn read_capped_bounds_the_stream_not_the_claim() {
+        let big = vec![0u8; 100];
+        let out = read_capped(std::io::Cursor::new(&big), 50).unwrap();
+        assert_eq!(out.len(), 51);
+        assert!(over_cap(out.len(), 50));
+
+        let small = vec![0u8; 40];
+        let out = read_capped(std::io::Cursor::new(&small), 50).unwrap();
+        assert_eq!(out.len(), 40);
+        assert!(!over_cap(out.len(), 50));
+
+        // Boundary: exactly the cap is fine, one byte more is not.
+        let exact = vec![0u8; 50];
+        let out = read_capped(std::io::Cursor::new(&exact), 50).unwrap();
+        assert_eq!(out.len(), 50);
+        assert!(!over_cap(out.len(), 50));
+    }
+
+    /// Two oversized images back-to-back paginate into pages whose
+    /// sentinel-resolved start_char is identical (no text advanced).
+    /// page_for_char must resolve that run deterministically to its LAST
+    /// member — where reading continued — not an arbitrary match.
+    #[test]
+    fn page_for_char_handles_duplicate_start_offsets() {
+        let table = ChapterPageTable {
+            pages: vec![
+                PageBreak { block_idx: 0, byte_offset: 0, char_offset: 0 },
+                PageBreak { block_idx: 0, byte_offset: 10, char_offset: 10 },
+                // Image pages: starts all sentinel-resolve to 10.
+                PageBreak { block_idx: 1, byte_offset: 10, char_offset: 10 },
+                PageBreak { block_idx: 1, byte_offset: 10, char_offset: 10 },
+                // Text resumes on the page after the image run.
+                PageBreak { block_idx: 2, byte_offset: 20, char_offset: 20 },
+            ],
+        };
+
+        assert_eq!(table.page_for_char(0), 0);
+        // Any offset inside [10, 20) lands on the final image page —
+        // deterministic, and the natural resume point after the run.
+        assert_eq!(table.page_for_char(10), 3);
+        assert_eq!(table.page_for_char(15), 3);
+        assert_eq!(table.page_for_char(19), 3);
+        assert_eq!(table.page_for_char(20), 4);
+        // Below the first start clamps to page 0.
+        assert_eq!(table.page_for_char(999), 4);
     }
 }

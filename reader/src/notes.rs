@@ -5,9 +5,10 @@
 //! No serde, no JSON: same philosophy as positions.txt.
 //!
 //! Text-keyed, not page-keyed: an EPUB re-layout changes page numbers but
-//! preserves the word sequence, so [`matched_spans`] re-finds the span on
-//! whatever page it lands on instead of stranding a page-numbered
-//! highlight on the wrong page.
+//! preserves the word sequence, so [`matched_spans`] re-finds multi-word
+//! spans on whatever page they land on instead of stranding a
+//! page-numbered highlight. Single-word spans stay anchored to their
+//! recorded page — one word is too ambiguous to match book-wide.
 
 use crate::split::RectF;
 
@@ -102,14 +103,22 @@ pub fn matched_spans(
     page: usize,
     page_words: &[(String, RectF)],
 ) -> Vec<(usize, usize)> {
+    /// Minimum words for a highlight to be searched outside its recorded
+    /// page. Re-layouts shift page numbers, so multi-word spans must be
+    /// re-found wherever they land (this is the point of storing text);
+    /// a single word is far too ambiguous to match globally — "love"
+    /// would light up on every page holding the word — so those stay
+    /// anchored to their recorded page.
+    const MIN_WORDS_OFF_PAGE: usize = 2;
+
     let words: Vec<&str> = page_words.iter().map(|(w, _)| w.as_str()).collect();
     let mut out = Vec::new();
     for h in hl {
-        if h.page != page {
-            continue;
-        }
         let needle: Vec<&str> = h.text.split_whitespace().collect();
         if needle.is_empty() || needle.len() > words.len() {
+            continue;
+        }
+        if h.page != page && needle.len() < MIN_WORDS_OFF_PAGE {
             continue;
         }
         for s in 0..=(words.len() - needle.len()) {
@@ -172,16 +181,22 @@ mod tests {
         let hl = vec![
             Highlight { page: 0, ts: 1, text: "quick brown".into() },
             Highlight { page: 0, ts: 2, text: "fox".into() },
-            Highlight { page: 7, ts: 3, text: "the quick".into() }, // other page: ignored
-            Highlight { page: 0, ts: 4, text: "no such words here".into() },
-            Highlight { page: 0, ts: 5, text: "lazy dog .".into() },
+            // Recorded on page 7, found here after a reflow shifted pages:
+            // multi-word spans are text-keyed and must still render.
+            Highlight { page: 7, ts: 3, text: "the quick".into() },
+            // Single word on another page: ambiguous book-wide, stays
+            // anchored to its recorded page.
+            Highlight { page: 9, ts: 4, text: "jumps".into() },
+            Highlight { page: 0, ts: 5, text: "no such words here".into() },
+            Highlight { page: 0, ts: 6, text: "lazy dog .".into() },
         ];
         let words: Vec<(String, RectF)> = ["the", "quick", "brown", "fox", "jumps"]
             .iter()
             .map(|w| (w.to_string(), r()))
             .collect();
         // "lazy dog ." only partially on-page: must NOT match a prefix.
+        // Order follows the highlight list, not page position.
         let spans = matched_spans(&hl, 0, &words);
-        assert_eq!(spans, vec![(1, 2), (3, 3)]);
+        assert_eq!(spans, vec![(1, 2), (3, 3), (0, 1)]);
     }
 }

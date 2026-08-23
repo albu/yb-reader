@@ -3,6 +3,7 @@
 //! Panel (e-ink framebuffer + MTK refresh), frontlight, touch input,
 //! mirror.conf parsing and the plugin log. No heavy dependencies.
 
+pub mod atomic;
 pub mod config;
 pub mod frontlight;
 pub mod img;
