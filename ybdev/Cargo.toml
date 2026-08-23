@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 libc = "0.2"
 png = "0.17"
+# JPEG for screensaver photos; same version/features as yread, so the
+# lockfile gains nothing new.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

@@ -93,7 +93,9 @@ pub fn wifi_wanted_on_wake() -> bool {
 /// Bring the interface up and ask wifid to associate (idempotent).
 pub fn turn_on() {
     USER_OFF.store(false, Ordering::SeqCst);
-    let _ = Command::new("/sbin/ifconfig").args(["wlan0", "up"]).status();
+    let _ = Command::new("/sbin/ifconfig")
+        .args(["wlan0", "up"])
+        .status();
     let _ = Command::new("lipc-set-prop")
         .args(["-i", "com.lab126.wifid", "enable", "1"])
         .status();
@@ -104,7 +106,9 @@ pub fn turn_on() {
 
 /// Power the radio down (the sleep-screen sequence, reversed).
 pub fn turn_off() {
-    let _ = Command::new("/sbin/ifconfig").args(["wlan0", "down"]).status();
+    let _ = Command::new("/sbin/ifconfig")
+        .args(["wlan0", "down"])
+        .status();
     let _ = Command::new("lipc-set-prop")
         .args(["-i", "com.lab126.wifid", "enable", "0"])
         .status();

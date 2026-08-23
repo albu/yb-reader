@@ -76,14 +76,19 @@ impl Screen for MenuScreen {
             },
             // Vertical swipe on the root = leave the app (the old
             // menu_loop returned None on the same gestures).
-            Gesture::Swipe { dir: SwipeDir::North, .. }
-            | Gesture::Swipe { dir: SwipeDir::South, .. } => Action::Quit,
+            Gesture::Swipe {
+                dir: SwipeDir::North,
+                ..
+            }
+            | Gesture::Swipe {
+                dir: SwipeDir::South,
+                ..
+            } => Action::Quit,
             Gesture::Swipe { .. } => Action::Keep,
             Gesture::TwoFingerTap => Action::Keep,
             _ => Action::Keep,
         }
     }
-
 }
 
 /// --- MessageScreen layout (pt): ported from ui.rs::message ---
@@ -154,6 +159,9 @@ pub struct SleepScreen {
     /// wakes that were NOT the power key — the spurious-wake churn number
     /// the battery investigation wants.
     suspends: u32,
+    /// Whether the first tick has taken the radio down yet (see new():
+    /// radio-off moved after the paint, but before the first suspend).
+    radio_off_done: bool,
 }
 
 /// Pre-sleep frontlight state, stashed when SleepScreen blanks it so the
@@ -233,8 +241,14 @@ impl SleepScreen {
             f.tone_set(0);
         }
 
-        // Shut off Wi-Fi radio power amplifier to eliminate standby drain
-        ybdev::wifi::turn_off();
+        // Wi-Fi goes down on the screen's first tick (after the
+        // screensaver is on glass), not here: turn_off is three
+        // subprocess spawns that held the paint behind ~1s of lipc
+        // round-trips. The tick still ACKs the radio off BEFORE
+        // suspending — an up-but-unassociated radio wakes the SoC every
+        // few hundred ms otherwise (field log: suspends=4 spurious=3
+        // while the radio scanned vs 1/0 after the drain guard powered
+        // it down).
 
         let image_raw = pick_random_screensaver();
 
@@ -245,6 +259,7 @@ impl SleepScreen {
         SleepScreen {
             prev_bright,
             prev_tone,
+            radio_off_done: false,
             image_raw,
             image: None,
             entered_wall: std::time::SystemTime::now(),
@@ -266,29 +281,94 @@ fn pick_random_screensaver() -> Option<Vec<u8>> {
         if let Ok(entries) = std::fs::read_dir(d) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if let Some(ext) = p.extension() {
-                    let ext_str = ext.to_string_lossy().to_ascii_lowercase();
-                    if ext_str == "png" || ext_str == "jpg" || ext_str == "jpeg" {
-                        files.push(p);
-                    }
+                if is_screensaver_file(&p) {
+                    files.push(p);
                 }
             }
         }
     }
+    let files = enabled_screensavers(files, &disabled_screensaver_names());
     if files.is_empty() {
         return None;
     }
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    let choice = &files[(seed as usize) % files.len()];
+    let choice = &files[pick_index(seed, files.len())];
     std::fs::read(choice).ok()
+}
+
+/// splitmix64 finalizer — proper seed mixing for the rotation pick.
+/// The naive `(nanos as usize) % len` truncated the seed to 32 bits
+/// (usize on this ARM), whose low bits wrap every ~4.3 s: sleep events
+/// at a steady rhythm landed on the same few images every time.
+pub(crate) fn pick_index(seed: u64, len: usize) -> usize {
+    let mut z = seed.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    let mixed = z ^ (z >> 31);
+    (mixed % len as u64) as usize
+}
+
+/// Deselected image names, one per line — written by the reader's
+/// screensaver manager screen (System → Screensavers).
+pub const SS_DISABLED_LIST: &str = "/mnt/us/extensions/reader/data/screensavers_disabled.txt";
+
+/// An image eligible for the sleep rotation. Dotfiles are rejected:
+/// every macOS copy onto the FAT volume drops `._name.jpg` AppleDouble
+/// sidecars that are not images (4 kB of Finder metadata) — same
+/// discipline as the library scan.
+pub(crate) fn is_screensaver_file(p: &std::path::Path) -> bool {
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if name.starts_with('.') {
+        return false;
+    }
+    matches!(
+        p.extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .as_deref(),
+        Some("png") | Some("jpg") | Some("jpeg")
+    )
+}
+
+fn disabled_screensaver_names() -> std::collections::HashSet<String> {
+    std::fs::read_to_string(SS_DISABLED_LIST)
+        .map(|t| {
+            t.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Keep only images the user left in the rotation.
+fn enabled_screensavers(
+    files: Vec<std::path::PathBuf>,
+    disabled: &std::collections::HashSet<String>,
+) -> Vec<std::path::PathBuf> {
+    files
+        .into_iter()
+        .filter(|p| {
+            p.file_name()
+                .map(|n| !disabled.contains(n.to_string_lossy().as_ref()))
+                .unwrap_or(true)
+        })
+        .collect()
 }
 
 impl Screen for SleepScreen {
     fn on_enter(&mut self) -> Action {
-        Action::Redraw
+        // Full flash: a photo arriving as a partial update both ghosts
+        // against the prior frame and bands in its gradients (the EPDC
+        // quantizes to ~16 levels with no dithering of its own). The
+        // flash clears the old frame; the image is dithered at load.
+        Action::RedrawFull
     }
 
     fn on_resume(&mut self) -> Action {
@@ -298,10 +378,13 @@ impl Screen for SleepScreen {
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
         // First draw is where the visual dims (orientation included) are
-        // known — decode and fit exactly once, to this canvas.
+        // known — decode and fit exactly once, to this canvas. The
+        // disk-cached loader makes the second-ever showing of an image a
+        // plain file read (decode+dither is the expensive part on this
+        // CPU, and RAM is too scarce to hold buffers).
         if self.image.is_none() {
             if let Some(raw) = &self.image_raw {
-                self.image = ybdev::img::load_png_fitted(raw, w as u32, h as u32);
+                self.image = ybdev::img::load_image_fitted_disk_cached(raw, w as u32, h as u32);
             }
         }
         if let Some(img) = &self.image {
@@ -343,10 +426,16 @@ impl Screen for SleepScreen {
 
     fn on_tick(&mut self) -> Action {
         // The panel has painted by now (draw ran before the first tick),
-        // so the screensaver is on glass — safe to actually sleep. The
+        // so the screensaver is on glass — take the radio down (only
+        // after the paint: this is three lipc subprocesses and the
+        // screensaver must not wait on them), then actually sleep. The
         // power key that wakes the SoC queues a gesture that pops this
         // screen; anything else (spurious wake source) falls through to
         // this tick again and re-suspends.
+        if !self.radio_off_done {
+            ybdev::wifi::turn_off();
+            self.radio_off_done = true;
+        }
         self.suspends = self.suspends.wrapping_add(1);
         suspend_to_mem();
         Action::Keep
@@ -368,15 +457,21 @@ impl Screen for SleepScreen {
         // wake. Takeover only: in stock mode the framework owns the
         // radio and nothing of ours sets intents, so always restore
         // (the enter above turned it off) and never apply our policy to
-        // its radio. Then verify the restore actually associated: this
-        // is the only code that runs on the power-button wake path (the
-        // App resume hook is skipped while the sleep screen is on top),
-        // and a restored radio that never associates scans at ~3× the
-        // idle drain — ybdev::wifi::verify_or_power_down has the
-        // measured numbers and the drain guard.
-        if !ybdev::sysinfo::takeover() || ybdev::wifi::wifi_wanted_on_wake() {
-            ybdev::wifi::turn_on();
-            ybdev::wifi::verify_or_power_down();
+        // its radio. The restore is subprocess-bound (~1s of lipc
+        // round-trips), so it runs in a thread: this is the only code
+        // on the power-button wake path, and the repaint must not wait
+        // behind it. The thread then verifies the restore actually
+        // associated — a restored radio that never associates scans at
+        // ~3× the idle drain — ybdev::wifi::verify_or_power_down has
+        // the measured numbers and the drain guard.
+        let wifi_wanted = !ybdev::sysinfo::takeover() || ybdev::wifi::wifi_wanted_on_wake();
+        if wifi_wanted {
+            let _ = std::thread::Builder::new()
+                .name("wifi-wake".to_string())
+                .spawn(|| {
+                    ybdev::wifi::turn_on();
+                    ybdev::wifi::verify_or_power_down();
+                });
         }
 
         // Drain accounting: %/h over this sleep session, plus the suspend
@@ -409,10 +504,6 @@ impl Screen for SleepScreen {
     }
 }
 
-
-
-
-
 impl Drop for SleepScreen {
     fn drop(&mut self) {
         if let Ok(fl) = ybdev::frontlight::Frontlight::open() {
@@ -422,10 +513,62 @@ impl Drop for SleepScreen {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_mixing_spreads_consecutive_sleeps_across_images() {
+        // The bug this pins: `nanos as usize` (32-bit) % 10 made seeds a
+        // steady rhythm apart land on the same few images. Splitmix64
+        // avalanches — all 10 images must appear within 30 consecutive
+        // seeds, and no image may repeat 3× in a row-of-5 window.
+        let picks: Vec<usize> = (0..30).map(|i| pick_index(i * 4_295_000_000, 10)).collect();
+        let mut seen = std::collections::HashSet::new();
+        seen.extend(picks.iter().copied());
+        assert_eq!(seen.len(), 10, "not all images reached: {picks:?}");
+        for w in picks.windows(5) {
+            let mut s = std::collections::HashSet::new();
+            s.extend(w.iter().copied());
+            assert!(
+                s.len() >= 3,
+                "5 sleeps covered only {} images: {w:?}",
+                s.len()
+            );
+        }
+    }
+
+    #[test]
+    fn screensaver_eligibility_rejects_appledouble_sidecars() {
+        assert!(is_screensaver_file(std::path::Path::new("/x/photo.jpg")));
+        assert!(is_screensaver_file(std::path::Path::new("/x/PHOTO.PNG")));
+        // macOS metadata sidecar: right extension, not an image.
+        assert!(!is_screensaver_file(std::path::Path::new("/x/._photo.jpg")));
+        assert!(!is_screensaver_file(std::path::Path::new("/x/.hidden.png")));
+        assert!(!is_screensaver_file(std::path::Path::new("/x/photo.txt")));
+    }
+
+    #[test]
+    fn screensaver_rotation_honors_the_disabled_list() {
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+        let files = vec![
+            PathBuf::from("/a/one.png"),
+            PathBuf::from("/a/two.jpg"),
+            PathBuf::from("/b/three.png"),
+        ];
+        let mut disabled = HashSet::new();
+        disabled.insert("two.jpg".to_string());
+        let kept = enabled_screensavers(files, &disabled);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|p| p.file_name().unwrap() != "two.jpg"));
+        // Everything deselected = no screensaver (plain sleep screen).
+        let mut all = HashSet::new();
+        all.insert("one.png".to_string());
+        all.insert("two.jpg".to_string());
+        all.insert("three.png".to_string());
+        assert!(enabled_screensavers(vec![PathBuf::from("/a/one.png")], &all).is_empty());
+    }
 
     #[test]
     fn menu_hit_maps_rows_and_rejects_outside() {

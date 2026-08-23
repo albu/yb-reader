@@ -20,10 +20,7 @@ const DEV: &str = "/dev/frontlight";
 
 const fn fl_ioctl(nr: u32, write: bool) -> Ioctl {
     let dir = if write { 1u32 } else { 2u32 };
-    let v = ((dir as u64) << 30)
-        | ((4u64) << 16)
-        | ((FL_MAGIC as u64) << 8)
-        | (nr as u64);
+    let v = ((dir as u64) << 30) | ((4u64) << 16) | ((FL_MAGIC as u64) << 8) | (nr as u64);
     v as Ioctl
 }
 
@@ -100,7 +97,8 @@ impl Frontlight {
         read_i32(BL1_MAX).unwrap_or_else(|| self.ioctl_val(FL_IOCTL_GET_RANGE_MAX).unwrap_or(24))
     }
     pub fn get(&self) -> i32 {
-        read_i32(BL1_BRIGHTNESS).unwrap_or_else(|| self.ioctl_val(FL_IOCTL_GET_INTENSITY).unwrap_or(0))
+        read_i32(BL1_BRIGHTNESS)
+            .unwrap_or_else(|| self.ioctl_val(FL_IOCTL_GET_INTENSITY).unwrap_or(0))
     }
     pub fn set(&self, v: i32) {
         LAST_BRIGHT.store(v, Ordering::SeqCst);
@@ -110,7 +108,6 @@ impl Frontlight {
             let _ = self.ioctl_set(FL_IOCTL_SET_INTENSITY, v);
         }
     }
-
 
     pub fn amber1_max(&self) -> i32 {
         self.ioctl_val(FL_IOCTL_GET_RANGE_MAX_AMBER_1).unwrap_or(0)
@@ -201,7 +198,11 @@ pub fn nearest_preset(b: f32, w: f32) -> Option<usize> {
 /// dim the white channel).
 pub fn channels_for(b: f32, warmth: f32, white_max: i32, amber_max: i32) -> (i32, i32) {
     let b = b.clamp(0.0, 1.0);
-    let w = if amber_max <= 0 { 0.0 } else { warmth.clamp(0.0, 1.0) };
+    let w = if amber_max <= 0 {
+        0.0
+    } else {
+        warmth.clamp(0.0, 1.0)
+    };
     let mix = |f: f32| f.powf(1.0 / LIGHT_GAMMA);
     let white = (b * mix(1.0 - w) * white_max.max(0) as f32).round() as i32;
     let amber = (b * mix(w) * amber_max.max(0) as f32).round() as i32;
@@ -214,7 +215,11 @@ pub fn channels_for(b: f32, warmth: f32, white_max: i32, amber_max: i32) -> (i32
 /// the light — the inverse of [`channels_for`] and a sane reading of
 /// any mixed state the hardware happens to hold.
 pub fn state_from(white: i32, amber: i32, white_max: i32, amber_max: i32) -> (f32, f32) {
-    let light = |r: i32, m: i32| (r.max(0) as f32 / m.max(1) as f32).clamp(0.0, 1.0).powf(LIGHT_GAMMA);
+    let light = |r: i32, m: i32| {
+        (r.max(0) as f32 / m.max(1) as f32)
+            .clamp(0.0, 1.0)
+            .powf(LIGHT_GAMMA)
+    };
     let lw = light(white, white_max);
     let la = light(amber, amber_max);
     let b = (lw + la).min(1.0).powf(1.0 / LIGHT_GAMMA);
@@ -266,7 +271,10 @@ mod tests {
         // range, brightness above the register floor where light "feels
         // off" on this panel.
         for (name, b, w) in PRESETS {
-            assert!((0.0..=1.0).contains(&b) && (0.0..=1.0).contains(&w), "{name}");
+            assert!(
+                (0.0..=1.0).contains(&b) && (0.0..=1.0).contains(&w),
+                "{name}"
+            );
             assert!(b >= 0.3, "{name} too dim for a tile");
         }
         assert_eq!(nearest_preset(0.68, 0.0), Some(0));

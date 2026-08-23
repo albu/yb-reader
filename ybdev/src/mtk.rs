@@ -83,16 +83,13 @@ const _: () = assert!(size_of::<MxcfbUpdateDataMtk>() == 96);
 const _: () = assert!(std::mem::align_of::<MxcfbUpdateDataMtk>() == 4);
 
 // --- ioctls (HWTCON magic 'F') ---
-pub const MXCFB_SEND_UPDATE_MTK: Ioctl =
-    iow(b'F', 0x2E, size_of::<MxcfbUpdateDataMtk>());
-pub const MXCFB_WAIT_FOR_ANY_UPDATE_COMPLETE_MTK: Ioctl =
-    iowr(b'F', 0x37, size_of::<u32>());
+pub const MXCFB_SEND_UPDATE_MTK: Ioctl = iow(b'F', 0x2E, size_of::<MxcfbUpdateDataMtk>());
+pub const MXCFB_WAIT_FOR_ANY_UPDATE_COMPLETE_MTK: Ioctl = iowr(b'F', 0x37, size_of::<u32>());
 // Kindle's MXCFB_WAIT_FOR_UPDATE_SUBMISSION == 0x40044637 (_IOW 'F' 0x37 u32).
 // KOReader waits on this before every flashing/UI refresh on Kindles
 // ("Kindles wait for submission of the previous marker") — the fence that
 // keeps two back-to-back updates from racing on the EPDC.
-pub const MXCFB_WAIT_FOR_UPDATE_SUBMISSION: Ioctl =
-    iow(b'F', 0x37, size_of::<u32>());
+pub const MXCFB_WAIT_FOR_UPDATE_SUBMISSION: Ioctl = iow(b'F', 0x37, size_of::<u32>());
 pub const MXCFB_SET_UPDATE_SCHEME: Ioctl = iow(b'F', 0x32, size_of::<u32>());
 pub const MXCFB_SET_PWRDOWN_DELAY: Ioctl = iow(b'F', 0x30, size_of::<i32>());
 pub const MXCFB_GET_TEMPERATURE: Ioctl = ior(b'F', 0x38, size_of::<i32>());

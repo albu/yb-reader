@@ -140,19 +140,31 @@ pub fn load_png_fitted(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
         return Some(src_gray);
     }
 
-    let mut dst = vec![255u8; (dst_w * dst_h) as usize];
+    Some(fit_center(
+        &src_gray,
+        src_w,
+        src_h,
+        dst_w as usize,
+        dst_h as usize,
+    ))
+}
+
+/// Aspect-fit `src` into a white dst_w×dst_h buffer, centered — the
+/// shared tail of the PNG and generic image loaders.
+fn fit_center(src_gray: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u8> {
+    let mut dst = vec![255u8; dst_w * dst_h];
     let scale_x = dst_w as f32 / src_w as f32;
     let scale_y = dst_h as f32 / src_h as f32;
     let scale = scale_x.min(scale_y);
 
-    let fit_w = ((src_w as f32 * scale).round() as usize).min(dst_w as usize);
-    let fit_h = ((src_h as f32 * scale).round() as usize).min(dst_h as usize);
-    let off_x = (dst_w as usize).saturating_sub(fit_w) / 2;
-    let off_y = (dst_h as usize).saturating_sub(fit_h) / 2;
+    let fit_w = ((src_w as f32 * scale).round() as usize).min(dst_w);
+    let fit_h = ((src_h as f32 * scale).round() as usize).min(dst_h);
+    let off_x = dst_w.saturating_sub(fit_w) / 2;
+    let off_y = dst_h.saturating_sub(fit_h) / 2;
 
     for dy in 0..fit_h {
         let sy = ((dy as f32 / scale).floor() as usize).min(src_h.saturating_sub(1));
-        let dst_row = (off_y + dy) * dst_w as usize + off_x;
+        let dst_row = (off_y + dy) * dst_w + off_x;
         let src_row = sy * src_w;
         for dx in 0..fit_w {
             let sx = ((dx as f32 / scale).floor() as usize).min(src_w.saturating_sub(1));
@@ -160,9 +172,173 @@ pub fn load_png_fitted(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
         }
     }
 
-    Some(dst)
+    dst
 }
 
+/// Decode a PNG or JPEG (screensavers are whatever the user dragged in)
+/// into a fitted grayscale framebuffer. PNG keeps the mirror's
+/// battle-tested path by magic bytes; everything else rides the image
+/// crate. Dimensions are read from the header BEFORE the decode so a
+/// crafted "decode bomb" fails the ceiling check instead of OOMing the
+/// device (same discipline as yread's embedded-image ceiling).
+pub fn load_image_fitted(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
+    const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    if data.len() >= 8 && data[..8] == PNG_MAGIC {
+        return load_png_fitted(data, dst_w, dst_h);
+    }
+    /// ~40 MP: far above any sane photo, far below memory trouble.
+    const MAX_PIXELS: u64 = 40_000_000;
+    let reader = image::ImageReader::new(std::io::Cursor::new(data))
+        .with_guessed_format()
+        .ok()?;
+    let (w0, h0) = reader.into_dimensions().ok()?;
+    if w0 as u64 * h0 as u64 > MAX_PIXELS {
+        return None;
+    }
+    let img = image::load_from_memory(data).ok()?.to_luma8();
+    let (src_w, src_h) = (img.width() as usize, img.height() as usize);
+    if src_w == 0 || src_h == 0 {
+        return None;
+    }
+    let mut out = if src_w == dst_w as usize && src_h == dst_h as usize {
+        img.into_raw()
+    } else {
+        fit_center(
+            &img.into_raw(),
+            src_w,
+            src_h,
+            dst_w as usize,
+            dst_h as usize,
+        )
+    };
+    bayer16(&mut out, dst_w as usize, dst_h as usize);
+    Some(out)
+}
+
+/// Disk-backed decode cache: a 2 MP jpeg decode+dither costs real time
+/// on the device CPU, and RAM is too scarce to cache buffers. The
+/// fitted, dithered, framebuffer-ready buffer is written ONCE per
+/// image (content-addressed by FNV of the source bytes, so a replaced
+/// file never hits a stale entry) and every later sleep is a plain
+/// read — no decode, no steady-state memory cost. Format: 16-byte
+/// header (magic, w, h) + w*h bytes, written .part → rename.
+pub fn load_image_fitted_disk_cached(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
+    let dir = ss_cache_dir();
+    let key = fnv1a(data);
+    let path = format!("{dir}/{key:016x}.gray");
+
+    // Hit: header check guards against torn/foreign files.
+    if let Ok(mut f) = std::fs::File::open(&path) {
+        use std::io::Read as _;
+        let mut head = [0u8; 16];
+        if f.read_exact(&mut head).is_ok() && head[..8] == *b"YBGRAY01" {
+            let (w, h) = (
+                u32::from_le_bytes(head[8..12].try_into().unwrap()),
+                u32::from_le_bytes(head[12..16].try_into().unwrap()),
+            );
+            if w == dst_w && h == dst_h {
+                let mut buf = Vec::with_capacity((dst_w as usize) * (dst_h as usize));
+                if f.read_to_end(&mut buf).is_ok()
+                    && buf.len() == (dst_w as usize) * (dst_h as usize)
+                {
+                    return Some(buf);
+                }
+            }
+        }
+    }
+
+    // Miss: render, persist, return.
+    let t0 = std::time::Instant::now();
+    let out = load_image_fitted(data, dst_w, dst_h)?;
+    let _ = std::fs::create_dir_all(&dir);
+    let mut head = Vec::with_capacity(16 + out.len());
+    head.extend_from_slice(b"YBGRAY01");
+    head.extend_from_slice(&dst_w.to_le_bytes());
+    head.extend_from_slice(&dst_h.to_le_bytes());
+    head.extend_from_slice(&out);
+    let part = format!("{dir}/{key:016x}.part");
+    let _ = std::fs::write(&part, &head);
+    let _ = std::fs::rename(&part, &path);
+    crate::log::plog(&format!(
+        "screensaver: rendered {key:016x} {}x{} in {}ms",
+        dst_w,
+        dst_h,
+        t0.elapsed().as_millis()
+    ));
+    Some(out)
+}
+
+/// The cache dir, overridable for host tests.
+pub fn ss_cache_dir() -> String {
+    std::env::var("YB_SS_CACHE_DIR")
+        .unwrap_or_else(|_| "/mnt/us/extensions/reader/cache/screensavers".to_string())
+}
+
+/// Drop cache entries whose hashes are not in `keep` (the reader's
+/// screensaver screen calls this on open — replaced/deleted images
+/// must not leave orphans on the flash).
+pub fn ss_cache_gc(keep: &[u64]) {
+    let dir = ss_cache_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut freed = 0u64;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(hex) = name.strip_suffix(".gray") else {
+            continue;
+        };
+        let Ok(h) = u64::from_str_radix(hex, 16) else {
+            continue;
+        };
+        if !keep.contains(&h) {
+            if let Ok(md) = e.metadata() {
+                freed += md.len();
+            }
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    if freed > 0 {
+        crate::log::plog(&format!("screensaver: gc freed {} KB", freed / 1024));
+    }
+}
+
+/// Content hash used as the disk-cache key (also the GC set element).
+pub fn fnv1a(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// 8×8 Bayer threshold matrix (values 0..63).
+const BAYER8: [[u8; 8]; 8] = [
+    [0, 32, 8, 40, 2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21],
+];
+
+/// Ordered-dither down to the panel's ~16 gray levels. The EPDC
+/// quantizes on its own; pre-quantizing with the matrix converts
+/// gradient contour bands (what a photo looks like snapped to 16
+/// levels) into a fine texture the eye integrates back into the
+/// gradient. Screensavers only — text/UI pixels never pass through.
+fn bayer16(buf: &mut [u8], w: usize, _h: usize) {
+    const STEP: f32 = 255.0 / 15.0;
+    for (i, px) in buf.iter_mut().enumerate() {
+        let (x, y) = (i % w, i / w);
+        let t = (BAYER8[y % 8][x % 8] as f32 + 0.5) / 64.0 - 0.5;
+        let q = ((*px as f32 / STEP) + t).round().clamp(0.0, 15.0);
+        *px = (q * STEP).round() as u8;
+    }
+}
 
 fn scale_pixel(v: u8, max: u16) -> u8 {
     if max == 255 {
@@ -252,3 +428,125 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod image_fitted_tests {
+    use super::load_image_fitted;
+
+    /// A real JPEG, end to end: encode with the image crate, decode +
+    /// fit through the generic loader. Screensavers are user-dragged
+    /// .jpgs — this is the path that was silently PNG-only before.
+    #[test]
+    fn jpeg_decodes_and_fits() {
+        let img = image::GrayImage::from_fn(64, 32, |x, _| image::Luma([(x * 4) as u8]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&img)
+            .unwrap();
+        // JPEG magic, not PNG — exercises the image-crate branch.
+        assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
+
+        // Exact-fit target: dimensions preserved, gradient-ish content.
+        let out = load_image_fitted(&jpeg, 64, 32).expect("jpeg decodes");
+        assert_eq!(out.len(), 64 * 32);
+        // Left edge dark, right edge bright (jpeg is lossy: loose bounds).
+        assert!(out[2] < 40, "left edge not dark: {}", out[2]);
+        assert!(out[63] > 200, "right edge not bright: {}", out[63]);
+
+        // Fitted target: white letterbox rows top/bottom for 2:1 into 1:1.
+        let fitted = load_image_fitted(&jpeg, 32, 32).expect("jpeg fits");
+        assert_eq!(fitted.len(), 32 * 32);
+        assert!(fitted[0] == 255, "letterbox row not white");
+    }
+
+    #[test]
+    fn garbage_and_oversized_headers_are_rejected() {
+        // Not an image at all (e.g. an ._ AppleDouble sidecar).
+        assert!(load_image_fitted(b"not an image", 8, 8).is_none());
+        // Truncated jpeg magic — header parse must fail, not hang.
+        assert!(load_image_fitted(&[0xFF, 0xD8, 0xFF], 8, 8).is_none());
+    }
+}
+
+#[cfg(test)]
+mod bayer_tests {
+    /// The dither must snap every pixel onto the panel's 16-level grid
+    /// while keeping local averages faithful — noise moves into space,
+    /// not bias. That is exactly the property that turns contour bands
+    /// into invisible texture.
+    #[test]
+    fn bayer_snaps_to_grid_and_preserves_means() {
+        let (w, h) = (64usize, 8usize);
+        let ramp: Vec<u8> = (0..w * h).map(|i| ((i % w) * 4) as u8).collect();
+        let mut d = ramp.clone();
+        super::bayer16(&mut d, w, h);
+        assert!(
+            d.iter().all(|&v| v % 17 == 0),
+            "every value must sit on the 17-grid"
+        );
+        for x in (0..w).step_by(4) {
+            let src: f32 = (x * 4) as f32;
+            let mean: f32 = (0..h).map(|y| d[y * w + x] as f32).sum::<f32>() / h as f32;
+            assert!(
+                (mean - src).abs() <= 9.0,
+                "column {x}: dithered mean {mean} drifted from source {src}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod disk_cache_tests {
+    use super::*;
+
+    fn tiny_jpeg() -> Vec<u8> {
+        let img = image::GrayImage::from_fn(16, 16, |x, _| image::Luma([(x * 15) as u8]));
+        let mut v = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut v)
+            .encode_image(&img)
+            .unwrap();
+        v
+    }
+
+    fn fresh_dir(tag: &str) -> String {
+        let d = std::env::temp_dir().join(format!("yb_ss_cache_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn disk_cache_round_trip_and_gc() {
+        std::env::set_var("YB_SS_CACHE_DIR", fresh_dir("rt"));
+        let jpeg = tiny_jpeg();
+
+        // Miss → renders, writes the entry, returns content.
+        let a = load_image_fitted_disk_cached(&jpeg, 16, 16).expect("first render");
+        let h = fnv1a(&jpeg);
+        let entry = format!("{}/{h:016x}.gray", ss_cache_dir());
+        assert!(std::path::Path::new(&entry).exists(), "cache entry written");
+
+        // Hit → same bytes from disk.
+        let b = load_image_fitted_disk_cached(&jpeg, 16, 16).expect("cache hit");
+        assert_eq!(a, b);
+
+        // Different dims → different request; renders fresh (cache keyed
+        // by content only, header dims guard serves no wrong buffer).
+        let c = load_image_fitted_disk_cached(&jpeg, 8, 8).expect("other dims");
+        assert_eq!(c.len(), 8 * 8);
+
+        // Corrupted entry: wrong header must not serve garbage.
+        let _ = std::fs::write(&entry, b"garbage-not-a-render");
+        let d = load_image_fitted_disk_cached(&jpeg, 16, 16).expect("re-render after corrupt");
+        assert_eq!(a, d);
+
+        // GC: keep only this hash — the 8x8 render (same hash, kept) and
+        // a foreign entry must go.
+        let foreign = format!("{}/deadbeef00000000.gray", ss_cache_dir());
+        let _ = std::fs::write(&foreign, b"x");
+        ss_cache_gc(&[h]);
+        assert!(!std::path::Path::new(&foreign).exists(), "orphan removed");
+        assert!(std::path::Path::new(&entry).exists(), "live entry kept");
+
+        std::env::remove_var("YB_SS_CACHE_DIR");
+    }
+}

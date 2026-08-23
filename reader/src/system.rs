@@ -1,8 +1,8 @@
 //! The System screen — device-level controls that are *not* daily use:
-//! boot mode, reboot, Wi-Fi, the E-Ink refresh cadence, and status
-//! trivia. Reached from the home rows. The curtain keeps the daily
-//! controls (clock, statuses, light) and nothing else — this screen is
-//! where the rare stuff went when the curtain grew too heavy.
+//! boot mode, reboot, Wi-Fi, USB mode, the E-Ink refresh cadence, and
+//! status trivia. Reached from the home rows. The curtain keeps the
+//! daily controls (clock, statuses, light) and nothing else — this
+//! screen is where the rare stuff went when the curtain grew too heavy.
 
 use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
@@ -20,8 +20,8 @@ const CARD_TOP_PT: f32 = 66.0;
 const CARD_H_PT: f32 = 34.0;
 const CARD_GAP_PT: f32 = 8.0;
 
-const REFRESH_TITLE_PT: f32 = 208.0;
-const REFRESH_PILL_PT: f32 = 224.0;
+const REFRESH_TITLE_PT: f32 = 292.0;
+const REFRESH_PILL_PT: f32 = 308.0;
 
 const DIM: u8 = 110;
 const INK: u8 = 0;
@@ -30,7 +30,8 @@ const CARD_BORDER: u8 = 200;
 const PILL_BG: u8 = 242;
 const PILL_ACTIVE_BG: u8 = 30;
 
-const REFRESH_PRESETS: [(&str, usize); 4] = [("Off", 0), ("5 pgs", 5), ("10 pgs", 10), ("20 pgs", 20)];
+const REFRESH_PRESETS: [(&str, usize); 4] =
+    [("Off", 0), ("5 pgs", 5), ("10 pgs", 10), ("20 pgs", 20)];
 
 pub struct SystemScreen {
     w: i32,
@@ -115,7 +116,13 @@ impl Screen for SystemScreen {
         let pad = pt(PAD_PT);
 
         p.text(pad, pt(TITLE_BASE_PT), TITLE_SIZE_PT, INK, "System");
-        p.text_right(w - pad, pt(TITLE_BASE_PT), 8.0, 160, concat!("v", env!("YB_BUILD")));
+        p.text_right(
+            w - pad,
+            pt(TITLE_BASE_PT),
+            8.0,
+            160,
+            concat!("v", env!("YB_BUILD")),
+        );
         p.hline_t(pt(TITLE_BASE_PT) + pt(9.0), pad, w - pad, 2, 180);
 
         // Status trivia — the stuff that used to be a curtain card.
@@ -146,18 +153,14 @@ impl Screen for SystemScreen {
         } else {
             ("Stock", "Tap: switch to yb OS")
         };
-        SystemScreen::draw_card(
-            p,
-            Rect::new(pad, top, cw, ch),
-            "BOOT MODE",
-            bv,
-            bs,
-            os_boot,
-        );
+        SystemScreen::draw_card(p, Rect::new(pad, top, cw, ch), "BOOT MODE", bv, bs, os_boot);
 
         let wifi_on = crate::wifi::wifi_state() == Some(true);
         let (wv, ws) = if wifi_on {
-            ("On", sysinfo::wifi_ip().unwrap_or_else(|| "connecting…".to_string()))
+            (
+                "On",
+                sysinfo::wifi_ip().unwrap_or_else(|| "connecting…".to_string()),
+            )
         } else {
             ("Off", "Tap to turn on".to_string())
         };
@@ -170,10 +173,43 @@ impl Screen for SystemScreen {
             wifi_on,
         );
 
+        // USB mode: charging keeps the reader's own disk from being
+        // exported under it (see usbmode.rs); transfer is stock drive
+        // mode, opted into.
+        let transfer = crate::usbmode::transfer_mode();
+        let (uv, us) = if transfer {
+            ("Transfer", "Disk on next plug · Tap: charging only")
+        } else {
+            ("Charging", "No USB disk while reading · Tap: transfer")
+        };
+        SystemScreen::draw_card(
+            p,
+            Rect::new(pad, top + 2 * (ch + gap), cw, ch),
+            "USB MODE",
+            uv,
+            us,
+            transfer,
+        );
+
+        // Screensaver rotation manager — copy images over USB transfer
+        // mode / web manager, then pick which ones rotate (screensavers.rs).
+        let (sv, ss) = match crate::screensavers::scan().len() {
+            0 => ("None yet", "Copy images, tap to manage"),
+            n => (&*format!("{n} images"), "Tap to manage the rotation"),
+        };
+        SystemScreen::draw_card(
+            p,
+            Rect::new(pad, top + 3 * (ch + gap), cw, ch),
+            "SCREENSAVERS",
+            sv,
+            ss,
+            false,
+        );
+
         let next = if os_boot { "yb OS" } else { "Stock Kindle" };
         SystemScreen::draw_action_card(
             p,
-            Rect::new(pad, top + 2 * (ch + gap), cw, ch),
+            Rect::new(pad, top + 4 * (ch + gap), cw, ch),
             "REBOOT",
             "Reboot now",
             &format!("Next boot: {next}"),
@@ -238,7 +274,20 @@ impl Screen for SystemScreen {
                     return Action::Redraw;
                 }
 
-                let r_reboot = Rect::new(pad, top + 2 * (ch + gap), cw, ch);
+                // USB mode: flip between charge-only (mass-storage kernel
+                // modules stay out) and stock transfer mode.
+                let r_usb = Rect::new(pad, top + 2 * (ch + gap), cw, ch);
+                if r_usb.contains(x, y) {
+                    crate::usbmode::set_transfer(!crate::usbmode::transfer_mode());
+                    return Action::Redraw;
+                }
+
+                let r_ss = Rect::new(pad, top + 3 * (ch + gap), cw, ch);
+                if r_ss.contains(x, y) {
+                    return Action::Push(Box::new(crate::screensavers::ScreensaversScreen::new()));
+                }
+
+                let r_reboot = Rect::new(pad, top + 4 * (ch + gap), cw, ch);
                 if r_reboot.contains(x, y) {
                     // Plain `reboot` rides the same init cascade as a
                     // long-press power (TERM -> reader guard restores
@@ -257,9 +306,10 @@ impl Screen for SystemScreen {
                         move |act| {
                             if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
                                 plog("system: reboot requested");
-                                let spawned = std::process::Command::new("reboot")
-                                    .spawn()
-                                    .or_else(|_| std::process::Command::new("/sbin/reboot").spawn());
+                                let spawned =
+                                    std::process::Command::new("reboot").spawn().or_else(|_| {
+                                        std::process::Command::new("/sbin/reboot").spawn()
+                                    });
                                 if spawned.is_err() {
                                     plog("system: reboot command failed");
                                 }
@@ -324,13 +374,19 @@ mod tests {
             p.flush();
         }
         let ink = |name: &str, y0: usize, y1: usize, min: usize| {
-            let n = buf[y0 * 1248..y1 * 1248].iter().filter(|&&b| b < 140).count();
+            let n = buf[y0 * 1248..y1 * 1248]
+                .iter()
+                .filter(|&&b| b < 140)
+                .count();
             assert!(n >= min, "{name}: only {n} ink pixels in rows {y0}-{y1}");
         };
         let lit = buf.iter().filter(|&&b| b > 200).count();
-        assert!(lit > 1248 * 1648 * 90 / 100, "page is not white: {lit}");
+        // 88%: five cards of text are legitimately under 90 — the guard
+        // exists to catch a gray/black full-screen fill, not card count.
+        assert!(lit > 1248 * 1648 * 88 / 100, "page is not white: {lit}");
         ink("title", 90, 170, 60);
-        ink("cards", 270, 780, 150);
-        ink("refresh", 860, 1010, 40);
+        ink("cards", 270, 900, 150);
+        // Pills at REFRESH_PILL_PT (308pt ≈ 1285px at 4.17 px/pt).
+        ink("refresh", 1230, 1350, 40);
     }
 }

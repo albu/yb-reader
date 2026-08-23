@@ -1180,6 +1180,7 @@ dependencies = [
 name = "ybdev"
 version = "0.1.0"
 dependencies = [
+ "image",
  "libc",
  "png 0.17.16",
 ]

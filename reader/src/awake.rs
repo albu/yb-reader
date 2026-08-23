@@ -51,6 +51,50 @@ pub fn screen_wants_awake(on: bool) {
 pub fn on_resume(gap: Duration) {
     plog(&format!("resume after {}s (suspended)", gap.as_secs()));
     // Our frontlight levels over powerd's restore.
+    reassert_frontlight();
+    // Wi-Fi: bring it back only when something wants it (live session
+    // or the user's persisted Wi-Fi/SSH choice — pre-fix, a None from a
+    // slow wifid meant "restore", so every wake re-associated). When
+    // nothing wants it, power an unwanted radio down: suspend kills the
+    // association, and an up-but-unassociated radio scans at ~3× the
+    // idle drain (ybdev::wifi::verify_or_power_down has the measured
+    // numbers and the drain guard). Stock mode keeps the historic
+    // restore-if-not-explicitly-off: the framework owns the radio and
+    // nothing of ours sets intents there, so the policy would only ever
+    // fire its power-down half — fighting powerd for its own Wi-Fi.
+    // Radio restore is subprocess-bound (ifconfig + lipc round-trips,
+    // ~1s on this CPU) — synchronous, that's a full second before the
+    // first post-wake repaint, which is exactly the wake latency the
+    // user feels. Same decision tree as before, off the UI thread.
+    let takeover = ybdev::sysinfo::takeover();
+    let _ = std::thread::Builder::new()
+        .name("wifi-resume".to_string())
+        .spawn(move || {
+            if !takeover {
+                match wifi::wifi_state() {
+                    Some(false) => {}
+                    _ => {
+                        wifi::turn_on_wifi();
+                        ybdev::wifi::verify_or_power_down();
+                    }
+                }
+            } else if ybdev::wifi::wifi_wanted_on_wake() {
+                wifi::turn_on_wifi();
+                ybdev::wifi::verify_or_power_down();
+            } else if wifi::wifi_state() != Some(false) {
+                plog("resume: wifi not wanted — radio down");
+                ybdev::wifi::turn_off();
+            }
+        });
+}
+
+/// Our remembered frontlight levels over powerd's idea of them. Used
+/// after suspend (powerd restores its own levels over ours) and on USB
+/// plug (powerd's charge policy kills the light — stock shows a USB
+/// drive-mode screen instead; our charge-and-read keeps the light
+/// where the user left it). No-op unless the user has set a level this
+/// session (-1/-1 = never touched ⇒ powerd's call stands).
+pub fn reassert_frontlight() {
     let (b, t) = (
         ybdev::frontlight::last_bright(),
         ybdev::frontlight::last_tone(),
@@ -65,31 +109,6 @@ pub fn on_resume(gap: Duration) {
             }
         }
     }
-    // Wi-Fi: bring it back only when something wants it (live session
-    // or the user's persisted Wi-Fi/SSH choice — pre-fix, a None from a
-    // slow wifid meant "restore", so every wake re-associated). When
-    // nothing wants it, power an unwanted radio down: suspend kills the
-    // association, and an up-but-unassociated radio scans at ~3× the
-    // idle drain (ybdev::wifi::verify_or_power_down has the measured
-    // numbers and the drain guard). Stock mode keeps the historic
-    // restore-if-not-explicitly-off: the framework owns the radio and
-    // nothing of ours sets intents there, so the policy would only ever
-    // fire its power-down half — fighting powerd for its own Wi-Fi.
-    if !ybdev::sysinfo::takeover() {
-        match wifi::wifi_state() {
-            Some(false) => {}
-            _ => {
-                wifi::turn_on_wifi();
-                ybdev::wifi::verify_or_power_down();
-            }
-        }
-    } else if ybdev::wifi::wifi_wanted_on_wake() {
-        wifi::turn_on_wifi();
-        ybdev::wifi::verify_or_power_down();
-    } else if wifi::wifi_state() != Some(false) {
-        plog("resume: wifi not wanted — radio down");
-        ybdev::wifi::turn_off();
-    }
 }
 
 /// Start the policy thread (runs for process lifetime; dies with it).
@@ -99,8 +118,29 @@ pub fn spawn() {
         .spawn(loop_fn);
 }
 
+/// Pure edge, host-testable.
+fn vbus_plugged(prev: bool, cur: bool) -> bool {
+    cur && !prev
+}
+
 fn loop_fn() {
+    // 5 s tick: fast enough that the charge-and-read light re-assert
+    // lands within one blink of powerd's plug-time light-off, while the
+    // hold/heal policy work keeps its 30 s cadence (every 6th tick).
+    let mut prev_vbus = sysinfo::vbus();
+    let mut tick: u32 = 0;
     loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let vbus = sysinfo::vbus();
+        if vbus_plugged(prev_vbus, vbus) {
+            plog("awake: usb power — re-asserting frontlight (charge-and-read)");
+            reassert_frontlight();
+        }
+        prev_vbus = vbus;
+        tick = tick.wrapping_add(1);
+        if tick % 6 != 0 {
+            continue;
+        }
         let want = desired_awake(
             ybdev::wifi::session_wants(),
             sysinfo::vbus(),
@@ -121,7 +161,6 @@ fn loop_fn() {
             plog("awake: wifi down during active session, healing");
             wifi::turn_on_wifi();
         }
-        std::thread::sleep(Duration::from_secs(30));
     }
 }
 
@@ -136,5 +175,13 @@ mod tests {
         assert!(desired_awake(false, true, false));
         assert!(desired_awake(false, false, true));
         assert!(desired_awake(true, true, true));
+    }
+
+    #[test]
+    fn vbus_edge_fires_only_on_plug() {
+        assert!(vbus_plugged(false, true)); // plug
+        assert!(!vbus_plugged(true, true)); // staying plugged
+        assert!(!vbus_plugged(true, false)); // unplug
+        assert!(!vbus_plugged(false, false)); // battery the whole time
     }
 }

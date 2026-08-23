@@ -27,19 +27,16 @@ mod protocol;
 mod quick_settings;
 mod receive;
 mod render;
+mod screensavers;
 mod scrubber_dialog;
 mod selection;
 mod split;
 mod system;
 mod toc_dialog;
+mod usbmode;
 mod vocab;
 mod wifi;
 mod word_dialog;
-
-
-
-
-
 
 use ybdev::input::{self, Input};
 use ybdev::log;
@@ -114,6 +111,8 @@ fn main() {
     let (w, h) = app.dims();
 
     awake::spawn();
+    usbmode::spawn();
+    screensavers::prewarm();
     let root = HomeScreen::new(w, h);
     app.run(Box::new(root));
     // Release the awake hold as the last hardware call: whoever comes

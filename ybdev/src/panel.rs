@@ -132,8 +132,7 @@ impl Panel {
                 (w, h, h)
             }
         };
-        let stride =
-            sysfs_u32("/sys/class/graphics/fb0/stride").unwrap_or(width);
+        let stride = sysfs_u32("/sys/class/graphics/fb0/stride").unwrap_or(width);
         let bpp = sysfs_u32("/sys/class/graphics/fb0/bits_per_pixel").unwrap_or(8);
 
         let map_len_full = stride as usize * virtual_height as usize;
@@ -216,7 +215,9 @@ impl Panel {
     }
 
     pub fn fill(&mut self, v: u8) {
-        let len = self.map_len.min(self.stride as usize * self.height as usize);
+        let len = self
+            .map_len
+            .min(self.stride as usize * self.height as usize);
         self.buf_mut()[..len].fill(v);
     }
 

@@ -53,6 +53,11 @@ fails=$((fails + 1))
 if [ "$fails" -gt 3 ]; then
     echo "$(date) FALLBACK: $((fails - 1)) fast failures, returning to stock" >> "$LOG"
     rm -f "$FLAG" "$STATE/fails"
+    # The reader's charge-only USB mode removes the mass-storage kernel
+    # modules; a SIGKILLed reader never restores them itself, and stock
+    # mode without drive mode looks broken. Give them back here.
+    modprobe usb_f_mass_storage 2>/dev/null || true
+    modprobe g_mass_storage 2>/dev/null || true
     # The stock GUI cannot come back onto a frozen WM (start.sh's own
     # post-mortem: a frozen UI cannot answer lipc and draws nothing).
     killall -CONT awesome webreader kfxreader kfxview KPPMainApp pillowd \

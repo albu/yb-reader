@@ -40,7 +40,10 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"one");
         assert!(write(&path, b"two"));
         assert_eq!(std::fs::read(&path).unwrap(), b"two");
-        assert!(!path.with_extension("txt.tmp").exists(), "no tmp left behind");
+        assert!(
+            !path.with_extension("txt.tmp").exists(),
+            "no tmp left behind"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
