@@ -11,7 +11,7 @@ use crate::curtain::CurtainScreen;
 use crate::dialogs;
 use crate::positions;
 use crate::selection::{self, SelState};
-use crate::split::{RectF, ReaderSettings};
+use crate::split::{ReaderSettings, RectF};
 
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
@@ -84,7 +84,11 @@ impl ReaderScreen {
             page_words: Vec::new(),
             page_links: Vec::new(),
             highlights: crate::notes::load(&name),
-            snap_pos: if has_snap { Some((resume, sub_idx)) } else { None },
+            snap_pos: if has_snap {
+                Some((resume, sub_idx))
+            } else {
+                None
+            },
             render_pending: false,
             sel_mode: false,
             sel: None,
@@ -107,7 +111,12 @@ impl ReaderScreen {
 
     fn save_progress(&self) {
         let b = self.backend.borrow();
-        if !b.is_ready() {
+        // is_paginated, not just is_ready: between "book parsed" and
+        // "landing chapter laid out" the yread backend's total is still
+        // the placeholder 1, and a save in that window (quick exit, the
+        // poll right after open) records "page 0 of 1" over the real
+        // position.
+        if !b.is_ready() || !b.is_paginated() {
             return;
         }
         let name = self.book_name();
@@ -174,7 +183,9 @@ impl ReaderScreen {
     fn open_toc_dialog(&mut self) -> Action {
         let cur_page = self.backend.borrow().current_page();
         let back = self.jump_history.last().copied();
-        self.backend.borrow().open_toc_dialog(cur_page, back, self.book_name(), self.settings)
+        self.backend
+            .borrow()
+            .open_toc_dialog(cur_page, back, self.book_name(), self.settings)
     }
 
     fn open_scrubber_dialog(&mut self) -> Action {
@@ -216,7 +227,9 @@ impl ReaderScreen {
             doc,
             base_gray,
             move |new_settings| {
-                backend_rc.borrow_mut().interactive_preview(&new_settings, vw, vh)
+                backend_rc
+                    .borrow_mut()
+                    .interactive_preview(&new_settings, vw, vh)
             },
         )
     }
@@ -311,7 +324,9 @@ impl Screen for ReaderScreen {
                 // self.settings, so capturing earlier would paginate the
                 // incoming rotation with the stale viewport.
                 let (vw, vh) = self.visual_dims();
-                self.backend.borrow_mut().apply_settings_change(&old, &s, vw, vh);
+                self.backend
+                    .borrow_mut()
+                    .apply_settings_change(&old, &s, vw, vh);
                 // The cached bitmap was rendered with the old settings.
                 snapshot_valid = false;
             }
@@ -319,9 +334,13 @@ impl Screen for ReaderScreen {
         let (vw, vh) = self.visual_dims();
 
         if pos.sub_idx > 0 || !self.is_pdf() {
-            self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+            self.backend
+                .borrow_mut()
+                .jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
         } else {
-            self.backend.borrow_mut().jump_to_page(pos.page, vw, vh, &self.settings);
+            self.backend
+                .borrow_mut()
+                .jump_to_page(pos.page, vw, vh, &self.settings);
         }
         if !snapshot_valid {
             self.page_gray = None;
@@ -350,7 +369,9 @@ impl Screen for ReaderScreen {
                 // swap laid out the whole visible book for the stale
                 // rotation and cached those pages.
                 let (vw, vh) = self.visual_dims();
-                self.backend.borrow_mut().apply_settings_change(&old, &s, vw, vh);
+                self.backend
+                    .borrow_mut()
+                    .apply_settings_change(&old, &s, vw, vh);
                 pos_changed = true;
             }
         }
@@ -360,18 +381,24 @@ impl Screen for ReaderScreen {
         let cur_page = self.backend.borrow().current_page();
         if self.is_pdf() {
             if pos.page != cur_page || pos.sub_idx != cur_sub {
-                self.backend.borrow_mut().jump_to_page(pos.page, vw, vh, &self.settings);
+                self.backend
+                    .borrow_mut()
+                    .jump_to_page(pos.page, vw, vh, &self.settings);
                 // Restore the split sub-box too (e.g. Back to a mid-page
                 // position); jump_to_page resets it to 0.
                 if pos.sub_idx < 100 {
-                    self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+                    self.backend
+                        .borrow_mut()
+                        .jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
                 }
                 pos_changed = true;
                 pos_moved = true;
             }
         } else {
             if pos.sub_idx != cur_sub {
-                self.backend.borrow_mut().jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
+                self.backend
+                    .borrow_mut()
+                    .jump_to_sub(pos.sub_idx, vw, vh, &self.settings);
                 pos_changed = true;
                 pos_moved = true;
             }
@@ -444,7 +471,14 @@ impl Screen for ReaderScreen {
             let r = Rect::new(box_x, box_y, box_w, box_h);
             p.rect(r, 255);
             p.rect_outline_t(r, 2, 0);
-            p.text_center_in(box_x, box_x + box_w, box_y + pt(28.0), 12.0, 0, "Failed to Open Book");
+            p.text_center_in(
+                box_x,
+                box_x + box_w,
+                box_y + pt(28.0),
+                12.0,
+                0,
+                "Failed to Open Book",
+            );
             let err_trunc = p.truncate(8.0, err, (box_w - pt(24.0)) as f32);
             p.text_center_in(box_x, box_x + box_w, box_y + pt(55.0), 8.0, 100, &err_trunc);
             return;
@@ -522,7 +556,8 @@ impl Screen for ReaderScreen {
         // by word sequence within the page.
         let page_no = backend.current_page();
         if !self.page_words.is_empty() {
-            for (lo, hi) in crate::notes::matched_spans(&self.highlights, page_no, &self.page_words) {
+            for (lo, hi) in crate::notes::matched_spans(&self.highlights, page_no, &self.page_words)
+            {
                 for (_, r) in &self.page_words[lo..=hi] {
                     let y = (r.y1 + 1.0).round() as i32;
                     let x0 = r.x0.round() as i32;
@@ -563,6 +598,7 @@ impl Screen for ReaderScreen {
             &self.time_str,
             top_title,
             self.settings.invert,
+            self.sel_mode,
         );
 
         chrome::draw_footer(
@@ -574,8 +610,6 @@ impl Screen for ReaderScreen {
             self.settings.invert,
         );
 
-        // Selection-mode bookmark ribbon + the pending selection itself
-        chrome::draw_bookmark_ribbon(p, w, self.sel_mode);
         if let Some(sel) = &self.sel {
             selection::draw_selection(p, sel, &self.page_words);
         }
@@ -589,7 +623,9 @@ impl Screen for ReaderScreen {
         if g.top_edge_swipe() || g.top_edge_swipe_in(vis_h.max(vh as i32) as u32) {
             return self.open_curtain();
         }
-        if g.corner_back() || g.corner_back_in(vis_w.max(vw as i32) as u32, vis_h.max(vh as i32) as u32) {
+        if g.corner_back()
+            || g.corner_back_in(vis_w.max(vw as i32) as u32, vis_h.max(vh as i32) as u32)
+        {
             return Action::Pop;
         }
 
@@ -605,11 +641,17 @@ impl Screen for ReaderScreen {
                 let had_sel = self.sel.take().is_some();
                 let act = match dir {
                     SwipeDir::East => {
-                        let res = self.backend.borrow_mut().turn_page(-1, vw, vh, &self.settings);
+                        let res = self
+                            .backend
+                            .borrow_mut()
+                            .turn_page(-1, vw, vh, &self.settings);
                         self.handle_page_turn_result(res)
                     }
                     SwipeDir::West => {
-                        let res = self.backend.borrow_mut().turn_page(1, vw, vh, &self.settings);
+                        let res = self
+                            .backend
+                            .borrow_mut()
+                            .turn_page(1, vw, vh, &self.settings);
                         self.handle_page_turn_result(res)
                     }
                     SwipeDir::North => self.open_quick_settings_sheet(),
@@ -623,10 +665,11 @@ impl Screen for ReaderScreen {
             Gesture::Tap { x, y } => {
                 let (vx, vy) = (x as i32, y as i32);
 
-                // 0a. Bookmark (top-right, left of the battery) toggles
-                // selection mode. Checked first so the ribbon's own strip
-                // stays carved out of the header zones.
-                if vx > vis_w - pt(64.0) && vy < pt(40.0) {
+                // 0a. Bookmark (leftmost mark of the header's right
+                // cluster: bookmark · wifi · battery) toggles selection
+                // mode. Checked first so the ribbon's own strip stays
+                // carved out of the header zones.
+                if vx > vis_w - pt(70.0) && vy < pt(40.0) {
                     self.sel_mode = !self.sel_mode;
                     self.sel = None;
                     return Action::RedrawFull;
@@ -679,10 +722,16 @@ impl Screen for ReaderScreen {
                 // = forward (center-tap advance is e-reader muscle memory;
                 // a dead middle zone reads as an ignored tap).
                 if vx < vis_w / 3 {
-                    let res = self.backend.borrow_mut().turn_page(-1, vw, vh, &self.settings);
+                    let res = self
+                        .backend
+                        .borrow_mut()
+                        .turn_page(-1, vw, vh, &self.settings);
                     return self.handle_page_turn_result(res);
                 } else {
-                    let res = self.backend.borrow_mut().turn_page(1, vw, vh, &self.settings);
+                    let res = self
+                        .backend
+                        .borrow_mut()
+                        .turn_page(1, vw, vh, &self.settings);
                     return self.handle_page_turn_result(res);
                 }
             }
@@ -704,10 +753,7 @@ impl Screen for ReaderScreen {
                     return self.open_footnote_or_link(&uri);
                 }
                 if let Some((word_text, _rect)) = self.find_word_at_pos(vx as f32, vy as f32) {
-                    let found = self
-                        .vocab_db
-                        .as_ref()
-                        .and_then(|db| db.lookup(&word_text));
+                    let found = self.vocab_db.as_ref().and_then(|db| db.lookup(&word_text));
                     if let Some(entry) = found {
                         return self.open_word_dialog(entry);
                     }
@@ -769,10 +815,7 @@ mod tests {
 
     #[test]
     fn bookmark_toggle_and_selection_anchor() {
-        let path = std::path::PathBuf::from(format!(
-            "/tmp/test_sel_{}.fb2",
-            std::process::id()
-        ));
+        let path = std::path::PathBuf::from(format!("/tmp/test_sel_{}.fb2", std::process::id()));
         let (w, h) = (1236, 1648);
         let mut screen = ReaderScreen::new(path, 0, w, h);
 
@@ -786,19 +829,15 @@ mod tests {
         assert!(screen.sel_mode);
 
         // In selection mode, a long-press on a word anchors a selection.
-        screen.page_words = vec![(
-            "hello".to_string(),
-            RectF::new(10.0, 10.0, 50.0, 30.0),
-        )];
+        screen.page_words = vec![("hello".to_string(), RectF::new(10.0, 10.0, 50.0, 30.0))];
         let act = screen.on_gesture(Gesture::LongPress { x: 20, y: 20 });
         assert!(matches!(act, Action::Redraw));
         assert!(screen.sel.is_some());
 
         // A drag extends the span to a second word.
-        screen.page_words.push((
-            "world".to_string(),
-            RectF::new(60.0, 10.0, 110.0, 30.0),
-        ));
+        screen
+            .page_words
+            .push(("world".to_string(), RectF::new(60.0, 10.0, 110.0, 30.0)));
         let act = screen.on_gesture(Gesture::Drag { x: 80, y: 20 });
         assert!(matches!(act, Action::Redraw));
         assert_eq!(screen.sel.as_ref().map(|s| s.end), Some(1));

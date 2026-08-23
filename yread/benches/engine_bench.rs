@@ -29,7 +29,13 @@ fn bench_pagination_and_rendering(c: &mut Criterion) {
     c.bench_function("paginate_chapter_warm_cache", |b| {
         let mut cache = ShapeCache::new();
         // Warm up cache
-        let _ = paginate_chapter(chapter, &config, &fonts, &mut cache, Some(hypher::Lang::English));
+        let _ = paginate_chapter(
+            chapter,
+            &config,
+            &fonts,
+            &mut cache,
+            Some(hypher::Lang::English),
+        );
         b.iter(|| {
             let (pt, layouts) = paginate_chapter(
                 black_box(chapter),
@@ -44,7 +50,13 @@ fn bench_pagination_and_rendering(c: &mut Criterion) {
 
     c.bench_function("render_page_grayscale", |b| {
         let mut cache = ShapeCache::new();
-        let (_pt, layouts) = paginate_chapter(chapter, &config, &fonts, &mut cache, Some(hypher::Lang::English));
+        let (_pt, layouts) = paginate_chapter(
+            chapter,
+            &config,
+            &fonts,
+            &mut cache,
+            Some(hypher::Lang::English),
+        );
         let mut raster = Rasterizer::new();
         let mut fb = vec![255u8; 1236 * 1648];
 

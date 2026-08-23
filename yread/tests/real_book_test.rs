@@ -12,7 +12,10 @@ use yread::shape::ShapeCache;
 fn test_render_real_sample_book() {
     let book_path = "/tmp/sample_book.epub";
     if !Path::new(book_path).exists() {
-        println!("Book not found at '{}', skipping real book test.", book_path);
+        println!(
+            "Book not found at '{}', skipping real book test.",
+            book_path
+        );
         return;
     }
 
@@ -35,13 +38,27 @@ fn test_render_real_sample_book() {
     println!("Chapters: {}", book.chapters.len());
     println!("TOC Entries: {}", book.toc.len());
     for (t_idx, entry) in book.toc.iter().enumerate().take(20) {
-        println!("  TOC #{}: '{:indent$}{}' (ch={}, char={})", t_idx, "", entry.title, entry.chapter_idx, entry.char_offset, indent = entry.level * 2);
+        println!(
+            "  TOC #{}: '{:indent$}{}' (ch={}, char={})",
+            t_idx,
+            "",
+            entry.title,
+            entry.chapter_idx,
+            entry.char_offset,
+            indent = entry.level * 2
+        );
     }
     println!("Total images: {}", book.images.len());
     println!("Total chars: {}", book.total_chars());
 
     for (idx, ch) in book.chapters.iter().enumerate().take(15) {
-        println!("  Chapter #{}: '{}' (blocks={}, chars={})", idx, ch.title, ch.blocks.len(), ch.char_count());
+        println!(
+            "  Chapter #{}: '{}' (blocks={}, chars={})",
+            idx,
+            ch.title,
+            ch.blocks.len(),
+            ch.char_count()
+        );
     }
 
     assert!(!book.chapters.is_empty(), "Book should have chapters");
@@ -77,7 +94,10 @@ fn test_render_real_sample_book() {
     );
     let paginate_time = t2.elapsed();
 
-    println!("=== Pagination Info for Chapter 7: '{}' ===", target_chap.title);
+    println!(
+        "=== Pagination Info for Chapter 7: '{}' ===",
+        target_chap.title
+    );
     println!("Chapter char count: {}", target_chap.char_count());
     println!("Chapter block count: {}", target_chap.blocks.len());
     println!("Pagination time (cold cache): {:?}", paginate_time);
@@ -89,7 +109,10 @@ fn test_render_real_sample_book() {
 
     // Find a page with an image
     let img_page_idx = layouts.iter().position(|layout| {
-        layout.elements.iter().any(|el| matches!(el, yread::paginate::PageElement::Image { .. }))
+        layout
+            .elements
+            .iter()
+            .any(|el| matches!(el, yread::paginate::PageElement::Image { .. }))
     });
 
     let mut pages_to_render = vec![0, 1];
@@ -105,42 +128,53 @@ fn test_render_real_sample_book() {
             continue;
         }
         let t3 = Instant::now();
-        raster.render_page(
-            &book,
-            &layouts[p],
-            &config,
-            &fonts,
-            &mut fb,
-            1236,
-        );
+        raster.render_page(&book, &layouts[p], &config, &fonts, &mut fb, 1236);
         let render_time = t3.elapsed();
 
         let dark_px = fb.iter().filter(|&&px| px < 128).count();
-        println!("Page {} render time: {:?}, dark pixels: {}, element count: {}", p, render_time, dark_px, layouts[p].elements.len());
+        println!(
+            "Page {} render time: {:?}, dark pixels: {}, element count: {}",
+            p,
+            render_time,
+            dark_px,
+            layouts[p].elements.len()
+        );
         for elem in &layouts[p].elements {
             match elem {
                 yread::paginate::PageElement::CircleBullet { x, y, radius } => {
-                    println!("  -> CircleBullet at x={:.1}, y={:.1}, r={:.1}", x, y, radius);
+                    println!(
+                        "  -> CircleBullet at x={:.1}, y={:.1}, r={:.1}",
+                        x, y, radius
+                    );
                 }
                 yread::paginate::PageElement::Bullet { x, y, size_pt, .. } => {
-                    println!("  -> TextBullet at x={:.1}, y={:.1}, size={:.1}", x, y, size_pt);
+                    println!(
+                        "  -> TextBullet at x={:.1}, y={:.1}, size={:.1}",
+                        x, y, size_pt
+                    );
                 }
                 yread::paginate::PageElement::QuoteBar { x, y0, y1 } => {
                     println!("  -> QuoteBar at x={:.1}, y0={:.1}, y1={:.1}", x, y0, y1);
                 }
-                    _ => {}
-                }
+                _ => {}
             }
         }
+    }
 
     // Search for "Data Structures That Power" across all chapters
     println!("\n=== Searching for 'Data Structures That Power' across all chapters ===");
     for (idx, ch) in book.chapters.iter().enumerate() {
         if let Some(pos) = ch.text.to_lowercase().find("data structures that power") {
-            println!("Found match in Chapter #{}: '{}' at char {}", idx, ch.title, pos);
+            println!(
+                "Found match in Chapter #{}: '{}' at char {}",
+                idx, ch.title, pos
+            );
             let snippet_start = pos.saturating_sub(50);
             let snippet_end = (pos + 100).min(ch.text.len());
-            println!("Context snippet:\n\"{}\"\n", &ch.text[snippet_start..snippet_end]);
+            println!(
+                "Context snippet:\n\"{}\"\n",
+                &ch.text[snippet_start..snippet_end]
+            );
 
             // Paginate this chapter and find which page it lands on
             let (pt, louts) = yread::paginate::paginate_chapter_with_images(
@@ -156,14 +190,7 @@ fn test_render_real_sample_book() {
 
             // Render that page to see how it looks
             let mut page_fb = vec![255u8; 1236 * 1648];
-            raster.render_page(
-                &book,
-                &louts[p_idx],
-                &config,
-                &fonts,
-                &mut page_fb,
-                1236,
-            );
+            raster.render_page(&book, &louts[p_idx], &config, &fonts, &mut page_fb, 1236);
             let out_p = format!("/tmp/outline_ch{}_page_{}.png", idx, p_idx);
             let img = image::GrayImage::from_raw(1236, 1648, page_fb).unwrap();
             img.save(&out_p).unwrap();
@@ -175,14 +202,22 @@ fn test_render_real_sample_book() {
                     let mut s = String::new();
                     for it in &line.items {
                         match it {
-                            yread::line::LineItem::Word { byte_start, byte_end, .. } => {
+                            yread::line::LineItem::Word {
+                                byte_start,
+                                byte_end,
+                                ..
+                            } => {
                                 if let Some(w) = ch.text.get(*byte_start..*byte_end) {
                                     s.push_str(w);
                                 }
                             }
                             yread::line::LineItem::Space { .. } => s.push(' '),
                             yread::line::LineItem::HardBreak => {}
-                            yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, .. } => {
+                            yread::line::LineItem::HyphenatedPrefix {
+                                byte_start,
+                                byte_end,
+                                ..
+                            } => {
                                 if let Some(w) = ch.text.get(*byte_start..*byte_end) {
                                     s.push_str(w);
                                     s.push('-');
@@ -191,15 +226,27 @@ fn test_render_real_sample_book() {
                         }
                     }
                     println!("  Line: \"{}\"", s);
-                    println!("  Line details: align={:?}, width={}, max_width={}", line.align, line.width, line.max_width);
+                    println!(
+                        "  Line details: align={:?}, width={}, max_width={}",
+                        line.align, line.width, line.max_width
+                    );
                     if false {
                         for it in &line.items {
                             match it {
-                                yread::line::LineItem::Word { byte_start, byte_end, shaped, style, .. } => {
+                                yread::line::LineItem::Word {
+                                    byte_start,
+                                    byte_end,
+                                    shaped,
+                                    style,
+                                    ..
+                                } => {
                                     let w = ch.text.get(*byte_start..*byte_end).unwrap_or("");
                                     println!("    Word '{}' (bytes {}..{}, adv={}, size_mult={}, font_style={:?})", w, byte_start, byte_end, shaped.advance, style.size_mult, style.font_style);
                                     for g in &shaped.glyphs {
-                                        println!("      glyph id={}, adv={}", g.glyph_id, g.x_advance);
+                                        println!(
+                                            "      glyph id={}, adv={}",
+                                            g.glyph_id, g.x_advance
+                                        );
                                     }
                                 }
                                 yread::line::LineItem::Space { adv, .. } => {

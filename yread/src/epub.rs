@@ -3,11 +3,11 @@
 //! Extracts metadata, spine reading order, and converts XHTML content documents
 //! directly into the `Book -> Chapter -> Block -> Run` model.
 
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::Reader;
 use zip::ZipArchive;
 
 use crate::model::{
@@ -49,7 +49,8 @@ impl<'a> EpubParser<Cursor<&'a [u8]>> {
 
 impl EpubParser<std::io::BufReader<std::fs::File>> {
     pub fn open(path: &Path) -> Result<Self, String> {
-        let file = std::fs::File::open(path).map_err(|e| format!("Cannot open EPUB '{}': {}", path.display(), e))?;
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("Cannot open EPUB '{}': {}", path.display(), e))?;
         Self::with_reader(std::io::BufReader::new(file))
     }
 
@@ -66,7 +67,8 @@ impl EpubParser<std::io::BufReader<std::fs::File>> {
 
 impl<R: Read + Seek> EpubParser<R> {
     pub fn with_reader(reader: R) -> Result<Self, String> {
-        let archive = ZipArchive::new(reader).map_err(|e| format!("Invalid EPUB zip archive: {:?}", e))?;
+        let archive =
+            ZipArchive::new(reader).map_err(|e| format!("Invalid EPUB zip archive: {:?}", e))?;
         Ok(Self {
             archive,
             root_dir: PathBuf::new(),
@@ -90,7 +92,11 @@ impl<R: Read + Seek> EpubParser<R> {
         let spine_ids = self.spine.clone();
         for id in &spine_ids {
             if let Some(item) = self.manifest.get(id).cloned() {
-                if item.media_type.contains("html") || item.media_type.contains("xml") || item.href.ends_with(".xhtml") || item.href.ends_with(".html") {
+                if item.media_type.contains("html")
+                    || item.media_type.contains("xml")
+                    || item.href.ends_with(".xhtml")
+                    || item.href.ends_with(".html")
+                {
                     self.parse_xhtml_item(&item.href)?;
                 }
             }
@@ -119,12 +125,18 @@ impl<R: Read + Seek + Send + 'static> EpubParser<R> {
         self.lazy_images = true;
         self.parse_common()?;
 
-        let EpubParser { archive, mut book, image_entries, .. } = self;
+        let EpubParser {
+            archive,
+            mut book,
+            image_entries,
+            ..
+        } = self;
         let entries: HashMap<String, String> = image_entries.into_iter().collect();
         let reader = archive.into_inner();
         let boxed = Box::new(reader) as Box<dyn crate::model::ImageSource>;
         let archive = ZipArchive::new(boxed).map_err(|e| format!("Re-open archive: {:?}", e))?;
-        book.lazy_images = std::sync::Arc::new(crate::model::LazyImages::from_archive(archive, entries));
+        book.lazy_images =
+            std::sync::Arc::new(crate::model::LazyImages::from_archive(archive, entries));
         Ok(book)
     }
 }
@@ -248,7 +260,13 @@ impl<R: Read + Seek> EpubParser<R> {
                             } else {
                                 self.root_dir.join(href).to_string_lossy().to_string()
                             };
-                            self.manifest.insert(id, ManifestItem { href: full_href, media_type });
+                            self.manifest.insert(
+                                id,
+                                ManifestItem {
+                                    href: full_href,
+                                    media_type,
+                                },
+                            );
                         }
                     } else if name == "itemref" {
                         for attr in e.attributes().flatten() {
@@ -327,7 +345,9 @@ impl<R: Read + Seek> EpubParser<R> {
                         let k = attr.key.as_ref();
                         if k.eq_ignore_ascii_case(b"id") || k.eq_ignore_ascii_case(b"name") {
                             if let Ok(id_val) = std::str::from_utf8(&attr.value) {
-                                chapter.anchors.insert(id_val.to_string(), current_char_count);
+                                chapter
+                                    .anchors
+                                    .insert(id_val.to_string(), current_char_count);
                             }
                         }
                     }
@@ -352,7 +372,9 @@ impl<R: Read + Seek> EpubParser<R> {
                         push_capped(&mut list_stack, ListType::Unordered, MAX_NEST_DEPTH);
                     } else if n.eq_ignore_ascii_case(b"ol") {
                         push_capped(&mut list_stack, ListType::Ordered(1), MAX_NEST_DEPTH);
-                    } else if n.eq_ignore_ascii_case(b"blockquote") || n.eq_ignore_ascii_case(b"aside") {
+                    } else if n.eq_ignore_ascii_case(b"blockquote")
+                        || n.eq_ignore_ascii_case(b"aside")
+                    {
                         in_blockquote = true;
                     } else if n.eq_ignore_ascii_case(b"figure") {
                         in_figure = true;
@@ -368,7 +390,11 @@ impl<R: Read + Seek> EpubParser<R> {
                                     s
                                 }
                                 ListType::Unordered => {
-                                    if level > 1 { "– ".to_string() } else { "• ".to_string() }
+                                    if level > 1 {
+                                        "– ".to_string()
+                                    } else {
+                                        "• ".to_string()
+                                    }
                                 }
                             }
                         } else {
@@ -409,9 +435,17 @@ impl<R: Read + Seek> EpubParser<R> {
                             cur_margin_em = 0.0;
                             cur_is_quote = false;
                         }
-                        block_align = parse_align_from_attrs(e).unwrap_or(if in_li { TextAlign::Left } else { TextAlign::Justify });
+                        block_align = parse_align_from_attrs(e).unwrap_or(if in_li {
+                            TextAlign::Left
+                        } else {
+                            TextAlign::Justify
+                        });
                         current_style.align = block_align;
-                    } else if n.len() == 2 && n[0].to_ascii_lowercase() == b'h' && (n[1] >= b'1' && n[1] <= b'6') || n.eq_ignore_ascii_case(b"figcaption") {
+                    } else if n.len() == 2
+                        && n[0].to_ascii_lowercase() == b'h'
+                        && (n[1] >= b'1' && n[1] <= b'6')
+                        || n.eq_ignore_ascii_case(b"figcaption")
+                    {
                         current_runs.clear();
                         in_block = true;
                         heading_level = if n.eq_ignore_ascii_case(b"figcaption") {
@@ -420,7 +454,11 @@ impl<R: Read + Seek> EpubParser<R> {
                             n[1] - b'0'
                         };
                         current_style = Style::default();
-                        current_style.font_style = if in_figure || heading_level == 6 { FontStyle::Italic } else { FontStyle::Bold };
+                        current_style.font_style = if in_figure || heading_level == 6 {
+                            FontStyle::Italic
+                        } else {
+                            FontStyle::Bold
+                        };
                         current_style.size_mult = if in_figure || heading_level == 6 {
                             0.85
                         } else {
@@ -464,8 +502,13 @@ impl<R: Read + Seek> EpubParser<R> {
                             if let Ok(v) = std::str::from_utf8(&attr.value) {
                                 if k.eq_ignore_ascii_case(b"href") || k.ends_with(b"href") {
                                     target_href = Some(v.to_string());
-                                } else if (k.eq_ignore_ascii_case(b"epub:type") || k.eq_ignore_ascii_case(b"type") || k.eq_ignore_ascii_case(b"class") || k.eq_ignore_ascii_case(b"rel"))
-                                    && (v.contains("noteref") || v.contains("footnote") || v.contains("note"))
+                                } else if (k.eq_ignore_ascii_case(b"epub:type")
+                                    || k.eq_ignore_ascii_case(b"type")
+                                    || k.eq_ignore_ascii_case(b"class")
+                                    || k.eq_ignore_ascii_case(b"rel"))
+                                    && (v.contains("noteref")
+                                        || v.contains("footnote")
+                                        || v.contains("note"))
                                 {
                                     is_note_ref = true;
                                 }
@@ -506,12 +549,15 @@ impl<R: Read + Seek> EpubParser<R> {
                     let n = name.as_ref();
                     if n.eq_ignore_ascii_case(b"title") {
                         in_title_tag = false;
-                        if !title_tag_buf.trim().is_empty() && chapter.title.starts_with("Chapter ") {
+                        if !title_tag_buf.trim().is_empty() && chapter.title.starts_with("Chapter ")
+                        {
                             chapter.title = title_tag_buf.trim().to_string();
                         }
                     } else if n.eq_ignore_ascii_case(b"ul") || n.eq_ignore_ascii_case(b"ol") {
                         list_stack.pop();
-                    } else if n.eq_ignore_ascii_case(b"blockquote") || n.eq_ignore_ascii_case(b"aside") {
+                    } else if n.eq_ignore_ascii_case(b"blockquote")
+                        || n.eq_ignore_ascii_case(b"aside")
+                    {
                         in_blockquote = false;
                     } else if n.eq_ignore_ascii_case(b"figure") {
                         in_figure = false;
@@ -549,12 +595,22 @@ impl<R: Read + Seek> EpubParser<R> {
                                 is_quote: cur_is_quote,
                             });
                         }
-                    } else if n.len() == 2 && n[0].to_ascii_lowercase() == b'h' && (n[1] >= b'1' && n[1] <= b'6') || n.eq_ignore_ascii_case(b"figcaption") {
+                    } else if n.len() == 2
+                        && n[0].to_ascii_lowercase() == b'h'
+                        && (n[1] >= b'1' && n[1] <= b'6')
+                        || n.eq_ignore_ascii_case(b"figcaption")
+                    {
                         in_block = false;
                         if !current_runs.is_empty() {
                             let runs = std::mem::take(&mut current_runs);
-                            let h_text: String = runs.iter().filter_map(|r| chapter.text.get(r.start..r.end)).collect();
-                            if !h_text.trim().is_empty() && chapter.title.starts_with("Chapter ") && heading_level <= 2 {
+                            let h_text: String = runs
+                                .iter()
+                                .filter_map(|r| chapter.text.get(r.start..r.end))
+                                .collect();
+                            if !h_text.trim().is_empty()
+                                && chapter.title.starts_with("Chapter ")
+                                && heading_level <= 2
+                            {
                                 chapter.title = h_text.trim().to_string();
                             }
                             chapter.blocks.push(Block::Heading {
@@ -676,7 +732,9 @@ impl<R: Read + Seek> EpubParser<R> {
         let mut stack: Vec<NavPointFrame> = Vec::new();
         let mut entries: Vec<crate::model::TocEntry> = Vec::new();
 
-        let emit_frame = |frame: &mut NavPointFrame, chapters: &[crate::model::Chapter], out: &mut Vec<crate::model::TocEntry>| {
+        let emit_frame = |frame: &mut NavPointFrame,
+                          chapters: &[crate::model::Chapter],
+                          out: &mut Vec<crate::model::TocEntry>| {
             if frame.emitted || frame.title.is_empty() {
                 return;
             }
@@ -688,10 +746,17 @@ impl<R: Read + Seek> EpubParser<R> {
             let anchor = src_parts.get(1).copied().unwrap_or("");
 
             // Match chapter by href filename
-            let target_fname = Path::new(file_target).file_name().and_then(|n| n.to_str()).unwrap_or(file_target);
+            let target_fname = Path::new(file_target)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(file_target);
             let matched_ch_idx = chapters.iter().position(|c| {
-                let ch_fname = Path::new(&c.href).file_name().and_then(|n| n.to_str()).unwrap_or(&c.href);
-                ch_fname.eq_ignore_ascii_case(target_fname) || c.href.eq_ignore_ascii_case(file_target)
+                let ch_fname = Path::new(&c.href)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&c.href);
+                ch_fname.eq_ignore_ascii_case(target_fname)
+                    || c.href.eq_ignore_ascii_case(file_target)
             });
 
             if let Some(ch_idx) = matched_ch_idx {
@@ -883,10 +948,18 @@ fn parse_align_from_attrs(e: &BytesStart) -> Option<TextAlign> {
         let v = String::from_utf8_lossy(&attr.value).to_lowercase();
         if k == "align" {
             let v_trim = v.trim();
-            if v_trim == "center" { return Some(TextAlign::Center); }
-            if v_trim == "right" { return Some(TextAlign::Right); }
-            if v_trim == "justify" { return Some(TextAlign::Justify); }
-            if v_trim == "left" { return Some(TextAlign::Left); }
+            if v_trim == "center" {
+                return Some(TextAlign::Center);
+            }
+            if v_trim == "right" {
+                return Some(TextAlign::Right);
+            }
+            if v_trim == "justify" {
+                return Some(TextAlign::Justify);
+            }
+            if v_trim == "left" {
+                return Some(TextAlign::Left);
+            }
         } else if k == "style" {
             for part in v.split(';') {
                 let kv: Vec<&str> = part.split(':').map(|s| s.trim()).collect();

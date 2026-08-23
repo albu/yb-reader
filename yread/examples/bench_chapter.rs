@@ -5,12 +5,19 @@ use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = args.get(1).map(|s| s.as_str()).unwrap_or("/tmp/sample_book.epub");
+    let path = args
+        .get(1)
+        .map(|s| s.as_str())
+        .unwrap_or("/tmp/sample_book.epub");
     let ch_idx: usize = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(12);
 
     let t0 = Instant::now();
     let book = yread::epub::parse_epub_file(std::path::Path::new(path)).expect("parse");
-    println!("parse: {:?} ({} chapters)", t0.elapsed(), book.chapters.len());
+    println!(
+        "parse: {:?} ({} chapters)",
+        t0.elapsed(),
+        book.chapters.len()
+    );
 
     // Find the biggest chapter for reference
     let (biggest, big_len) = book
@@ -37,7 +44,10 @@ fn main() {
         page_height: 1648,
         margin_left: 72,
         margin_right: 72,
-        margin_top: std::env::var("MT").ok().and_then(|v| v.parse().ok()).unwrap_or(72 + 92),
+        margin_top: std::env::var("MT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(72 + 92),
         margin_bottom: 72 + 50,
         font_size: 9.0,
         line_spacing: 1.2,
@@ -100,15 +110,32 @@ fn main() {
                     let mut has_prefix = false;
                     for item in &line.items {
                         match item {
-                            yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, .. } => {
+                            yread::line::LineItem::HyphenatedPrefix {
+                                byte_start,
+                                byte_end,
+                                ..
+                            } => {
                                 has_prefix = true;
                                 let w = &ch.text[*byte_start..*byte_end];
-                                if w.contains("switch") { println!("p{} PREFIX {:?} (line ends, next line starts with rest)", pi, w); }
+                                if w.contains("switch") {
+                                    println!(
+                                        "p{} PREFIX {:?} (line ends, next line starts with rest)",
+                                        pi, w
+                                    );
+                                }
                             }
-                            yread::line::LineItem::Word { byte_start, byte_end, .. } => {
+                            yread::line::LineItem::Word {
+                                byte_start,
+                                byte_end,
+                                ..
+                            } => {
                                 let w = &ch.text[*byte_start..*byte_end];
-                                if w.contains("switch") { println!("p{} WORD   {:?}", pi, w); }
-                                if has_prefix && (w == "es" || w == "es," || w.len() <= 4) { frags += 1; }
+                                if w.contains("switch") {
+                                    println!("p{} WORD   {:?}", pi, w);
+                                }
+                                if has_prefix && (w == "es" || w == "es," || w.len() <= 4) {
+                                    frags += 1;
+                                }
                                 has_prefix = false;
                             }
                             _ => {}
@@ -127,16 +154,28 @@ fn main() {
         let mut c3 = yread::shape::ShapeCache::new();
         let ta = Instant::now();
         let _ = yread::paginate::paginate_chapter_with_images(
-            ch, Some(&book.image_sizes), &cfg_noh, &fonts, &mut c3,
+            ch,
+            Some(&book.image_sizes),
+            &cfg_noh,
+            &fonts,
+            &mut c3,
             None,
         );
         let cold_noh = ta.elapsed();
         let tb = Instant::now();
         let _ = yread::paginate::paginate_chapter_with_images(
-            ch, Some(&book.image_sizes), &cfg_noh, &fonts, &mut c3,
+            ch,
+            Some(&book.image_sizes),
+            &cfg_noh,
+            &fonts,
+            &mut c3,
             None,
         );
-        println!("NO-HYPHENATE cold: {:?}  warm: {:?}", cold_noh, tb.elapsed());
+        println!(
+            "NO-HYPHENATE cold: {:?}  warm: {:?}",
+            cold_noh,
+            tb.elapsed()
+        );
     }
 
     let t3 = Instant::now();
@@ -144,10 +183,18 @@ fn main() {
     while t3.elapsed().as_secs_f64() < 3.0 {
         let mut c2 = yread::shape::ShapeCache::new();
         let _ = yread::paginate::paginate_chapter_with_images(
-            ch, Some(&book.image_sizes), &cfg, &fonts, &mut c2,
+            ch,
+            Some(&book.image_sizes),
+            &cfg,
+            &fonts,
+            &mut c2,
             Some(yread::paginate_bench_lang(&book.meta.language)),
         );
         n += 1;
     }
-    println!("profiling loop: {} cold iterations in {:?}", n, t3.elapsed());
+    println!(
+        "profiling loop: {} cold iterations in {:?}",
+        n,
+        t3.elapsed()
+    );
 }

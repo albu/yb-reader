@@ -332,7 +332,11 @@ impl Book {
         let stripped_anchor = uri_clean.trim_start_matches('#');
 
         // 1. Direct lookup in book.footnotes (FB2 notes body / embedded notes)
-        if let Some(text) = self.footnotes.get(stripped_anchor).or_else(|| self.footnotes.get(uri_clean)) {
+        if let Some(text) = self
+            .footnotes
+            .get(stripped_anchor)
+            .or_else(|| self.footnotes.get(uri_clean))
+        {
             let title = if stripped_anchor.is_empty() {
                 "Footnote".to_string()
             } else {
@@ -388,7 +392,8 @@ impl Book {
                     .file_name()
                     .and_then(|f| f.to_str())
                     .unwrap_or(&c.href);
-                ch_fname.eq_ignore_ascii_case(target_fname) || c.href.eq_ignore_ascii_case(file_part)
+                ch_fname.eq_ignore_ascii_case(target_fname)
+                    || c.href.eq_ignore_ascii_case(file_part)
             });
 
             if let Some(target_idx) = matched_idx {
@@ -415,7 +420,11 @@ impl Book {
         }
 
         // 3. Fallback: if stripped_anchor matches any chapter anchor
-        if let Some(anchor) = anchor_part.or(if !stripped_anchor.is_empty() { Some(stripped_anchor) } else { None }) {
+        if let Some(anchor) = anchor_part.or(if !stripped_anchor.is_empty() {
+            Some(stripped_anchor)
+        } else {
+            None
+        }) {
             for (idx, ch) in self.chapters.iter().enumerate() {
                 if let Some(&char_off) = ch.anchors.get(anchor) {
                     let text = extract_snippet_at(&ch.text, char_off);
@@ -437,7 +446,9 @@ impl Book {
 
     /// Register an image and record its true pixel dimensions.
     pub fn add_image(&mut self, id: String, bytes: Vec<u8>) {
-        if let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
+        if let Ok(reader) =
+            image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format()
+        {
             if let Ok((w, h)) = reader.into_dimensions() {
                 self.image_sizes.insert(id.clone(), (w, h));
             }
@@ -466,7 +477,11 @@ impl Book {
 }
 
 fn extract_snippet_at(text: &str, char_offset: usize) -> String {
-    let byte_start = text.char_indices().nth(char_offset).map(|(b, _)| b).unwrap_or(0);
+    let byte_start = text
+        .char_indices()
+        .nth(char_offset)
+        .map(|(b, _)| b)
+        .unwrap_or(0);
     let slice = &text[byte_start..];
     let max_chars = 1500;
     let snippet: String = slice.chars().take(max_chars).collect();
@@ -521,10 +536,7 @@ impl ChapterPageTable {
 
     /// Get the starting char offset for a given page index.
     pub fn char_for_page(&self, page_idx: usize) -> usize {
-        self.pages
-            .get(page_idx)
-            .map(|p| p.char_offset)
-            .unwrap_or(0)
+        self.pages.get(page_idx).map(|p| p.char_offset).unwrap_or(0)
     }
 }
 
@@ -562,13 +574,33 @@ mod tests {
     fn page_for_char_handles_duplicate_start_offsets() {
         let table = ChapterPageTable {
             pages: vec![
-                PageBreak { block_idx: 0, byte_offset: 0, char_offset: 0 },
-                PageBreak { block_idx: 0, byte_offset: 10, char_offset: 10 },
+                PageBreak {
+                    block_idx: 0,
+                    byte_offset: 0,
+                    char_offset: 0,
+                },
+                PageBreak {
+                    block_idx: 0,
+                    byte_offset: 10,
+                    char_offset: 10,
+                },
                 // Image pages: starts all sentinel-resolve to 10.
-                PageBreak { block_idx: 1, byte_offset: 10, char_offset: 10 },
-                PageBreak { block_idx: 1, byte_offset: 10, char_offset: 10 },
+                PageBreak {
+                    block_idx: 1,
+                    byte_offset: 10,
+                    char_offset: 10,
+                },
+                PageBreak {
+                    block_idx: 1,
+                    byte_offset: 10,
+                    char_offset: 10,
+                },
                 // Text resumes on the page after the image run.
-                PageBreak { block_idx: 2, byte_offset: 20, char_offset: 20 },
+                PageBreak {
+                    block_idx: 2,
+                    byte_offset: 20,
+                    char_offset: 20,
+                },
             ],
         };
 

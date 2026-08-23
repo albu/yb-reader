@@ -1,7 +1,7 @@
+use mupdf::Document;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
-use mupdf::Document;
 use yui::screen::Action;
 
 use crate::backend::{PageTurnResult, ReaderBackend, RenderOutput};
@@ -28,17 +28,17 @@ pub struct PdfBackend {
 }
 
 impl PdfBackend {
-    pub fn new(
-        path: PathBuf,
-        resume_page: usize,
-        resume_sub: usize,
-    ) -> Self {
+    pub fn new(path: PathBuf, resume_page: usize, resume_sub: usize) -> Self {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let pos = positions::resume_pos(&name);
-        let sub_idx = if pos.page == resume_page { resume_sub } else { 0 };
+        let sub_idx = if pos.page == resume_page {
+            resume_sub
+        } else {
+            0
+        };
 
         let rx = doc_store::open_async(path.clone());
 
@@ -147,7 +147,13 @@ impl ReaderBackend for PdfBackend {
         }
     }
 
-    fn turn_page(&mut self, delta: i32, _vw: u32, _vh: u32, settings: &ReaderSettings) -> PageTurnResult {
+    fn turn_page(
+        &mut self,
+        delta: i32,
+        _vw: u32,
+        _vh: u32,
+        settings: &ReaderSettings,
+    ) -> PageTurnResult {
         if self.doc.is_none() {
             self.queued_turns += delta;
             return PageTurnResult::Queued;
@@ -216,7 +222,8 @@ impl ReaderBackend for PdfBackend {
 
         if let Ok(p) = doc.load_page(self.page_no as i32) {
             if let Ok(bounds) = p.bounds() {
-                if let Some(geom) = render::LayoutGeom::new(settings, bounds, self.sub_idx, vw, vh) {
+                if let Some(geom) = render::LayoutGeom::new(settings, bounds, self.sub_idx, vw, vh)
+                {
                     if let Ok(tp) = p.to_text_page(mupdf::TextPageFlags::empty()) {
                         words = render::words_from_text_page(&tp, &geom);
                     }
@@ -277,7 +284,9 @@ impl ReaderBackend for PdfBackend {
     ) -> Action {
         if let Some(doc) = &self.doc {
             if let Ok(outlines) = doc.outlines() {
-                return dialogs::toc_dialog(&outlines, cur_page, back, path_name, self.total, settings);
+                return dialogs::toc_dialog(
+                    &outlines, cur_page, back, path_name, self.total, settings,
+                );
             }
         }
         Action::Keep
@@ -294,20 +303,33 @@ impl ReaderBackend for PdfBackend {
         h: u32,
     ) -> Action {
         if let Some(doc) = &self.doc {
-            dialogs::scrubber_dialog(doc, cur_page, self.total, bg, back, path_name, settings, w, h)
+            dialogs::scrubber_dialog(
+                doc, cur_page, self.total, bg, back, path_name, settings, w, h,
+            )
         } else {
             Action::Keep
         }
     }
 
-    fn apply_settings_change(&mut self, _old: &ReaderSettings, _new: &ReaderSettings, _vw: u32, _vh: u32) -> bool {
+    fn apply_settings_change(
+        &mut self,
+        _old: &ReaderSettings,
+        _new: &ReaderSettings,
+        _vw: u32,
+        _vh: u32,
+    ) -> bool {
         true
     }
 
-    fn interactive_preview(&mut self, settings: &ReaderSettings, vw: u32, vh: u32) -> Option<Vec<u8>> {
-        self.doc.as_ref().and_then(|doc| {
-            render_page(doc.as_ref(), self.page_no, self.sub_idx, settings, vw, vh)
-        })
+    fn interactive_preview(
+        &mut self,
+        settings: &ReaderSettings,
+        vw: u32,
+        vh: u32,
+    ) -> Option<Vec<u8>> {
+        self.doc
+            .as_ref()
+            .and_then(|doc| render_page(doc.as_ref(), self.page_no, self.sub_idx, settings, vw, vh))
     }
 }
 

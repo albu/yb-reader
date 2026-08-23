@@ -86,13 +86,37 @@ pub fn draw_selection(p: &mut Painter, sel: &SelState, words: &[(String, RectF)]
         .map(|(w, _)| w.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    let trunc = p.truncate(8.0, &text, (ok_btn.x - bar.x - pt(24.0)) as f32 / pt(1.0) as f32);
+    let trunc = p.truncate(
+        8.0,
+        &text,
+        (ok_btn.x - bar.x - pt(24.0)) as f32 / pt(1.0) as f32,
+    );
     p.text(bar.x + pt(12.0), bar.y + pt(19.0), 8.0, 0, &trunc);
-    p.text(bar.x + pt(12.0), bar.y + pt(37.0), 6.5, 130, "tap: end · hold: start");
+    p.text(
+        bar.x + pt(12.0),
+        bar.y + pt(37.0),
+        6.5,
+        130,
+        "tap: end · hold: start",
+    );
     p.rect(ok_btn, 0);
-    p.text_center_in(ok_btn.x, ok_btn.x + ok_btn.w, ok_btn.y + pt(21.0), 9.0, 255, "Save");
+    p.text_center_in(
+        ok_btn.x,
+        ok_btn.x + ok_btn.w,
+        ok_btn.y + pt(21.0),
+        9.0,
+        255,
+        "Save",
+    );
     p.rect_outline_t(x_btn, 2, 100);
-    p.text_center_in(x_btn.x, x_btn.x + x_btn.w, x_btn.y + pt(21.0), 9.0, 50, "Cancel");
+    p.text_center_in(
+        x_btn.x,
+        x_btn.x + x_btn.w,
+        x_btn.y + pt(21.0),
+        9.0,
+        50,
+        "Cancel",
+    );
 }
 
 #[cfg(test)]

@@ -83,7 +83,6 @@ fn str_to_preset(s: &str) -> SplitPreset {
     }
 }
 
-
 fn contrast_to_str(c: ContrastMode) -> &'static str {
     match c {
         ContrastMode::Normal => "norm",

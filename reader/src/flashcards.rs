@@ -75,7 +75,8 @@ impl Flashcard {
                 } else {
                     self.ease_factor
                 };
-                self.interval_days = ((self.interval_days as f32 * factor).round() as u32).max(self.interval_days + 1);
+                self.interval_days = ((self.interval_days as f32 * factor).round() as u32)
+                    .max(self.interval_days + 1);
             }
             self.repetitions += 1;
         }
@@ -140,14 +141,18 @@ impl FlashcardDeck {
         for c in self.cards.values() {
             buf.push_str(&format!(
                 "{}\t{}\t{}\t{:.2}\t{}\t{}\n",
-                c.word, c.repetitions, c.interval_days, c.ease_factor, c.due_timestamp, c.last_reviewed
+                c.word,
+                c.repetitions,
+                c.interval_days,
+                c.ease_factor,
+                c.due_timestamp,
+                c.last_reviewed
             ));
         }
         // Atomic + fsync'd swap (ybdev::atomic): truncation here would
         // reset every card.
         let _ = ybdev::atomic::write(FLASHCARDS_PATH, buf.as_bytes());
     }
-
 
     pub fn add_word(&mut self, word: &str) {
         let w = word.to_lowercase();
@@ -159,12 +164,19 @@ impl FlashcardDeck {
 
     pub fn due_count(&self) -> usize {
         let now = now_secs();
-        self.cards.values().filter(|c| c.due_timestamp <= now).count()
+        self.cards
+            .values()
+            .filter(|c| c.due_timestamp <= now)
+            .count()
     }
 
     pub fn due_words(&self) -> Vec<String> {
         let now = now_secs();
-        let mut due: Vec<&Flashcard> = self.cards.values().filter(|c| c.due_timestamp <= now).collect();
+        let mut due: Vec<&Flashcard> = self
+            .cards
+            .values()
+            .filter(|c| c.due_timestamp <= now)
+            .collect();
         due.sort_by_key(|c| c.due_timestamp);
         due.into_iter().map(|c| c.word.clone()).collect()
     }
@@ -205,9 +217,9 @@ impl FlashcardsScreen {
             due_queue = deck.all_words();
         }
 
-        let first_entry = due_queue.first().and_then(|w| {
-            vocab_db.as_ref().and_then(|db| db.lookup(w))
-        });
+        let first_entry = due_queue
+            .first()
+            .and_then(|w| vocab_db.as_ref().and_then(|db| db.lookup(w)));
 
         FlashcardsScreen {
             deck,
@@ -256,8 +268,8 @@ impl Screen for FlashcardsScreen {
         p.hline_t(bar_h, 0, w, 1, 200);
 
         // Title + Progress
-        p.text(pt(16.0), pt(24.0), 10.0, 0, "🗂 Flashcards");
-        
+        p.text(pt(16.0), pt(24.0), 10.0, 0, "Flashcards");
+
         let total = self.due_queue.len();
         if total > 0 && self.current_idx < total {
             let prog = format!("Card {} of {}", self.current_idx + 1, total);
@@ -271,7 +283,14 @@ impl Screen for FlashcardsScreen {
         let close_y = pt(8.0);
         let close_rect = Rect::new(close_x, close_y, close_w, close_h);
         p.rect_outline_t(close_rect, 1, 100);
-        p.text_center_in(close_x, close_x + close_w, close_y + pt(16.0), 8.5, 0, "Close");
+        p.text_center_in(
+            close_x,
+            close_x + close_w,
+            close_y + pt(16.0),
+            8.5,
+            0,
+            "Close",
+        );
 
         // Finished State
         if self.current_idx >= self.due_queue.len() || self.due_queue.is_empty() {
@@ -284,9 +303,13 @@ impl Screen for FlashcardsScreen {
             p.rect(card_rect, 255);
             p.rect_outline_t(card_rect, 2, 0);
 
-            p.text_center(card_y + pt(45.0), 16.0, 0, "🎉 All Caught Up!");
-            
-            let stat_msg = format!("Reviewed {} words today · Total in deck: {}", self.reviewed_count, self.deck.cards.len());
+            p.text_center(card_y + pt(45.0), 16.0, 0, "All Caught Up!");
+
+            let stat_msg = format!(
+                "Reviewed {} words today · Total in deck: {}",
+                self.reviewed_count,
+                self.deck.cards.len()
+            );
             p.text_center(card_y + pt(75.0), 10.0, 80, &stat_msg);
 
             // Button: Return to Library
@@ -297,7 +320,14 @@ impl Screen for FlashcardsScreen {
             let btn_rect = Rect::new(btn_x, btn_y, btn_w, btn_h);
 
             p.rect(btn_rect, 0);
-            p.text_center_in(btn_x, btn_x + btn_w, btn_y + pt(22.0), 10.0, 255, "Return to Library");
+            p.text_center_in(
+                btn_x,
+                btn_x + btn_w,
+                btn_y + pt(22.0),
+                10.0,
+                255,
+                "Return to Library",
+            );
             return;
         }
 
@@ -313,19 +343,28 @@ impl Screen for FlashcardsScreen {
 
         let cur_word = &self.due_queue[self.current_idx];
         let entry = self.current_entry.as_ref();
-        let cefr_badge = entry.map(|e| format!("{} · lvl {}", e.cefr_str(), e.difficulty)).unwrap_or_else(|| "Vocab".to_string());
+        let cefr_badge = entry
+            .map(|e| format!("{} · lvl {}", e.cefr_str(), e.difficulty))
+            .unwrap_or_else(|| "Vocab".to_string());
 
         match self.side {
             CardSide::Front => {
                 // Front Side: Large Word + CEFR Badge + Tap Hint
                 let mid_y = card_y + card_h / 2;
                 p.text_center(mid_y - pt(25.0), 22.0, 0, cur_word);
-                
+
                 let badge_w = pt(70.0);
                 let badge_x = (w - badge_w) / 2;
                 let badge_y = mid_y + pt(5.0);
                 p.rect(Rect::new(badge_x, badge_y, badge_w, pt(18.0)), 240);
-                p.text_center_in(badge_x, badge_x + badge_w, badge_y + pt(13.0), 8.5, 60, &cefr_badge);
+                p.text_center_in(
+                    badge_x,
+                    badge_x + badge_w,
+                    badge_y + pt(13.0),
+                    8.5,
+                    60,
+                    &cefr_badge,
+                );
 
                 p.text_center(card_y + card_h - pt(30.0), 9.0, 120, "Tap card to flip");
             }
@@ -333,7 +372,13 @@ impl Screen for FlashcardsScreen {
                 // Back Side: Word + Russian Translation + English Definition
                 let mut top_y = card_y + pt(30.0);
                 p.text(card_x + pt(20.0), top_y, 16.0, 0, cur_word);
-                p.text_right(card_x + card_w - pt(20.0), top_y - pt(2.0), 8.5, 90, &cefr_badge);
+                p.text_right(
+                    card_x + card_w - pt(20.0),
+                    top_y - pt(2.0),
+                    8.5,
+                    90,
+                    &cefr_badge,
+                );
                 top_y += pt(10.0);
                 p.hline_t(top_y, card_x + pt(18.0), card_x + card_w - pt(18.0), 1, 220);
 
@@ -354,7 +399,11 @@ impl Screen for FlashcardsScreen {
                         let max_w = (card_w - pt(40.0)) as f32;
                         let mut cur_line = String::new();
                         for word in e.gloss_en.split_whitespace() {
-                            let test = if cur_line.is_empty() { word.to_string() } else { format!("{} {}", cur_line, word) };
+                            let test = if cur_line.is_empty() {
+                                word.to_string()
+                            } else {
+                                format!("{} {}", cur_line, word)
+                            };
                             if p.text_width(10.0, &test) > max_w {
                                 if !cur_line.is_empty() {
                                     p.text(card_x + pt(20.0), top_y, 10.0, 30, &cur_line);
@@ -381,12 +430,11 @@ impl Screen for FlashcardsScreen {
                 // grade — SM-2 derives them from repetitions and ease, so
                 // any fixed table would lie.
                 let names = ["1. Again", "2. Hard", "3. Good", "4. Easy"];
-                let intervals: [String; 4] = std::array::from_fn(|i| {
-                    match self.deck.cards.get(cur_word.as_str()) {
+                let intervals: [String; 4] =
+                    std::array::from_fn(|i| match self.deck.cards.get(cur_word.as_str()) {
                         Some(card) => format!("{}d", card.preview_interval(i as u8)),
                         None => "1d".to_string(),
-                    }
-                });
+                    });
 
                 for i in 0..4 {
                     let label = names[i];
@@ -447,7 +495,6 @@ impl Screen for FlashcardsScreen {
                     }
                     return Action::Keep;
                 }
-
 
                 // Active Card interaction
                 if self.side == CardSide::Front {

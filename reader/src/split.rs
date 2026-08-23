@@ -27,7 +27,6 @@ impl SplitPreset {
             SplitPreset::Grid4 => "4-Grid Landscape (2x2)",
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,7 +46,6 @@ impl Default for ContrastMode {
 impl ContrastMode {
     #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
-
         match self {
             ContrastMode::Normal => "Normal",
             ContrastMode::BoldText => "Bold / Darkened",
@@ -121,7 +119,7 @@ impl SplitConfig {
             },
             SplitPreset::Horizontal2 => Self {
                 preset: SplitPreset::Horizontal2,
-                rotation: 270, // Landscape default
+                rotation: 270,  // Landscape default
                 overlap: 0.018, // minimal overlap to recover partially cut line
                 margin_left: 0.02,
                 margin_top: 0.02,
@@ -130,7 +128,7 @@ impl SplitConfig {
             },
             SplitPreset::Horizontal3 => Self {
                 preset: SplitPreset::Horizontal3,
-                rotation: 270, // Landscape default
+                rotation: 270,  // Landscape default
                 overlap: 0.018, // minimal overlap
                 margin_left: 0.02,
                 margin_top: 0.02,
@@ -373,10 +371,7 @@ impl ReaderSettings {
 
     /// Apply contrast LUT in-place over grayscale buffer (blazing fast: < 1ms on 2MB buffer).
     pub fn apply_lut(&self, buf: &mut [u8]) {
-        if self.contrast == ContrastMode::Normal
-            && self.white_cutoff == 0
-            && !self.invert
-        {
+        if self.contrast == ContrastMode::Normal && self.white_cutoff == 0 && !self.invert {
             return;
         }
         let lut = self.build_lut();

@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
-use yui::screen::Action;
 use ybdev::log::plog;
+use yui::screen::Action;
 
 use crate::backend::{PageTurnResult, ReaderBackend, RenderOutput};
 use crate::dialogs;
-use crate::split::{RectF, ReaderSettings};
+use crate::split::{ReaderSettings, RectF};
 
 pub struct YreadBackend {
     path: PathBuf,
@@ -19,7 +19,13 @@ pub struct YreadBackend {
     yraster: yread::raster::Rasterizer,
     ychap_idx: usize,
     ychap_page: usize,
-    ychap_cache: HashMap<usize, (yread::model::ChapterPageTable, Vec<yread::paginate::PageLayout>)>,
+    ychap_cache: HashMap<
+        usize,
+        (
+            yread::model::ChapterPageTable,
+            Vec<yread::paginate::PageLayout>,
+        ),
+    >,
     ychap_offsets: Vec<usize>,
     /// Per-chapter char counts + book total, counted ONCE at open —
     /// footer progress and page-offset estimation used to re-scan the
@@ -33,7 +39,13 @@ pub struct YreadBackend {
     landing_char: Option<usize>,
     yreflow: bool,
     yopen_rx: Option<Receiver<Result<yread::Book, String>>>,
-    ybg_rx: Option<Receiver<(usize, yread::model::ChapterPageTable, Vec<yread::paginate::PageLayout>)>>,
+    ybg_rx: Option<
+        Receiver<(
+            usize,
+            yread::model::ChapterPageTable,
+            Vec<yread::paginate::PageLayout>,
+        )>,
+    >,
     yqueued_turns: i32,
     err: Option<String>,
 }
@@ -58,18 +70,18 @@ impl YreadBackend {
             // A parser panic must reach the UI as an open error — an unwound
             // worker drops tx unsend and the reader would sit on "Opening…"
             // forever.
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match ext.as_str() {
+            let res =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match ext.as_str() {
                     "fb2" | "zip" => yread::fb2::parse_fb2_path(&path_cl),
+                    "txt" => yread::txt::parse_txt_path(&path_cl),
                     _ => yread::epub::parse_epub_file(&path_cl),
-                }
-            }))
-            .unwrap_or_else(|p| {
-                Err(format!(
-                    "parser panicked: {}",
-                    crate::backend::panic_message(&p)
-                ))
-            });
+                }))
+                .unwrap_or_else(|p| {
+                    Err(format!(
+                        "parser panicked: {}",
+                        crate::backend::panic_message(&p)
+                    ))
+                });
             plog(&format!("yread parse: {}ms", t0.elapsed().as_millis()));
             let _ = tx.send(res);
         });
@@ -107,7 +119,12 @@ impl YreadBackend {
         yread::hypher_lang(lang)
     }
 
-    fn yread_layout_config(&self, settings: &ReaderSettings, vw: u32, vh: u32) -> yread::paginate::LayoutConfig {
+    fn yread_layout_config(
+        &self,
+        settings: &ReaderSettings,
+        vw: u32,
+        vh: u32,
+    ) -> yread::paginate::LayoutConfig {
         yread::paginate::LayoutConfig::reader(
             vw,
             vh,
@@ -131,7 +148,14 @@ impl YreadBackend {
         (sub / 1_000_000, sub % 1_000_000)
     }
 
-    fn yread_land_at(&mut self, chapter: usize, char_offset: usize, _vw: u32, _vh: u32, _settings: &ReaderSettings) {
+    fn yread_land_at(
+        &mut self,
+        chapter: usize,
+        char_offset: usize,
+        _vw: u32,
+        _vh: u32,
+        _settings: &ReaderSettings,
+    ) {
         let target_ch = if let Some(b) = &self.ybook {
             let max_ch = b.chapters.len().saturating_sub(1);
             chapter.min(max_ch)
@@ -157,7 +181,8 @@ impl YreadBackend {
         } else {
             char_offset
         };
-        let global_p = self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
+        let global_p =
+            self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
         self.page_no = global_p;
         self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
     }
@@ -170,7 +195,9 @@ impl YreadBackend {
     fn spawn_yread_background_paginator(&mut self, cfg: &yread::paginate::LayoutConfig) {
         self.ensure_fonts();
         let Some(ref yb) = self.ybook else { return };
-        let Some(ref worker_fonts) = self.yworker_fonts else { return };
+        let Some(ref worker_fonts) = self.yworker_fonts else {
+            return;
+        };
 
         let book_arc = Arc::clone(yb);
         let fonts = Arc::clone(worker_fonts);
@@ -357,11 +384,15 @@ impl ReaderBackend for YreadBackend {
         self.ybook.is_some()
     }
 
+    /// `total` holds the constructor's 1 until render_page computes real
+    /// offsets — which needs the landing chapter in ychap_cache. See the
+    /// trait method: saving before this flips true writes "0 of 1".
+    fn is_paginated(&self) -> bool {
+        self.ychap_cache.contains_key(&self.ychap_idx)
+    }
+
     fn has_pending_work(&self) -> bool {
-        self.ybook.is_none()
-            || self.ybg_rx.is_some()
-            || self.yreflow
-            || self.yqueued_turns != 0
+        self.ybook.is_none() || self.ybg_rx.is_some() || self.yreflow || self.yqueued_turns != 0
     }
 
     fn busy_phase(&self) -> Option<crate::backend::BusyPhase> {
@@ -424,7 +455,13 @@ impl ReaderBackend for YreadBackend {
         redraw
     }
 
-    fn turn_page(&mut self, delta: i32, vw: u32, vh: u32, settings: &ReaderSettings) -> PageTurnResult {
+    fn turn_page(
+        &mut self,
+        delta: i32,
+        vw: u32,
+        vh: u32,
+        settings: &ReaderSettings,
+    ) -> PageTurnResult {
         if self.ybook.is_none() {
             self.yqueued_turns += delta;
             return PageTurnResult::Queued;
@@ -446,7 +483,8 @@ impl ReaderBackend for YreadBackend {
                 if let Some(l) = layouts.get(self.ychap_page) {
                     self.y_char_offset = l.start_char;
                 }
-                let global_p = self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
+                let global_p =
+                    self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
                 self.page_no = global_p;
                 self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
                 PageTurnResult::Changed { redraw_full: false }
@@ -467,7 +505,8 @@ impl ReaderBackend for YreadBackend {
                 if let Some(l) = layouts.get(self.ychap_page) {
                     self.y_char_offset = l.start_char;
                 }
-                let global_p = self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
+                let global_p =
+                    self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
                 self.page_no = global_p;
                 self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
                 PageTurnResult::Changed { redraw_full: false }
@@ -516,10 +555,20 @@ impl ReaderBackend for YreadBackend {
 
         self.ensure_fonts();
         let Some(book) = self.ybook.as_ref().cloned() else {
-            return RenderOutput { gray: None, words: Vec::new(), links: Vec::new(), is_loading: true };
+            return RenderOutput {
+                gray: None,
+                words: Vec::new(),
+                links: Vec::new(),
+                is_loading: true,
+            };
         };
         let Some(fonts) = self.yfonts.as_ref().cloned() else {
-            return RenderOutput { gray: None, words: Vec::new(), links: Vec::new(), is_loading: true };
+            return RenderOutput {
+                gray: None,
+                words: Vec::new(),
+                links: Vec::new(),
+                is_loading: true,
+            };
         };
 
         let cfg = self.yread_layout_config(settings, vw, vh);
@@ -529,7 +578,12 @@ impl ReaderBackend for YreadBackend {
         if n == 0 {
             // Guarded at open (yread_receive_open); kept so a zero-chapter
             // book can never underflow the window math below.
-            return RenderOutput { gray: None, words: Vec::new(), links: Vec::new(), is_loading: true };
+            return RenderOutput {
+                gray: None,
+                words: Vec::new(),
+                links: Vec::new(),
+                is_loading: true,
+            };
         }
         let lo = self.ychap_idx.saturating_sub(4);
         let hi = (self.ychap_idx + 4).min(n.saturating_sub(1));
@@ -550,39 +604,61 @@ impl ReaderBackend for YreadBackend {
         // loading state; poll() drains the result and the next draw
         // renders it.
         if !self.ychap_cache.contains_key(&self.ychap_idx) {
-            return RenderOutput { gray: None, words: Vec::new(), links: Vec::new(), is_loading: true };
+            return RenderOutput {
+                gray: None,
+                words: Vec::new(),
+                links: Vec::new(),
+                is_loading: true,
+            };
         }
 
         let cur_chars = book.chapters[self.ychap_idx].char_count().max(100);
-        let cur_layout_len = self.ychap_cache.get(&self.ychap_idx).map(|(_, l)| l.len()).unwrap_or(1);
+        let cur_layout_len = self
+            .ychap_cache
+            .get(&self.ychap_idx)
+            .map(|(_, l)| l.len())
+            .unwrap_or(1);
         let chars_per_page = (cur_chars as f32 / cur_layout_len.max(1) as f32).max(200.0);
         self.compute_chapter_page_offsets(chars_per_page);
 
         let Some((pt, layouts)) = self.ychap_cache.get(&self.ychap_idx) else {
-            return RenderOutput { gray: None, words: Vec::new(), links: Vec::new(), is_loading: true };
+            return RenderOutput {
+                gray: None,
+                words: Vec::new(),
+                links: Vec::new(),
+                is_loading: true,
+            };
         };
 
         if let Some(target_char) = self.landing_char.take() {
             self.ychap_page = if target_char == usize::MAX {
                 layouts.len().saturating_sub(1)
             } else {
-                pt.page_for_char(target_char).min(layouts.len().saturating_sub(1))
+                pt.page_for_char(target_char)
+                    .min(layouts.len().saturating_sub(1))
             };
         }
 
         let Some(cur_layout) = layouts.get(self.ychap_page) else {
-            return RenderOutput { gray: None, words: Vec::new(), links: Vec::new(), is_loading: true };
+            return RenderOutput {
+                gray: None,
+                words: Vec::new(),
+                links: Vec::new(),
+                is_loading: true,
+            };
         };
 
         self.y_char_offset = cur_layout.start_char;
 
-        let global_p = self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
+        let global_p =
+            self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
         self.page_no = global_p;
         self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
 
         let t0 = std::time::Instant::now();
         let mut gray = vec![255u8; (vw * vh) as usize];
-        self.yraster.render_page(&book, cur_layout, &cfg, &fonts, &mut gray, vw as usize);
+        self.yraster
+            .render_page(&book, cur_layout, &cfg, &fonts, &mut gray, vw as usize);
         // (white_cutoff deliberately not gated here: its only editor was
         // the deleted settings dialog, and a legacy persisted value must
         // not wash out rendering with no UI to reset it.)
@@ -609,13 +685,22 @@ impl ReaderBackend for YreadBackend {
                 let mut cur_x = origin_x + x + align_off;
                 for item in &line.items {
                     match item {
-                        yread::line::LineItem::Word { byte_start, byte_end, shaped, style, .. } => {
+                        yread::line::LineItem::Word {
+                            byte_start,
+                            byte_end,
+                            shaped,
+                            style,
+                            ..
+                        } => {
                             if let Some(w_str) = chapter.text.get(*byte_start..*byte_end) {
                                 let rect = RectF::new(
                                     cur_x,
-                                    origin_y + y - word_top_offset(line, style, &fonts, cfg.font_size),
+                                    origin_y + y
+                                        - word_top_offset(line, style, &fonts, cfg.font_size),
                                     cur_x + shaped.advance,
-                                    origin_y + y + word_bottom_offset(line, style, &fonts, cfg.font_size),
+                                    origin_y
+                                        + y
+                                        + word_bottom_offset(line, style, &fonts, cfg.font_size),
                                 );
                                 words.push((w_str.to_string(), rect));
                                 if let Some(target) = &style.footnote_ref {
@@ -624,13 +709,23 @@ impl ReaderBackend for YreadBackend {
                             }
                             cur_x += shaped.advance;
                         }
-                        yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, prefix_shaped, hyphen_adv, style, .. } => {
+                        yread::line::LineItem::HyphenatedPrefix {
+                            byte_start,
+                            byte_end,
+                            prefix_shaped,
+                            hyphen_adv,
+                            style,
+                            ..
+                        } => {
                             if let Some(w_str) = chapter.text.get(*byte_start..*byte_end) {
                                 let rect = RectF::new(
                                     cur_x,
-                                    origin_y + y - word_top_offset(line, style, &fonts, cfg.font_size),
+                                    origin_y + y
+                                        - word_top_offset(line, style, &fonts, cfg.font_size),
                                     cur_x + prefix_shaped.advance + hyphen_adv,
-                                    origin_y + y + word_bottom_offset(line, style, &fonts, cfg.font_size),
+                                    origin_y
+                                        + y
+                                        + word_bottom_offset(line, style, &fonts, cfg.font_size),
                                 );
                                 words.push((w_str.to_string(), rect));
                                 if let Some(target) = &style.footnote_ref {
@@ -662,7 +757,11 @@ impl ReaderBackend for YreadBackend {
             let prev_chars: usize = self.ychap_chars.iter().take(self.ychap_idx).sum();
             let cur_chars = prev_chars + self.y_char_offset;
             let p = ((cur_chars as f64 / total_chars as f64) * 100.0).clamp(0.0, 100.0) as usize;
-            let cname = book.chapters.get(self.ychap_idx).map(|c| c.title.clone()).unwrap_or_default();
+            let cname = book
+                .chapters
+                .get(self.ychap_idx)
+                .map(|c| c.title.clone())
+                .unwrap_or_default();
             (p, cname)
         } else {
             (0, String::new())
@@ -692,8 +791,17 @@ impl ReaderBackend for YreadBackend {
         settings: ReaderSettings,
     ) -> Action {
         if let Some(book) = &self.ybook {
-            let cur_chars = book.chapters.get(self.ychap_idx).map(|c| c.char_count()).unwrap_or(1500);
-            let cur_pages = self.ychap_cache.get(&self.ychap_idx).map(|(_, l)| l.len()).unwrap_or(1).max(1);
+            let cur_chars = book
+                .chapters
+                .get(self.ychap_idx)
+                .map(|c| c.char_count())
+                .unwrap_or(1500);
+            let cur_pages = self
+                .ychap_cache
+                .get(&self.ychap_idx)
+                .map(|(_, l)| l.len())
+                .unwrap_or(1)
+                .max(1);
             let chars_per_page = (cur_chars as f32 / cur_pages as f32).max(200.0);
             return dialogs::footnote_dialog_yread(
                 book,
@@ -752,7 +860,13 @@ impl ReaderBackend for YreadBackend {
         self.open_toc_dialog(cur_page, back, path_name, settings)
     }
 
-    fn apply_settings_change(&mut self, old: &ReaderSettings, new: &ReaderSettings, vw: u32, vh: u32) -> bool {
+    fn apply_settings_change(
+        &mut self,
+        old: &ReaderSettings,
+        new: &ReaderSettings,
+        vw: u32,
+        vh: u32,
+    ) -> bool {
         let layout_changed = old.font_size != new.font_size
             || old.line_spacing != new.line_spacing
             || old.margin_pad != new.margin_pad
@@ -774,7 +888,12 @@ impl ReaderBackend for YreadBackend {
         false
     }
 
-    fn interactive_preview(&mut self, settings: &ReaderSettings, vw: u32, vh: u32) -> Option<Vec<u8>> {
+    fn interactive_preview(
+        &mut self,
+        settings: &ReaderSettings,
+        vw: u32,
+        vh: u32,
+    ) -> Option<Vec<u8>> {
         self.ensure_fonts();
         let book = self.ybook.as_ref()?.clone();
         let chap = book.chapters.get(self.ychap_idx)?;
@@ -796,7 +915,9 @@ impl ReaderBackend for YreadBackend {
             &mut cache,
             Some(lang),
         );
-        let landing_page = pt.page_for_char(self.y_char_offset).min(layouts.len().saturating_sub(1));
+        let landing_page = pt
+            .page_for_char(self.y_char_offset)
+            .min(layouts.len().saturating_sub(1));
         let layout = layouts.get(landing_page)?;
         let mut raster = yread::raster::Rasterizer::new();
         let mut gray = vec![255u8; (vw * vh) as usize];
@@ -851,5 +972,65 @@ fn word_bottom_offset(
         m.descender + shift
     } else {
         line.height - line.ascender
+    }
+}
+
+#[cfg(test)]
+mod save_guard_tests {
+    use super::*;
+
+    fn bare_backend() -> YreadBackend {
+        YreadBackend {
+            path: PathBuf::from("/x/t.epub"),
+            ybook: None,
+            yfonts: None,
+            ycache: Arc::new(Mutex::new(yread::shape::ShapeCache::new())),
+            yworker_fonts: None,
+            yraster: yread::raster::Rasterizer::new(),
+            ychap_idx: 0,
+            ychap_page: 0,
+            ychap_cache: HashMap::new(),
+            ychap_offsets: Vec::new(),
+            ychap_chars: vec![100],
+            ychar_total: 100,
+            // The constructor default at the center of the bug: total
+            // stays 1 until render_page computes real offsets.
+            total: 1,
+            page_no: 0,
+            sub_idx: 0,
+            y_char_offset: 0,
+            landing_char: None,
+            yreflow: false,
+            yopen_rx: None,
+            ybg_rx: None,
+            yqueued_turns: 0,
+            err: None,
+        }
+    }
+
+    #[test]
+    fn ready_but_unpaginated_must_not_be_savable() {
+        let mut b = bare_backend();
+        // Parse landed: ready flips true, but the landing chapter is
+        // still in the background paginator and total_pages() is the
+        // placeholder 1. save_progress must refuse in this window —
+        // entering SAMPLE and exiting during "Laying out…" used to record
+        // "page 0 of 1" over a real reading position.
+        let book = yread::txt::parse_txt_bytes(b"one\n\ntwo\n", "T").unwrap();
+        b.ybook = Some(Arc::new(book));
+        assert!(b.is_ready());
+        assert_eq!(b.total_pages(), 1);
+        assert!(!b.is_paginated());
+
+        // The chapter lands: savable.
+        b.ychap_cache.insert(0, (Default::default(), Vec::new()));
+        assert!(b.is_paginated());
+    }
+
+    #[test]
+    fn unopened_backend_is_neither_ready_nor_paginated() {
+        let b = bare_backend();
+        assert!(!b.is_ready());
+        assert!(!b.is_paginated());
     }
 }

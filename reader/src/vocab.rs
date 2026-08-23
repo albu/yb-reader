@@ -18,7 +18,6 @@ static DB: OnceLock<Option<VocabDb>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnotationStyle {
-
     /// Small superscript definition directly above the word
     Interlinear,
     /// Clean 1-2 line footer list at the bottom of the page
@@ -58,7 +57,6 @@ impl WordEntry {
         }
     }
 }
-
 
 /// In-memory binary search database over vocab.bin.
 pub struct VocabDb {
@@ -109,7 +107,10 @@ impl VocabDb {
 
         // If we found an entry but it lacks definitions (or we didn't find an entry),
         // search candidate lemmas to populate or find definitions.
-        if entry.as_ref().map_or(true, |e| e.gloss_en.is_empty() || e.gloss_ru.is_empty()) {
+        if entry
+            .as_ref()
+            .map_or(true, |e| e.gloss_en.is_empty() || e.gloss_ru.is_empty())
+        {
             for lemma in generate_lemmas(&clean) {
                 if let Some(lem_entry) = self.lookup_exact(&lemma) {
                     if let Some(ref mut e) = entry {
@@ -152,15 +153,20 @@ impl VocabDb {
             }
 
             let w_off = u32::from_le_bytes(self.data[off..off + 4].try_into().unwrap()) as usize;
-            let w_len = u16::from_le_bytes(self.data[off + 4..off + 6].try_into().unwrap()) as usize;
+            let w_len =
+                u16::from_le_bytes(self.data[off + 4..off + 6].try_into().unwrap()) as usize;
             let diff = self.data[off + 6];
             let cefr = self.data[off + 7];
 
-            let en_off = u32::from_le_bytes(self.data[off + 8..off + 12].try_into().unwrap()) as usize;
-            let en_len = u16::from_le_bytes(self.data[off + 12..off + 14].try_into().unwrap()) as usize;
+            let en_off =
+                u32::from_le_bytes(self.data[off + 8..off + 12].try_into().unwrap()) as usize;
+            let en_len =
+                u16::from_le_bytes(self.data[off + 12..off + 14].try_into().unwrap()) as usize;
 
-            let tr_off = u32::from_le_bytes(self.data[off + 14..off + 18].try_into().unwrap()) as usize;
-            let tr_len = u16::from_le_bytes(self.data[off + 18..off + 20].try_into().unwrap()) as usize;
+            let tr_off =
+                u32::from_le_bytes(self.data[off + 14..off + 18].try_into().unwrap()) as usize;
+            let tr_len =
+                u16::from_le_bytes(self.data[off + 18..off + 20].try_into().unwrap()) as usize;
 
             let w_start = self.strings_offset + w_off;
             let w_bytes = self.data.get(w_start..w_start + w_len)?;
@@ -169,13 +175,17 @@ impl VocabDb {
             match w_str.cmp(target) {
                 std::cmp::Ordering::Equal => {
                     let en_start = self.strings_offset + en_off;
-                    let gloss_en = self.data.get(en_start..en_start + en_len)
+                    let gloss_en = self
+                        .data
+                        .get(en_start..en_start + en_len)
                         .and_then(|b| std::str::from_utf8(b).ok())
                         .unwrap_or_default()
                         .to_string();
 
                     let ru_start = self.strings_offset + tr_off;
-                    let gloss_ru = self.data.get(ru_start..ru_start + tr_len)
+                    let gloss_ru = self
+                        .data
+                        .get(ru_start..ru_start + tr_len)
                         .and_then(|b| std::str::from_utf8(b).ok())
                         .unwrap_or_default()
                         .to_string();
@@ -187,7 +197,6 @@ impl VocabDb {
                         gloss_en,
                         gloss_ru,
                     });
-
                 }
                 std::cmp::Ordering::Less => {
                     lo = mid + 1;
@@ -255,7 +264,6 @@ pub fn generate_lemmas(w: &str) -> Vec<String> {
 /// User's persistent vocabulary profile and adaptive learning model.
 #[derive(Debug, Clone)]
 pub struct VocabProfile {
-
     /// Estimated user vocabulary level (0..100). Default: 65 (B2)
     pub user_level: u8,
     /// Words explicitly marked as known or dismissed
@@ -373,7 +381,6 @@ impl VocabProfile {
         let _ = ybdev::atomic::write(path, out.as_bytes());
     }
 
-
     /// Record a word lookup: promotes word to learning and slightly adjusts frontier.
     pub fn record_lookup(&mut self, word: &str, difficulty: u8) {
         let clean = clean_word(word);
@@ -461,7 +468,8 @@ pub fn draw_annotations(
                 let gy = (r.y0 - pt(2.0) as f32).round() as i32;
 
                 // Floating outline pill badge centered above the word
-                let pill_r = yui::painter::Rect::new(gx - pt(2.0), gy - pt(4.5), tw + pt(4.0), pt(5.5));
+                let pill_r =
+                    yui::painter::Rect::new(gx - pt(2.0), gy - pt(4.5), tw + pt(4.0), pt(5.5));
                 p.rect(pill_r, if is_night { 0 } else { 255 });
                 p.rect_outline_t(pill_r, 1, if is_night { 80 } else { 200 });
                 p.text(gx, gy, font_sz, if is_night { 235 } else { 30 }, &short);
@@ -579,4 +587,3 @@ mod tests {
         }
     }
 }
-

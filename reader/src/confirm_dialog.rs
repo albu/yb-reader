@@ -89,19 +89,17 @@ impl<F: FnMut(ConfirmAction) -> Action> Screen for ConfirmDialog<F> {
 
         let card = self.card_rect();
         // Drop shadow first so the card reads as floating above the dim.
-        p.rect(Rect::new(card.x + pt(4.0), card.y + pt(4.0), card.w, card.h), 205);
+        p.rect(
+            Rect::new(card.x + pt(4.0), card.y + pt(4.0), card.w, card.h),
+            205,
+        );
         p.rect(card, 255);
         p.rect_outline_t(card, 2, 0);
 
         p.text_center(card.y + pt(34.0), 11.0, 0, &self.title);
         for (i, line) in self.message.lines().enumerate() {
             let trunc = p.truncate(9.0, line, p.width_pt() - 2.0 * 60.0 - 12.0);
-            p.text_center(
-                card.y + pt(62.0) + i as i32 * pt(16.0),
-                9.0,
-                130,
-                &trunc,
-            );
+            p.text_center(card.y + pt(62.0) + i as i32 * pt(16.0), 9.0, 130, &trunc);
         }
 
         let (cancel, confirm) = self.buttons();

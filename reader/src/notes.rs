@@ -179,16 +179,40 @@ mod tests {
     #[test]
     fn matched_spans_finds_exact_word_windows() {
         let hl = vec![
-            Highlight { page: 0, ts: 1, text: "quick brown".into() },
-            Highlight { page: 0, ts: 2, text: "fox".into() },
+            Highlight {
+                page: 0,
+                ts: 1,
+                text: "quick brown".into(),
+            },
+            Highlight {
+                page: 0,
+                ts: 2,
+                text: "fox".into(),
+            },
             // Recorded on page 7, found here after a reflow shifted pages:
             // multi-word spans are text-keyed and must still render.
-            Highlight { page: 7, ts: 3, text: "the quick".into() },
+            Highlight {
+                page: 7,
+                ts: 3,
+                text: "the quick".into(),
+            },
             // Single word on another page: ambiguous book-wide, stays
             // anchored to its recorded page.
-            Highlight { page: 9, ts: 4, text: "jumps".into() },
-            Highlight { page: 0, ts: 5, text: "no such words here".into() },
-            Highlight { page: 0, ts: 6, text: "lazy dog .".into() },
+            Highlight {
+                page: 9,
+                ts: 4,
+                text: "jumps".into(),
+            },
+            Highlight {
+                page: 0,
+                ts: 5,
+                text: "no such words here".into(),
+            },
+            Highlight {
+                page: 0,
+                ts: 6,
+                text: "lazy dog .".into(),
+            },
         ];
         let words: Vec<(String, RectF)> = ["the", "quick", "brown", "fox", "jumps"]
             .iter()

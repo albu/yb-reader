@@ -19,10 +19,6 @@ fn main() {
         .status()
         .map(|s| !s.success())
         .unwrap_or(true);
-    let v = if dirty {
-        format!("{sha}*")
-    } else {
-        sha
-    };
+    let v = if dirty { format!("{sha}*") } else { sha };
     println!("cargo:rustc-env=YB_BUILD={v}");
 }

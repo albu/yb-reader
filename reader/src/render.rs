@@ -17,7 +17,7 @@
 
 use mupdf::{Colorspace, Document, Matrix};
 
-use crate::split::{RectF, ReaderSettings};
+use crate::split::{ReaderSettings, RectF};
 
 pub const HEADER_H: u32 = 92; // px (covers clock/battery status header)
 pub const FOOTER_H: u32 = 50; // px (covers progress track and footer)
@@ -65,10 +65,7 @@ impl LayoutGeom {
 
         let header_h = if settings.show_header { HEADER_H } else { 0 };
         let footer_h = FOOTER_H;
-        let (vis_w, vis_h) = (
-            w as f32,
-            (h.saturating_sub(footer_h + header_h)) as f32,
-        );
+        let (vis_w, vis_h) = (w as f32, (h.saturating_sub(footer_h + header_h)) as f32);
 
         let config = &settings.split;
         let sub_boxes = config.sub_boxes();
@@ -145,8 +142,12 @@ impl LayoutGeom {
 /// twice in compute_annotations and once in tests.
 pub fn words_from_text_page(tp: &mupdf::TextPage, g: &LayoutGeom) -> Vec<(String, RectF)> {
     let mut words = Vec::new();
-    let flush = |cur: &mut String, min_x: &mut f32, min_y: &mut f32, max_x: &mut f32,
-                     max_y: &mut f32, out: &mut Vec<(String, RectF)>| {
+    let flush = |cur: &mut String,
+                 min_x: &mut f32,
+                 min_y: &mut f32,
+                 max_x: &mut f32,
+                 max_y: &mut f32,
+                 out: &mut Vec<(String, RectF)>| {
         if cur.is_empty() {
             return;
         }
@@ -166,7 +167,9 @@ pub fn words_from_text_page(tp: &mupdf::TextPage, g: &LayoutGeom) -> Vec<(String
             for ch in line.chars() {
                 if let Some(c) = ch.char() {
                     if c.is_whitespace() {
-                        flush(&mut cur, &mut min_x, &mut min_y, &mut max_x, &mut max_y, &mut words);
+                        flush(
+                            &mut cur, &mut min_x, &mut min_y, &mut max_x, &mut max_y, &mut words,
+                        );
                     } else {
                         cur.push(c);
                         let q = ch.quad();
@@ -177,7 +180,9 @@ pub fn words_from_text_page(tp: &mupdf::TextPage, g: &LayoutGeom) -> Vec<(String
                     }
                 }
             }
-            flush(&mut cur, &mut min_x, &mut min_y, &mut max_x, &mut max_y, &mut words);
+            flush(
+                &mut cur, &mut min_x, &mut min_y, &mut max_x, &mut max_y, &mut words,
+            );
         }
     }
     words
@@ -232,8 +237,7 @@ pub fn render_page(
     let src_x = (sub_box.x0 * geom.pw * zoom).round() as usize;
     let src_y = (sub_box.y0 * geom.ph * zoom).round() as usize;
     let rw = ((sub_box.width() * geom.pw * zoom).round() as usize).min(pm_w.saturating_sub(src_x));
-    let rh =
-        ((sub_box.height() * geom.ph * zoom).round() as usize).min(pm_h.saturating_sub(src_y));
+    let rh = ((sub_box.height() * geom.ph * zoom).round() as usize).min(pm_h.saturating_sub(src_y));
 
     if rw == 0 || rh == 0 {
         settings.apply_lut(&mut out);
@@ -388,13 +392,16 @@ mod tests {
         let tp = page
             .to_text_page(TextPageFlags::empty())
             .expect("to_text_page");
-        let g = LayoutGeom::new(&settings, page.bounds().unwrap(), 0, 1236, 1648)
-            .expect("geometry");
+        let g =
+            LayoutGeom::new(&settings, page.bounds().unwrap(), 0, 1236, 1648).expect("geometry");
 
         let words = words_from_text_page(&tp, &g);
         println!("Extracted {} words from page 20. First 10:", words.len());
         for (w, r) in words.iter().take(10) {
-            println!("  '{}' at [{:.1}, {:.1}, {:.1}, {:.1}]", w, r.x0, r.y0, r.x1, r.y1);
+            println!(
+                "  '{}' at [{:.1}, {:.1}, {:.1}, {:.1}]",
+                w, r.x0, r.y0, r.x1, r.y1
+            );
         }
         assert!(!words.is_empty());
         // Visual boxes live inside the visual buffer.
@@ -418,7 +425,9 @@ mod tests {
         settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
         let (vw, vh) = (1648usize, 1236usize);
         let gray = render_page(&doc, 20, 0, &settings, 1648, 1236).expect("render");
-        let tp = page.to_text_page(TextPageFlags::empty()).expect("text page");
+        let tp = page
+            .to_text_page(TextPageFlags::empty())
+            .expect("text page");
         let g = LayoutGeom::new(&settings, page.bounds().unwrap(), 0, 1648, 1236).expect("geom");
         let words = words_from_text_page(&tp, &g);
         assert!(!words.is_empty());
@@ -426,8 +435,14 @@ mod tests {
         let mut word_mean = 0f64;
         let mut n = 0usize;
         for (_, r) in words.iter() {
-            let (x0, y0) = (r.x0.round().max(0.0) as usize, r.y0.round().max(0.0) as usize);
-            let (x1, y1) = ((r.x1.round() as usize).min(vw), (r.y1.round() as usize).min(vh));
+            let (x0, y0) = (
+                r.x0.round().max(0.0) as usize,
+                r.y0.round().max(0.0) as usize,
+            );
+            let (x1, y1) = (
+                (r.x1.round() as usize).min(vw),
+                (r.y1.round() as usize).min(vh),
+            );
             for y in y0..y1 {
                 for x in x0..x1 {
                     word_mean += gray[y * vw + x] as f64;
@@ -487,8 +502,16 @@ mod tests {
             let g = LayoutGeom::new(&settings, bounds, 0, vw, vh).unwrap();
             let (a, b, c, d) = g.sub_rect_doc();
             let r = g.to_visual(a, b, c, d);
-            assert!(r.x0 >= -1.0 && r.x1 <= vw as f32 + 1.0, "{vw}x{vh}: {:?}", r);
-            assert!(r.y0 >= -1.0 && r.y1 <= vh as f32 + 1.0, "{vw}x{vh}: {:?}", r);
+            assert!(
+                r.x0 >= -1.0 && r.x1 <= vw as f32 + 1.0,
+                "{vw}x{vh}: {:?}",
+                r
+            );
+            assert!(
+                r.y0 >= -1.0 && r.y1 <= vh as f32 + 1.0,
+                "{vw}x{vh}: {:?}",
+                r
+            );
             assert!(r.x0 < r.x1 && r.y0 < r.y1);
         }
     }
@@ -516,13 +539,13 @@ mod lab {
         let variants: &[(&str, &str, bool, i32)] = &[
             ("1_base", "", true, 8),
             ("2_bold_body", "body { font-weight: bold; }", true, 8),
-            ("3_bold_star_imp", "* { font-weight: bold !important; }", true, 8),
             (
-                "4_nodoccss_bold",
-                "body { font-weight: bold; }",
-                false,
+                "3_bold_star_imp",
+                "* { font-weight: bold !important; }",
+                true,
                 8,
             ),
+            ("4_nodoccss_bold", "body { font-weight: bold; }", false, 8),
             ("5_aa0", "", true, 0),
             (
                 "6_fontface",
@@ -554,7 +577,12 @@ mod lab {
                 true,
                 8,
             ),
-            ("14_lineheight", "* { line-height: 1.6 !important; }", true, 8),
+            (
+                "14_lineheight",
+                "* { line-height: 1.6 !important; }",
+                true,
+                8,
+            ),
         ];
         for (name, css, doc_css, aa) in variants {
             // 10_* reads the @font-face-patched copy of the same book.
@@ -586,8 +614,7 @@ mod lab {
             // pack tight (drop stride pad)
             let mut tight = vec![0u8; pw * phh];
             for y in 0..phh {
-                tight[y * pw..(y + 1) * pw]
-                    .copy_from_slice(&samples[y * stride..y * stride + pw]);
+                tight[y * pw..(y + 1) * pw].copy_from_slice(&samples[y * stride..y * stride + pw]);
             }
             std::fs::write(format!("/tmp/lab_{name}.raw"), &tight).unwrap();
             let dark = tight.iter().filter(|&&v| v < 100).count();

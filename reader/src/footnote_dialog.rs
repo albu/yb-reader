@@ -168,7 +168,12 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
 
         // Scroll indicator if scrollable
         if lines.len() > vis_count {
-            let indicator = format!("{}-{}/{}", self.scroll_line + 1, (self.scroll_line + vis_count).min(lines.len()), lines.len());
+            let indicator = format!(
+                "{}-{}/{}",
+                self.scroll_line + 1,
+                (self.scroll_line + vis_count).min(lines.len()),
+                lines.len()
+            );
             let title_w = p.text_width(11.5, &title).round() as i32;
             let ind_x = card_x + pt(18.0) + title_w;
             if ind_x < card_x + card_w - pt(80.0) {
@@ -179,18 +184,24 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
         // Action button on top-right: [ ↗ Jump ] if target exists, else [ ✕ Close ]
         if let Some((_, _, page)) = self.target_yread {
             p.rect(btn_rect, 0);
-            let jump_lbl = format!("↗ p.{}", page + 1);
+            let jump_lbl = format!("-> p.{}", page + 1);
             p.text_center_in(btn_x, btn_x + btn_w, btn_y + pt(15.0), 8.0, 255, &jump_lbl);
         } else if let Some(target) = self.target_page {
             p.rect(btn_rect, 0);
-            let jump_lbl = format!("↗ p.{}", target + 1);
+            let jump_lbl = format!("-> p.{}", target + 1);
             p.text_center_in(btn_x, btn_x + btn_w, btn_y + pt(15.0), 8.0, 255, &jump_lbl);
         } else {
             p.rect_outline_t(btn_rect, 1, 100);
             p.text_center_in(btn_x, btn_x + btn_w, btn_y + pt(15.0), 8.0, 50, "Close");
         }
 
-        p.hline_t(title_y + pt(6.0), card_x + pt(10.0), card_x + card_w - pt(10.0), 1, 220);
+        p.hline_t(
+            title_y + pt(6.0),
+            card_x + pt(10.0),
+            card_x + card_w - pt(10.0),
+            1,
+            220,
+        );
 
         // Body: Content lines with scroll offset
         let mut text_y = body_top + pt(6.0);
@@ -211,9 +222,12 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
             p.rect(Rect::new(track_x, track_y, track_w, track_h), 230);
 
             // Thumb
-            let thumb_h = ((vis_count as f32 / lines.len() as f32) * (track_h as f32)).clamp(pt(16.0) as f32, track_h as f32) as i32;
+            let thumb_h = ((vis_count as f32 / lines.len() as f32) * (track_h as f32))
+                .clamp(pt(16.0) as f32, track_h as f32) as i32;
             let max_thumb_travel = (track_h - thumb_h).max(1);
-            let thumb_y = track_y + (self.scroll_line as f32 / self.max_scroll.max(1) as f32 * max_thumb_travel as f32) as i32;
+            let thumb_y = track_y
+                + (self.scroll_line as f32 / self.max_scroll.max(1) as f32
+                    * max_thumb_travel as f32) as i32;
             p.rect(Rect::new(track_x, thumb_y, track_w, thumb_h), 60);
         }
     }
@@ -265,34 +279,28 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
 
                 (self.on_action)(FootnoteAction::Close)
             }
-            Gesture::Swipe { dir, .. } => {
-                match dir {
-                    SwipeDir::North => {
-                        if self.scroll_line < self.max_scroll {
-                            let step = self.visible_lines.saturating_sub(1).max(1);
-                            self.scroll_line = (self.scroll_line + step).min(self.max_scroll);
-                            Action::Redraw
-                        } else {
-                            (self.on_action)(FootnoteAction::Close)
-                        }
-                    }
-                    SwipeDir::South => {
-                        if self.scroll_line > 0 {
-                            let step = self.visible_lines.saturating_sub(1).max(1);
-                            self.scroll_line = self.scroll_line.saturating_sub(step);
-                            Action::Redraw
-                        } else {
-                            (self.on_action)(FootnoteAction::Close)
-                        }
-                    }
-                    SwipeDir::East | SwipeDir::West => {
+            Gesture::Swipe { dir, .. } => match dir {
+                SwipeDir::North => {
+                    if self.scroll_line < self.max_scroll {
+                        let step = self.visible_lines.saturating_sub(1).max(1);
+                        self.scroll_line = (self.scroll_line + step).min(self.max_scroll);
+                        Action::Redraw
+                    } else {
                         (self.on_action)(FootnoteAction::Close)
                     }
                 }
-            }
-            Gesture::LongPress { .. } => {
-                (self.on_action)(FootnoteAction::Close)
-            }
+                SwipeDir::South => {
+                    if self.scroll_line > 0 {
+                        let step = self.visible_lines.saturating_sub(1).max(1);
+                        self.scroll_line = self.scroll_line.saturating_sub(step);
+                        Action::Redraw
+                    } else {
+                        (self.on_action)(FootnoteAction::Close)
+                    }
+                }
+                SwipeDir::East | SwipeDir::West => (self.on_action)(FootnoteAction::Close),
+            },
+            Gesture::LongPress { .. } => (self.on_action)(FootnoteAction::Close),
             _ => Action::Keep,
         }
     }
@@ -340,13 +348,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
 
-        let mut dialog = FootnoteDialog::new_yread(
-            "Note [1]",
-            &long_content,
-            Some((2, 100, 15)),
-            None,
-            |_| Action::Pop,
-        );
+        let mut dialog =
+            FootnoteDialog::new_yread("Note [1]", &long_content, Some((2, 100, 15)), None, |_| {
+                Action::Pop
+            });
 
         dialog.dims = (1236, 1648);
         dialog.visible_lines = 5;

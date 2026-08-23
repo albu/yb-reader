@@ -46,14 +46,24 @@ fn main() {
 
     println!("\nTOC in book ({} entries):", book.toc.len());
     for (i, entry) in book.toc.iter().enumerate() {
-        if entry.chapter_idx == target_ch_idx || entry.title.to_lowercase().contains("wal") || entry.title.to_lowercase().contains("replication") {
-            println!("   TOC #{}: ch={} char={} level={} '{}'", i, entry.chapter_idx, entry.char_offset, entry.level, entry.title);
+        if entry.chapter_idx == target_ch_idx
+            || entry.title.to_lowercase().contains("wal")
+            || entry.title.to_lowercase().contains("replication")
+        {
+            println!(
+                "   TOC #{}: ch={} char={} level={} '{}'",
+                i, entry.chapter_idx, entry.char_offset, entry.level, entry.title
+            );
         }
     }
 
     // 2. Find target chapter info
     if target_ch_idx >= book.chapters.len() {
-        eprintln!("Chapter {} out of bounds (max {})", target_ch_idx, book.chapters.len() - 1);
+        eprintln!(
+            "Chapter {} out of bounds (max {})",
+            target_ch_idx,
+            book.chapters.len() - 1
+        );
         return;
     }
 
@@ -61,7 +71,10 @@ fn main() {
     println!("\n2. Target Chapter [#{}]", target_ch_idx);
     println!("   Title: '{}'", chapter.title);
     println!("   Character Count: {}", chapter.char_count());
-    println!("   Word Count (approx): {}", chapter.text.split_whitespace().count());
+    println!(
+        "   Word Count (approx): {}",
+        chapter.text.split_whitespace().count()
+    );
     println!("   Block Elements: {}", chapter.blocks.len());
 
     // 3. Font System Initialization
@@ -120,10 +133,16 @@ fn main() {
         let t_rast_mid = Instant::now();
         rasterizer.render_page(&book, pmid, &cfg, &fonts, &mut fb, 1236);
         let rast_mid_duration = t_rast_mid.elapsed();
-        println!("7. Rasterize Mid Page (Page {}): {:.2?}", mid_idx, rast_mid_duration);
+        println!(
+            "7. Rasterize Mid Page (Page {}): {:.2?}",
+            mid_idx, rast_mid_duration
+        );
     }
 
     println!("\n============================================================");
-    println!("SUMMARY: Time to first glass (Parse + Paginate + Render): {:.2?}", epub_parse_duration + pag_duration + Duration::from_millis(5));
+    println!(
+        "SUMMARY: Time to first glass (Parse + Paginate + Render): {:.2?}",
+        epub_parse_duration + pag_duration + Duration::from_millis(5)
+    );
     println!("============================================================");
 }

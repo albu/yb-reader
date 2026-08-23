@@ -95,7 +95,14 @@ impl<F: FnMut(HighlightsAction) -> Action> Screen for HighlightsDialog<F> {
         let close_y = pt(8.0);
         let close_rect = Rect::new(close_x, close_y, close_w, close_h);
         p.rect_outline_t(close_rect, 1, 100);
-        p.text_center_in(close_x, close_x + close_w, close_y + pt(16.0), 8.5, 0, "Close");
+        p.text_center_in(
+            close_x,
+            close_x + close_w,
+            close_y + pt(16.0),
+            8.5,
+            0,
+            "Close",
+        );
 
         if self.items.is_empty() {
             p.text_center(h / 2, 11.0, 0, "No highlights in this book yet");
@@ -192,34 +199,35 @@ impl<F: FnMut(HighlightsAction) -> Action> Screen for HighlightsDialog<F> {
                         let text = self.items[idx].text.clone();
                         let bg = self.snap.clone();
                         let preview: String = text.chars().take(60).collect();
-                        return Action::Push(Box::new(
-                            crate::confirm_dialog::ConfirmDialog::new(
-                                "Delete highlight?",
-                                &preview,
-                                "Delete",
-                                bg,
-                                move |act| {
-                                    if matches!(
-                                        act,
-                                        crate::confirm_dialog::ConfirmAction::Yes
-                                    ) {
-                                        notes::remove(&book, &text);
-                                    }
-                                    Action::Pop
-                                },
-                            ),
-                        ));
+                        return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                            "Delete highlight?",
+                            &preview,
+                            "Delete",
+                            bg,
+                            move |act| {
+                                if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
+                                    notes::remove(&book, &text);
+                                }
+                                Action::Pop
+                            },
+                        )));
                     }
                 }
                 Action::Keep
             }
 
-            Gesture::Swipe { dir: SwipeDir::North, .. } => {
-                self.offset = (self.offset + self.per_page.max(1))
-                    .min(self.items.len().saturating_sub(1));
+            Gesture::Swipe {
+                dir: SwipeDir::North,
+                ..
+            } => {
+                self.offset =
+                    (self.offset + self.per_page.max(1)).min(self.items.len().saturating_sub(1));
                 Action::RedrawFull
             }
-            Gesture::Swipe { dir: SwipeDir::South, .. } => {
+            Gesture::Swipe {
+                dir: SwipeDir::South,
+                ..
+            } => {
                 if self.offset > 0 {
                     self.offset = self.offset.saturating_sub(self.per_page);
                     Action::RedrawFull
@@ -240,7 +248,9 @@ mod tests {
     #[test]
     fn pre_scroll_and_reload_reflect_store() {
         // YB_NOTES_DIR is process-global — serialize with notes' own tests.
-        let _g = crate::notes::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::notes::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join("yb-hl-dialog-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

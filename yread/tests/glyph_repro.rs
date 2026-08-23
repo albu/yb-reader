@@ -9,7 +9,14 @@ use yread::shape::ShapeCache;
 const PROBE: &str = "Pacific Ocean";
 
 /// Compute mean ink darkness (0.0 = white, 1.0 = solid black) inside a bounding box on the framebuffer.
-fn glyph_darkness(fb: &[u8], stride: usize, x0: usize, y0: usize, x1: usize, y1: usize) -> (f32, usize) {
+fn glyph_darkness(
+    fb: &[u8],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+) -> (f32, usize) {
     let mut total_ink: u64 = 0;
     let mut pixel_count: usize = 0;
     for y in y0..y1 {
@@ -58,27 +65,50 @@ fn test_glyph_weight_consistency_across_chapters() {
     // Render chapters 0..6 first on shared rasterizer, simulating a full reading session
     let mut raster = Rasterizer::new();
     for i in 0..ci {
-        let (_pt, ch_layouts) = paginate_chapter_with_images(&book.chapters[i], Some(&book.image_sizes), &cfg, &fonts, &mut cache, None);
+        let (_pt, ch_layouts) = paginate_chapter_with_images(
+            &book.chapters[i],
+            Some(&book.image_sizes),
+            &cfg,
+            &fonts,
+            &mut cache,
+            None,
+        );
         for l in &ch_layouts {
             let mut fb = vec![255u8; 1236 * 1648];
             raster.render_page(&book, l, &cfg, &fonts, &mut fb, 1236);
         }
     }
 
-    let (_pt, layouts) = paginate_chapter_with_images(ch, Some(&book.image_sizes), &cfg, &fonts, &mut cache, None);
+    let (_pt, layouts) =
+        paginate_chapter_with_images(ch, Some(&book.image_sizes), &cfg, &fonts, &mut cache, None);
     let mut fb_session = vec![255u8; 1236 * 1648];
     raster.render_page(&book, &layouts[0], &cfg, &fonts, &mut fb_session, 1236);
 
     // Fresh isolated render
     let mut clean_cache = ShapeCache::new();
-    let (_pt_clean, clean_layouts) = paginate_chapter_with_images(ch, Some(&book.image_sizes), &cfg, &fonts, &mut clean_cache, None);
+    let (_pt_clean, clean_layouts) = paginate_chapter_with_images(
+        ch,
+        Some(&book.image_sizes),
+        &cfg,
+        &fonts,
+        &mut clean_cache,
+        None,
+    );
     let mut clean_raster = Rasterizer::new();
     let mut fb_clean = vec![255u8; 1236 * 1648];
     clean_raster.render_page(&book, &clean_layouts[0], &cfg, &fonts, &mut fb_clean, 1236);
 
     // Assert zero drift between long-running session and clean render
-    let diff_count = fb_session.iter().zip(fb_clean.iter()).filter(|(a, b)| a != b).count();
-    assert_eq!(diff_count, 0, "Rasterizer state leaked across chapters (pixel diff count: {})", diff_count);
+    let diff_count = fb_session
+        .iter()
+        .zip(fb_clean.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        diff_count, 0,
+        "Rasterizer state leaked across chapters (pixel diff count: {})",
+        diff_count
+    );
 
     // Save rendered PNG for visual verification
     let img = image::GrayImage::from_raw(1236, 1648, fb_session.clone()).unwrap();
@@ -118,7 +148,13 @@ fn test_glyph_weight_consistency_across_chapters() {
 
             for item in &line.items {
                 match item {
-                    yread::line::LineItem::Word { byte_start, byte_end, shaped, style, .. } => {
+                    yread::line::LineItem::Word {
+                        byte_start,
+                        byte_end,
+                        shaped,
+                        style,
+                        ..
+                    } => {
                         let w_str = ch.text.get(*byte_start..*byte_end).unwrap_or("");
                         if w_str == "Pacific" || w_str == "Ocean," || w_str == "When" {
                             probed_words += 1;
@@ -126,23 +162,39 @@ fn test_glyph_weight_consistency_across_chapters() {
                             let mut gx = cur_x;
                             for glyph in &shaped.glyphs {
                                 let x0 = (gx + glyph.x_offset).max(0.0).round() as usize;
-                                let x1 = (gx + glyph.x_offset + glyph.x_advance.max(5.0)).min(1235.0).round() as usize;
+                                let x1 = (gx + glyph.x_offset + glyph.x_advance.max(5.0))
+                                    .min(1235.0)
+                                    .round() as usize;
                                 let y0 = (origin_y + y - 25.0).max(0.0).round() as usize;
                                 let y1 = (origin_y + y + 10.0).min(1647.0).round() as usize;
-                                let (mean, total) = glyph_darkness(&fb_session, 1236, x0, y0, x1, y1);
+                                let (mean, total) =
+                                    glyph_darkness(&fb_session, 1236, x0, y0, x1, y1);
                                 glyph_metrics.push((glyph.glyph_id, mean, total));
                                 gx += glyph.x_advance;
                             }
-                            eprintln!("Probe word {:?} ({:?}): {:?}", w_str, style.font_style, glyph_metrics);
+                            eprintln!(
+                                "Probe word {:?} ({:?}): {:?}",
+                                w_str, style.font_style, glyph_metrics
+                            );
                             // Ensure all non-space glyphs have sensible ink levels and no extreme spikes
                             for (gid, mean, total) in &glyph_metrics {
                                 assert!(*total > 0, "Glyph {} in {:?} has no ink", gid, w_str);
-                                assert!(*mean < 0.60, "Glyph {} in {:?} is excessively dark (mean: {})", gid, w_str, mean);
+                                assert!(
+                                    *mean < 0.60,
+                                    "Glyph {} in {:?} is excessively dark (mean: {})",
+                                    gid,
+                                    w_str,
+                                    mean
+                                );
                             }
                         }
                         cur_x += shaped.advance;
                     }
-                    yread::line::LineItem::HyphenatedPrefix { prefix_shaped, hyphen_adv, .. } => {
+                    yread::line::LineItem::HyphenatedPrefix {
+                        prefix_shaped,
+                        hyphen_adv,
+                        ..
+                    } => {
                         cur_x += prefix_shaped.advance + hyphen_adv;
                     }
                     yread::line::LineItem::Space { adv, .. } => {
@@ -163,8 +215,20 @@ fn test_font_style_routing() {
     assert_ne!(fonts.regular.data.as_ptr(), fonts.italic.data.as_ptr());
     assert_ne!(fonts.bold.data.as_ptr(), fonts.bold_italic.data.as_ptr());
 
-    assert_eq!(fonts.face_for_style(FontStyle::Regular).data.as_ptr(), fonts.regular.data.as_ptr());
-    assert_eq!(fonts.face_for_style(FontStyle::Bold).data.as_ptr(), fonts.bold.data.as_ptr());
-    assert_eq!(fonts.face_for_style(FontStyle::Italic).data.as_ptr(), fonts.italic.data.as_ptr());
-    assert_eq!(fonts.face_for_style(FontStyle::BoldItalic).data.as_ptr(), fonts.bold_italic.data.as_ptr());
+    assert_eq!(
+        fonts.face_for_style(FontStyle::Regular).data.as_ptr(),
+        fonts.regular.data.as_ptr()
+    );
+    assert_eq!(
+        fonts.face_for_style(FontStyle::Bold).data.as_ptr(),
+        fonts.bold.data.as_ptr()
+    );
+    assert_eq!(
+        fonts.face_for_style(FontStyle::Italic).data.as_ptr(),
+        fonts.italic.data.as_ptr()
+    );
+    assert_eq!(
+        fonts.face_for_style(FontStyle::BoldItalic).data.as_ptr(),
+        fonts.bold_italic.data.as_ptr()
+    );
 }

@@ -3,11 +3,11 @@
 //! Converts XML elements directly into the `Book -> Chapter -> Block -> Run` model
 //! with zero intermediate DOM allocation.
 
-use std::io::{BufRead, Cursor, Read};
-use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use std::io::{BufRead, Cursor, Read};
 
 use crate::model::{
     over_cap, push_capped, read_capped, Block, Book, Chapter, FontStyle, Run, Style, TextAlign,
@@ -29,7 +29,6 @@ enum ParserState {
     InNotesBody,
     InBinary,
 }
-
 
 pub struct Fb2Parser<R: BufRead> {
     reader: Reader<R>,
@@ -101,7 +100,13 @@ impl<R: BufRead> Fb2Parser<R> {
                     self.handle_text(text)?;
                 }
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(format!("XML parse error at position {}: {:?}", self.reader.error_position(), e)),
+                Err(e) => {
+                    return Err(format!(
+                        "XML parse error at position {}: {:?}",
+                        self.reader.error_position(),
+                        e
+                    ))
+                }
                 _ => {}
             }
             buf.clear();
@@ -112,7 +117,10 @@ impl<R: BufRead> Fb2Parser<R> {
     }
 
     fn current_state(&self) -> ParserState {
-        self.state_stack.last().copied().unwrap_or(ParserState::None)
+        self.state_stack
+            .last()
+            .copied()
+            .unwrap_or(ParserState::None)
     }
 
     fn push_state(&mut self, state: ParserState) {
@@ -190,7 +198,8 @@ impl<R: BufRead> Fb2Parser<R> {
                         self.finish_chapter();
                     }
                     self.ensure_chapter(None);
-                    if let (Some(id), Some(ref mut chap)) = (section_id, &mut self.current_chapter) {
+                    if let (Some(id), Some(ref mut chap)) = (section_id, &mut self.current_chapter)
+                    {
                         let char_cnt = self.cur_char_count;
                         chap.anchors.insert(id, char_cnt);
                     }
@@ -255,21 +264,33 @@ impl<R: BufRead> Fb2Parser<R> {
                 self.current_style = style;
             }
             "strong" | "b" => {
-                push_capped(&mut self.style_stack, self.current_style.clone(), MAX_NEST_DEPTH);
+                push_capped(
+                    &mut self.style_stack,
+                    self.current_style.clone(),
+                    MAX_NEST_DEPTH,
+                );
                 self.current_style.font_style = match self.current_style.font_style {
                     FontStyle::Italic | FontStyle::BoldItalic => FontStyle::BoldItalic,
                     _ => FontStyle::Bold,
                 };
             }
             "emphasis" | "em" | "i" => {
-                push_capped(&mut self.style_stack, self.current_style.clone(), MAX_NEST_DEPTH);
+                push_capped(
+                    &mut self.style_stack,
+                    self.current_style.clone(),
+                    MAX_NEST_DEPTH,
+                );
                 self.current_style.font_style = match self.current_style.font_style {
                     FontStyle::Bold | FontStyle::BoldItalic => FontStyle::BoldItalic,
                     _ => FontStyle::Italic,
                 };
             }
             "a" => {
-                push_capped(&mut self.style_stack, self.current_style.clone(), MAX_NEST_DEPTH);
+                push_capped(
+                    &mut self.style_stack,
+                    self.current_style.clone(),
+                    MAX_NEST_DEPTH,
+                );
                 let mut target: Option<String> = None;
                 let mut is_note = false;
                 for attr in e.attributes().flatten() {
@@ -338,12 +359,14 @@ impl<R: BufRead> Fb2Parser<R> {
         let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_lowercase();
 
         match tag_name.as_str() {
-            "description" | "title-info" | "book-title" | "first-name" | "last-name"
-            | "lang" | "coverpage" => {
+            "description" | "title-info" | "book-title" | "first-name" | "last-name" | "lang"
+            | "coverpage" => {
                 self.pop_state();
             }
             "author" => {
-                let full = format!("{} {}", self.author_first, self.author_last).trim().to_string();
+                let full = format!("{} {}", self.author_first, self.author_last)
+                    .trim()
+                    .to_string();
                 if !full.is_empty() {
                     self.book.meta.authors.push(full);
                 }
@@ -399,7 +422,8 @@ impl<R: BufRead> Fb2Parser<R> {
             "p" | "v" | "subtitle" | "text-author" => {
                 self.in_paragraph = false;
                 if self.in_notes {
-                    if !self.current_note_text.is_empty() && !self.current_note_text.ends_with('\n') {
+                    if !self.current_note_text.is_empty() && !self.current_note_text.ends_with('\n')
+                    {
                         self.current_note_text.push('\n');
                     }
                 } else if !self.current_runs.is_empty() {
@@ -437,7 +461,11 @@ impl<R: BufRead> Fb2Parser<R> {
             }
             "binary" => {
                 if let Some(id) = self.binary_id.take() {
-                    let clean_base64: String = self.binary_buf.chars().filter(|c| !c.is_whitespace()).collect();
+                    let clean_base64: String = self
+                        .binary_buf
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect();
                     if let Ok(decoded) = BASE64_STANDARD.decode(clean_base64) {
                         self.book.add_image(id, decoded);
                     }
@@ -473,7 +501,10 @@ impl<R: BufRead> Fb2Parser<R> {
                     let normalized = normalize_spaces(raw_text);
                     if !normalized.is_empty() {
                         if self.in_notes {
-                            if !self.current_note_text.is_empty() && !self.current_note_text.ends_with(' ') && !self.current_note_text.ends_with('\n') {
+                            if !self.current_note_text.is_empty()
+                                && !self.current_note_text.ends_with(' ')
+                                && !self.current_note_text.ends_with('\n')
+                            {
                                 self.current_note_text.push(' ');
                             }
                             self.current_note_text.push_str(&normalized);
@@ -534,9 +565,12 @@ pub fn parse_fb2(data: &[u8]) -> Result<Book, String> {
     // Check if zip archive (magic PK\x03\x04)
     if data.starts_with(b"PK\x03\x04") {
         let cursor = Cursor::new(data);
-        let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("Zip error: {:?}", e))?;
+        let mut archive =
+            zip::ZipArchive::new(cursor).map_err(|e| format!("Zip error: {:?}", e))?;
         for i in 0..archive.len() {
-            let file = archive.by_index(i).map_err(|e| format!("Zip file error: {:?}", e))?;
+            let file = archive
+                .by_index(i)
+                .map_err(|e| format!("Zip file error: {:?}", e))?;
             if file.name().ends_with(".fb2") || file.name().ends_with(".xml") {
                 // Cap decompression on the actual stream (read_capped), not
                 // the declared size: a bomb entry must fail the parse, not
@@ -570,7 +604,9 @@ pub fn parse_fb2_path(path: &std::path::Path) -> Result<Book, String> {
         let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Zip error: {:?}", e))?;
         for i in 0..archive.len() {
-            let file = archive.by_index(i).map_err(|e| format!("Zip file error: {:?}", e))?;
+            let file = archive
+                .by_index(i)
+                .map_err(|e| format!("Zip file error: {:?}", e))?;
             if file.name().ends_with(".fb2") || file.name().ends_with(".xml") {
                 let parser = Fb2Parser::new(std::io::BufReader::new(file));
                 return parser.parse();
@@ -632,7 +668,10 @@ aGVsbG8gd29ybGQ=
         assert_eq!(book.meta.title, "Rendezvous with Rama");
         assert_eq!(book.meta.authors, vec!["Arthur Clarke"]);
         assert_eq!(book.meta.cover_image_id, Some("cover.jpg".to_string()));
-        assert_eq!(book.images.get("cover.jpg").map(|v| v.as_slice()), Some(b"hello world".as_ref()));
+        assert_eq!(
+            book.images.get("cover.jpg").map(|v| v.as_slice()),
+            Some(b"hello world".as_ref())
+        );
 
         assert_eq!(book.chapters.len(), 1);
         let ch1 = &book.chapters[0];
@@ -650,7 +689,10 @@ aGVsbG8gd29ybGQ=
         // Check footnote target
         if let Block::Paragraph { runs, .. } = &ch1.blocks[4] {
             let note_run = runs.iter().find(|r| r.style.footnote_ref.is_some());
-            assert_eq!(note_run.and_then(|r| r.style.footnote_ref.as_deref()), Some("n1"));
+            assert_eq!(
+                note_run.and_then(|r| r.style.footnote_ref.as_deref()),
+                Some("n1")
+            );
         } else {
             panic!("Expected footnote ref in paragraph");
         }

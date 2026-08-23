@@ -4,8 +4,8 @@
 
 use ybdev::input::Gesture;
 use yui::painter::{pt, Painter, Rect};
-use yui::Orientation;
 use yui::screen::{Action, Screen};
+use yui::Orientation;
 
 use crate::split::ReaderSettings;
 
@@ -103,7 +103,14 @@ impl Screen for CropDialog {
                 fit_s.split.margin_top = 0.0;
                 fit_s.split.margin_right = 0.0;
                 fit_s.split.margin_bottom = 0.0;
-                self.page_gray = crate::render::render_page(doc.as_ref(), self.page_no, 0, &fit_s, w as u32, h as u32);
+                self.page_gray = crate::render::render_page(
+                    doc.as_ref(),
+                    self.page_no,
+                    0,
+                    &fit_s,
+                    w as u32,
+                    h as u32,
+                );
             }
         }
 
@@ -276,7 +283,14 @@ impl Screen for CropDialog {
             ActiveEdge::All => (s.margin_top * 100.0).round() as i32,
         };
         let pct_str = format!("{}%", pct);
-        p.text_center_in(bar_x + pt(34.0), bar_x + pt(66.0), r2_y + pt(10.5), 7.0, 0, &pct_str);
+        p.text_center_in(
+            bar_x + pt(34.0),
+            bar_x + pt(66.0),
+            r2_y + pt(10.5),
+            7.0,
+            0,
+            &pct_str,
+        );
 
         // Plus button
         let p_btn = Rect::new(bar_x + pt(68.0), r2_y, pt(24.0), btn_h);
@@ -286,12 +300,26 @@ impl Screen for CropDialog {
         // Reset button
         let res_btn = Rect::new(bar_x + pt(100.0), r2_y, pt(52.0), btn_h);
         p.rect_outline_t(res_btn, 1, 100);
-        p.text_center_in(res_btn.x, res_btn.x + res_btn.w, r2_y + pt(10.5), 7.0, 0, "Reset");
+        p.text_center_in(
+            res_btn.x,
+            res_btn.x + res_btn.w,
+            r2_y + pt(10.5),
+            7.0,
+            0,
+            "Reset",
+        );
 
         // Done button
         let done_btn = Rect::new(bar_x + bar_w - pt(68.0), r2_y, pt(60.0), btn_h);
         p.rect(done_btn, 0);
-        p.text_center_in(done_btn.x, done_btn.x + done_btn.w, r2_y + pt(10.5), 7.5, 255, "Apply Crop");
+        p.text_center_in(
+            done_btn.x,
+            done_btn.x + done_btn.w,
+            r2_y + pt(10.5),
+            7.5,
+            255,
+            "Apply Crop",
+        );
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
@@ -318,7 +346,11 @@ impl Screen for CropDialog {
         match g {
             Gesture::Tap { .. } => {
                 // Check floating palette buttons
-                if vy >= bar_y && vy <= bar_y + bar_h + pt(8.0) && vx >= bar_x && vx <= bar_x + bar_w {
+                if vy >= bar_y
+                    && vy <= bar_y + bar_h + pt(8.0)
+                    && vx >= bar_x
+                    && vx <= bar_x + bar_w
+                {
                     if vy < bar_y + bar_h / 2 {
                         // Row 1: Edge buttons
                         let edge_btn_w = bar_w / 5;
@@ -469,13 +501,15 @@ impl Screen for CropDialog {
                             s.margin_top = ((vy - page_oy) as f32 / rh as f32).clamp(0.0, 0.40);
                         }
                         ActiveEdge::Bottom => {
-                            s.margin_bottom = ((page_oy + rh - vy) as f32 / rh as f32).clamp(0.0, 0.40);
+                            s.margin_bottom =
+                                ((page_oy + rh - vy) as f32 / rh as f32).clamp(0.0, 0.40);
                         }
                         ActiveEdge::Left => {
                             s.margin_left = ((vx - page_ox) as f32 / rw as f32).clamp(0.0, 0.40);
                         }
                         ActiveEdge::Right => {
-                            s.margin_right = ((page_ox + rw - vx) as f32 / rw as f32).clamp(0.0, 0.40);
+                            s.margin_right =
+                                ((page_ox + rw - vx) as f32 / rw as f32).clamp(0.0, 0.40);
                         }
                         _ => {}
                     }

@@ -1,8 +1,8 @@
 //! Text shaping using rustybuzz with high-performance word-advance caching.
 
+use rustybuzz::UnicodeBuffer;
 use std::collections::HashMap;
 use std::sync::Arc;
-use rustybuzz::UnicodeBuffer;
 
 use crate::font::FontSystem;
 use crate::model::FontStyle;
@@ -82,7 +82,10 @@ impl ShapeCache {
         if self.cache.len() >= 65536 {
             self.cache.clear();
         }
-        self.cache.insert(h, (word.to_string(), style, size_scaled, Arc::clone(&shaped)));
+        self.cache.insert(
+            h,
+            (word.to_string(), style, size_scaled, Arc::clone(&shaped)),
+        );
         shaped
     }
 
@@ -107,17 +110,20 @@ impl ShapeCache {
         if self.cache.len() >= 65536 {
             self.cache.clear();
         }
-        self.cache.insert(h, (word.to_string(), FontStyle::Regular, size_scaled, Arc::clone(&shaped)));
+        self.cache.insert(
+            h,
+            (
+                word.to_string(),
+                FontStyle::Regular,
+                size_scaled,
+                Arc::clone(&shaped),
+            ),
+        );
         shaped
     }
 
     /// Fast lookup for single space advance width in pixels.
-    pub fn space_advance(
-        &mut self,
-        style: FontStyle,
-        size_pt: f32,
-        fonts: &FontSystem,
-    ) -> f32 {
+    pub fn space_advance(&mut self, style: FontStyle, size_pt: f32, fonts: &FontSystem) -> f32 {
         let size_scaled = (size_pt * 10.0).round() as u16;
         if let Some(&adv) = self.space_advance.get(&(style, size_scaled)) {
             return adv;
@@ -129,12 +135,7 @@ impl ShapeCache {
     }
 
     /// Fast lookup for hyphen advance width in pixels.
-    pub fn hyphen_advance(
-        &mut self,
-        style: FontStyle,
-        size_pt: f32,
-        fonts: &FontSystem,
-    ) -> f32 {
+    pub fn hyphen_advance(&mut self, style: FontStyle, size_pt: f32, fonts: &FontSystem) -> f32 {
         let size_scaled = (size_pt * 10.0).round() as u16;
         if let Some(&adv) = self.hyphen_advance.get(&(style, size_scaled)) {
             return adv;

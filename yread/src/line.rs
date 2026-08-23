@@ -1,10 +1,10 @@
 //! Greedy line breaking with hyphenation, word tokenization, and line layout.
 
-use std::sync::Arc;
-use hypher::{hyphenate, Lang};
 use crate::font::FontSystem;
 use crate::model::{Run, Style, TextAlign};
 use crate::shape::{ShapeCache, ShapedWord};
+use hypher::{hyphenate, Lang};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum LineItem {
@@ -38,9 +38,11 @@ impl LineItem {
     pub fn advance(&self) -> f32 {
         match self {
             LineItem::Word { shaped, .. } => shaped.advance,
-            LineItem::HyphenatedPrefix { prefix_shaped, hyphen_adv, .. } => {
-                prefix_shaped.advance + hyphen_adv
-            }
+            LineItem::HyphenatedPrefix {
+                prefix_shaped,
+                hyphen_adv,
+                ..
+            } => prefix_shaped.advance + hyphen_adv,
             LineItem::Space { adv, .. } => *adv,
             LineItem::HardBreak => 0.0,
         }
@@ -52,16 +54,32 @@ impl LineItem {
 
     pub fn byte_range(&self) -> Option<(usize, usize)> {
         match self {
-            LineItem::Word { byte_start, byte_end, .. } => Some((*byte_start, *byte_end)),
-            LineItem::HyphenatedPrefix { byte_start, byte_end, .. } => Some((*byte_start, *byte_end)),
+            LineItem::Word {
+                byte_start,
+                byte_end,
+                ..
+            } => Some((*byte_start, *byte_end)),
+            LineItem::HyphenatedPrefix {
+                byte_start,
+                byte_end,
+                ..
+            } => Some((*byte_start, *byte_end)),
             _ => None,
         }
     }
 
     pub fn char_range(&self) -> Option<(usize, usize)> {
         match self {
-            LineItem::Word { char_start, char_end, .. } => Some((*char_start, *char_end)),
-            LineItem::HyphenatedPrefix { char_start, char_end, .. } => Some((*char_start, *char_end)),
+            LineItem::Word {
+                char_start,
+                char_end,
+                ..
+            } => Some((*char_start, *char_end)),
+            LineItem::HyphenatedPrefix {
+                char_start,
+                char_end,
+                ..
+            } => Some((*char_start, *char_end)),
             _ => None,
         }
     }
@@ -174,13 +192,34 @@ pub fn break_paragraph_lines_streaming(
                 let is_pure_punct = word_str.chars().all(|c| {
                     matches!(
                         c,
-                        ',' | '.' | '!' | '?' | ';' | ':' | ')' | ']' | '}' | '”' | '’' | '»' | '…' | '%' | '°'
+                        ',' | '.'
+                            | '!'
+                            | '?'
+                            | ';'
+                            | ':'
+                            | ')'
+                            | ']'
+                            | '}'
+                            | '”'
+                            | '’'
+                            | '»'
+                            | '…'
+                            | '%'
+                            | '°'
                     )
                 });
                 let prev_is_word = matches!(tokens.last(), Some(LineItem::Word { .. }));
 
                 if is_pure_punct && prev_is_word {
-                    if let Some(LineItem::Word { byte_start, byte_end, char_end, shaped, style, .. }) = tokens.last_mut() {
+                    if let Some(LineItem::Word {
+                        byte_start,
+                        byte_end,
+                        char_end,
+                        shaped,
+                        style,
+                        ..
+                    }) = tokens.last_mut()
+                    {
                         *byte_end = word_byte_end;
                         *char_end = word_char_end;
                         if let Some(full_str) = text.get(*byte_start..word_byte_end) {
@@ -239,7 +278,11 @@ pub fn break_paragraph_lines_streaming(
             let seg_lines = break_segment(
                 text,
                 std::mem::take(&mut segment_tokens),
-                if is_first_segment_line { first_line_indent_px } else { 0.0 },
+                if is_first_segment_line {
+                    first_line_indent_px
+                } else {
+                    0.0
+                },
                 max_width,
                 base_font_size,
                 line_spacing_mult,
@@ -280,7 +323,11 @@ pub fn break_paragraph_lines_streaming(
         let seg_lines = break_segment(
             text,
             segment_tokens,
-            if is_first_segment_line { first_line_indent_px } else { 0.0 },
+            if is_first_segment_line {
+                first_line_indent_px
+            } else {
+                0.0
+            },
             max_width,
             base_font_size,
             line_spacing_mult,
@@ -387,7 +434,18 @@ fn greedy_break(
         } else {
             // Check hyphenation
             let mut hyphenated = false;
-            if let (Some(target_lang), LineItem::Word { byte_start, byte_end, char_start, style, shaped: word_shaped, .. }) = (lang, &item) {
+            if let (
+                Some(target_lang),
+                LineItem::Word {
+                    byte_start,
+                    byte_end,
+                    char_start,
+                    style,
+                    shaped: word_shaped,
+                    ..
+                },
+            ) = (lang, &item)
+            {
                 if let Some(word_text) = text.get(*byte_start..*byte_end) {
                     if word_text.chars().count() >= 5 {
                         let syllables: Vec<&str> = hyphenate(word_text, target_lang).collect();
@@ -402,14 +460,16 @@ fn greedy_break(
                                 prefix.push_str(syl);
                                 if let Some(p_adv) = boundaries.advance(prefix.len()) {
                                     if current_line_width + p_adv + hyp_adv <= allowed_width {
-                                        best_break = Some((prefix.len(), prefix.chars().count(), p_adv));
+                                        best_break =
+                                            Some((prefix.len(), prefix.chars().count(), p_adv));
                                     }
                                 }
                             }
 
                             if let Some((pref_bytes, pref_chars, _p_adv)) = best_break {
                                 let prefix_str = &word_text[..pref_bytes];
-                                let prefix_shaped = cache.shape_word(prefix_str, style.font_style, run_size, fonts);
+                                let prefix_shaped =
+                                    cache.shape_word(prefix_str, style.font_style, run_size, fonts);
                                 current_line_items.push(LineItem::HyphenatedPrefix {
                                     byte_start: *byte_start,
                                     byte_end: *byte_start + pref_bytes,
@@ -421,7 +481,8 @@ fn greedy_break(
                                 });
 
                                 let suffix = &word_text[pref_bytes..];
-                                let suffix_shaped = cache.shape_word(suffix, style.font_style, run_size, fonts);
+                                let suffix_shaped =
+                                    cache.shape_word(suffix, style.font_style, run_size, fonts);
                                 let suffix_item = LineItem::Word {
                                     byte_start: *byte_start + pref_bytes,
                                     byte_end: *byte_end,
@@ -453,7 +514,11 @@ fn greedy_break(
             }
 
             if !hyphenated {
-                while current_line_items.last().map(|it| it.is_space()).unwrap_or(false) {
+                while current_line_items
+                    .last()
+                    .map(|it| it.is_space())
+                    .unwrap_or(false)
+                {
                     current_line_items.pop();
                 }
 
@@ -480,7 +545,11 @@ fn greedy_break(
     }
 
     if !current_line_items.is_empty() {
-        while current_line_items.last().map(|it| it.is_space()).unwrap_or(false) {
+        while current_line_items
+            .last()
+            .map(|it| it.is_space())
+            .unwrap_or(false)
+        {
             current_line_items.pop();
         }
         let allowed_width = if is_first_line {
@@ -532,7 +601,9 @@ fn build_line(
         }
 
         let style = match it {
-            LineItem::Word { style, .. } | LineItem::HyphenatedPrefix { style, .. } | LineItem::Space { style, .. } => style,
+            LineItem::Word { style, .. }
+            | LineItem::HyphenatedPrefix { style, .. }
+            | LineItem::Space { style, .. } => style,
             LineItem::HardBreak => continue,
         };
         let m = fonts.metrics(style.font_style, base_font_size * style.size_mult);

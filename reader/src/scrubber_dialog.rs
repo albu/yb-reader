@@ -42,7 +42,12 @@ fn row1_rects(card: Rect) -> (Rect, Rect) {
 
 /// Row 3: the slider track as painted.
 fn track_rect(card: Rect) -> Rect {
-    Rect::new(card.x + pt(24.0), card.y + pt(74.0), card.w - pt(48.0), pt(6.0))
+    Rect::new(
+        card.x + pt(24.0),
+        card.y + pt(74.0),
+        card.w - pt(48.0),
+        pt(6.0),
+    )
 }
 
 /// Row 4: the four step buttons [-10] [-1] [+1] [+10].
@@ -134,7 +139,12 @@ impl<F: FnMut(ScrubberAction) -> Action> Screen for ScrubberDialog<F> {
 
         // Row 2: Page Progress Text
         let pct = (self.target_page + 1) * 100 / self.total_pages;
-        let prog_text = format!("Page {} of {}  ({}%)", self.target_page + 1, self.total_pages, pct);
+        let prog_text = format!(
+            "Page {} of {}  ({}%)",
+            self.target_page + 1,
+            self.total_pages,
+            pct
+        );
         p.text_center(card.y + pt(52.0), 11.5, 0, &prog_text);
 
         // Row 3: Interactive Slider Track
@@ -164,7 +174,14 @@ impl<F: FnMut(ScrubberAction) -> Action> Screen for ScrubberDialog<F> {
         let labels = ["-10", "-1", "+1", "+10"];
         for (brect, label) in steps.iter().zip(labels) {
             p.rect_outline_t(*brect, 1, 120);
-            p.text_center_in(brect.x, brect.x + brect.w, brect.y + pt(20.0), 9.5, 0, label);
+            p.text_center_in(
+                brect.x,
+                brect.x + brect.w,
+                brect.y + pt(20.0),
+                9.5,
+                0,
+                label,
+            );
         }
     }
 
@@ -216,13 +233,19 @@ impl<F: FnMut(ScrubberAction) -> Action> Screen for ScrubberDialog<F> {
 
                 Action::Keep
             }
-            Gesture::Swipe { dir: SwipeDir::East, .. } => {
+            Gesture::Swipe {
+                dir: SwipeDir::East,
+                ..
+            } => {
                 // Swipe right -> +10 pages
                 let new_page = (self.target_page + 10).min(self.total_pages.saturating_sub(1));
                 self.set_page(new_page);
                 Action::Redraw
             }
-            Gesture::Swipe { dir: SwipeDir::West, .. } => {
+            Gesture::Swipe {
+                dir: SwipeDir::West,
+                ..
+            } => {
                 // Swipe left -> -10 pages
                 let new_page = self.target_page.saturating_sub(10);
                 self.set_page(new_page);

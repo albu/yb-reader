@@ -1,13 +1,16 @@
 //! Font management, fallback chain, and font metrics.
 
+use crate::model::FontStyle;
 use std::sync::OnceLock;
 use swash::FontRef;
-use crate::model::FontStyle;
 
-pub static LITERATA_REGULAR_BYTES: &[u8] = include_bytes!("../../resources/fonts/Literata-Regular.ttf");
+pub static LITERATA_REGULAR_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/Literata-Regular.ttf");
 pub static LITERATA_BOLD_BYTES: &[u8] = include_bytes!("../../resources/fonts/Literata-Bold.ttf");
-pub static LITERATA_ITALIC_BYTES: &[u8] = include_bytes!("../../resources/fonts/Literata-Italic.ttf");
-pub static LITERATA_BOLD_ITALIC_BYTES: &[u8] = include_bytes!("../../resources/fonts/Literata-BoldItalic.ttf");
+pub static LITERATA_ITALIC_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/Literata-Italic.ttf");
+pub static LITERATA_BOLD_ITALIC_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/Literata-BoldItalic.ttf");
 pub static NOTO_SANS_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSans-Regular.ttf");
 
 #[derive(Clone)]
@@ -87,7 +90,9 @@ fn raw_for(style: FontStyle) -> &'static RawFaceMetrics {
         FontStyle::Regular => RAW_REGULAR.get_or_init(|| raw_metrics(LITERATA_REGULAR_BYTES)),
         FontStyle::Bold => RAW_BOLD.get_or_init(|| raw_metrics(LITERATA_BOLD_BYTES)),
         FontStyle::Italic => RAW_ITALIC.get_or_init(|| raw_metrics(LITERATA_ITALIC_BYTES)),
-        FontStyle::BoldItalic => RAW_BOLD_ITALIC.get_or_init(|| raw_metrics(LITERATA_BOLD_ITALIC_BYTES)),
+        FontStyle::BoldItalic => {
+            RAW_BOLD_ITALIC.get_or_init(|| raw_metrics(LITERATA_BOLD_ITALIC_BYTES))
+        }
     }
 }
 
@@ -116,17 +121,23 @@ impl FontSystem {
     /// statics, so this is identical to re-parsing face_for_style().
     /// data on every shape call, just ~µs cheaper).
     pub fn rustybuzz_face(&self, style: FontStyle) -> &'static rustybuzz::Face<'static> {
-        let build = |bytes: &'static [u8]| rustybuzz::Face::from_slice(bytes, 0).expect("embedded font parses");
+        let build = |bytes: &'static [u8]| {
+            rustybuzz::Face::from_slice(bytes, 0).expect("embedded font parses")
+        };
         match style {
             FontStyle::Regular => RB_REGULAR.get_or_init(|| build(LITERATA_REGULAR_BYTES)),
             FontStyle::Bold => RB_BOLD.get_or_init(|| build(LITERATA_BOLD_BYTES)),
             FontStyle::Italic => RB_ITALIC.get_or_init(|| build(LITERATA_ITALIC_BYTES)),
-            FontStyle::BoldItalic => RB_BOLD_ITALIC.get_or_init(|| build(LITERATA_BOLD_ITALIC_BYTES)),
+            FontStyle::BoldItalic => {
+                RB_BOLD_ITALIC.get_or_init(|| build(LITERATA_BOLD_ITALIC_BYTES))
+            }
         }
     }
 
     pub fn rustybuzz_code_face(&self) -> &'static rustybuzz::Face<'static> {
-        let build = |bytes: &'static [u8]| rustybuzz::Face::from_slice(bytes, 0).expect("embedded font parses");
+        let build = |bytes: &'static [u8]| {
+            rustybuzz::Face::from_slice(bytes, 0).expect("embedded font parses")
+        };
         RB_CODE.get_or_init(|| build(NOTO_SANS_BYTES))
     }
 

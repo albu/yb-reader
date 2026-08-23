@@ -87,7 +87,8 @@ pub fn load_snapshot_from(
     // XOR so a mismatch shows up as nonzero in one integer compare path.
     let snap_preset = preset_code(&settings.split.preset) ^ bytes[34];
     let snap_engine = engine ^ bytes[35];
-    let snap_rotation = u16::from_le_bytes(bytes[36..38].try_into().ok()?) ^ settings.split.rotation;
+    let snap_rotation =
+        u16::from_le_bytes(bytes[36..38].try_into().ok()?) ^ settings.split.rotation;
     let snap_overlap = f32::from_le_bytes(bytes[38..42].try_into().ok()?);
     let snap_ml = f32::from_le_bytes(bytes[42..46].try_into().ok()?);
     let snap_mt = f32::from_le_bytes(bytes[46..50].try_into().ok()?);
@@ -137,7 +138,9 @@ pub fn load_snapshot(
     h: u32,
     engine: u8,
 ) -> Option<Vec<u8>> {
-    load_snapshot_from(CACHE_DIR, book_name, page_no, sub_idx, settings, w, h, engine)
+    load_snapshot_from(
+        CACHE_DIR, book_name, page_no, sub_idx, settings, w, h, engine,
+    )
 }
 
 /// Save page snapshot to cache and run garbage collection.
@@ -271,43 +274,67 @@ mod tests {
         assert_eq!(loaded, Some(pixels.clone()));
 
         // Different page -> Rejected
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 6, 0, &settings, w, h, 0), None);
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 6, 0, &settings, w, h, 0),
+            None
+        );
 
         // Different engine -> Rejected (a yread bitmap must never pose as
         // a mupdf one and vice versa — the engines paginate differently).
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &settings, w, h, 1), None);
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &settings, w, h, 1),
+            None
+        );
 
         // Different font size -> Rejected
         let mut diff_font = settings;
         diff_font.font_size = 14.0;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_font, w, h, 0), None);
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_font, w, h, 0),
+            None
+        );
 
         // Different invert -> Rejected
         let mut diff_inv = settings;
         diff_inv.invert = true;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_inv, w, h, 0), None);
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_inv, w, h, 0),
+            None
+        );
 
         // Different rotation -> Rejected (the bug this header field exists
         // for: portrait renders used to pose as landscape and vice versa).
         let mut diff_rot = settings;
         diff_rot.split.rotation = 270;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_rot, w, h, 0), None);
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_rot, w, h, 0),
+            None
+        );
 
         // Different preset -> Rejected (H2 and H3 share visual dims and
         // sub numbering but crop different regions).
         let mut diff_preset = settings;
         diff_preset.split.preset = crate::split::SplitPreset::Horizontal2;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_preset, w, h, 0), None);
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_preset, w, h, 0),
+            None
+        );
 
         // Different crop margin -> Rejected (the big-PDF tuning workflow).
         let mut diff_crop = settings;
         diff_crop.split.margin_top = 0.10;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_crop, w, h, 0), None);
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_crop, w, h, 0),
+            None
+        );
 
         // Different line spacing -> Rejected
         let mut diff_spacing = settings;
         diff_spacing.line_spacing = 1.4;
-        assert_eq!(load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_spacing, w, h, 0), None);
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_spacing, w, h, 0),
+            None
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

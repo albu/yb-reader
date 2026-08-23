@@ -148,11 +148,7 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
         Self::with_items_and_active(items, best_idx, on_action)
     }
 
-    fn with_items_and_active(
-        items: Vec<TocItem>,
-        best_idx: usize,
-        on_action: F,
-    ) -> Self {
+    fn with_items_and_active(items: Vec<TocItem>, best_idx: usize, on_action: F) -> Self {
         let mut expanded = vec![false; items.len()];
         // Expand the ancestors (strictly shallower entries) above it so
         // "where am I" is visible on open; the entry itself stays as-is.
@@ -184,10 +180,7 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
             on_action,
         };
         let vis = dlg.visible_indices();
-        let vis_pos = vis
-            .iter()
-            .position(|&i| i >= best_idx)
-            .unwrap_or(0);
+        let vis_pos = vis.iter().position(|&i| i >= best_idx).unwrap_or(0);
         dlg.offset = vis_pos.saturating_sub(2);
         dlg
     }
@@ -287,7 +280,6 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
                 0
             };
 
-
             let clean_title = o.title.trim().to_string();
             if !clean_title.is_empty() {
                 out.push(TocItem {
@@ -334,7 +326,14 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
         let close_y = pt(8.0);
         let close_rect = Rect::new(close_x, close_y, close_w, close_h);
         p.rect_outline_t(close_rect, 1, 100);
-        p.text_center_in(close_x, close_x + close_w, close_y + pt(16.0), 8.5, 0, "Close");
+        p.text_center_in(
+            close_x,
+            close_x + close_w,
+            close_y + pt(16.0),
+            8.5,
+            0,
+            "Close",
+        );
 
         // Mode toggle (All ⇄ Top level), left of Close. The label shows
         // the mode tapping will switch TO.
@@ -369,12 +368,23 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
         }
 
         if self.items.is_empty() {
-            p.text_center(h / 2, 11.0, 0, "No Table of Contents available in this book");
+            p.text_center(
+                h / 2,
+                11.0,
+                0,
+                "No Table of Contents available in this book",
+            );
             return;
         }
 
         // List of Chapters
-        let list_top = bar_h + pt(10.0) + if self.back_target.is_some() { back_h + pt(4.0) } else { 0 };
+        let list_top = bar_h
+            + pt(10.0)
+            + if self.back_target.is_some() {
+                back_h + pt(4.0)
+            } else {
+                0
+            };
         let row_h = pt(42.0);
         let content_h = h - list_top - pt(35.0);
         self.per_page = ((content_h / row_h) as usize).max(1);
@@ -422,27 +432,42 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
             let max_w = (w - text_x - pt(70.0) - if expandable { pt(34.0) } else { 0 }) as f32;
             let title = p.truncate(9.5, &item.title, max_w);
 
-            let marker = if is_current { "● " } else { "" };
-            let display_title = format!("{}{}", marker, title);
-            p.text(text_x, text_y, 9.5, 0, &display_title);
+            // Current chapter: filled square in the indent gutter — ● has
+            // no glyph in the embedded subset (fontdue draws .notdef).
+            if is_current {
+                p.rect(
+                    Rect::new(text_x - pt(6.5), text_y - pt(5.25), pt(3.5), pt(3.5)),
+                    0,
+                );
+            }
+            p.text(text_x, text_y, 9.5, 0, &title);
 
             // Page number on right
             let page_str = format!("p. {}", item.page + 1);
-            let page_right = if expandable { w - pad - pt(56.0) } else { w - pad - pt(12.0) };
+            let page_right = if expandable {
+                w - pad - pt(56.0)
+            } else {
+                w - pad - pt(12.0)
+            };
             p.text_right(page_right, text_y, 8.5, 100, &page_str);
         }
 
         // Footer Pagination Info
         let footer_text = if vis.len() < self.items.len() {
             format!(
-                "{}-{} of {} shown ({} total) · ▸ expands",
+                "{}-{} of {} shown ({} total) · > rows expand",
                 self.offset + 1,
                 visible,
                 vis.len(),
                 self.items.len()
             )
         } else {
-            format!("{}-{} of {} chapters", self.offset + 1, visible, self.items.len())
+            format!(
+                "{}-{} of {} chapters",
+                self.offset + 1,
+                visible,
+                self.items.len()
+            )
         };
         p.text_center(h - pt(12.0), 8.0, 120, &footer_text);
     }
@@ -486,10 +511,7 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
                     };
                     self.apply_mode();
                     let vis = self.visible_indices();
-                    let vis_pos = vis
-                        .iter()
-                        .position(|&i| i >= self.active_idx)
-                        .unwrap_or(0);
+                    let vis_pos = vis.iter().position(|&i| i >= self.active_idx).unwrap_or(0);
                     self.offset = vis_pos.saturating_sub(2);
                     return Action::Redraw;
                 }
@@ -552,12 +574,18 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
 
             // Scroll and tree toggles use partial refreshes — a full
             // e-ink flash per scroll step made the list barely usable.
-            Gesture::Swipe { dir: SwipeDir::North, .. } => {
+            Gesture::Swipe {
+                dir: SwipeDir::North,
+                ..
+            } => {
                 let vis_len = self.visible_indices().len();
                 self.offset = (self.offset + self.per_page.max(1)).min(vis_len.saturating_sub(1));
                 Action::Redraw
             }
-            Gesture::Swipe { dir: SwipeDir::South, .. } => {
+            Gesture::Swipe {
+                dir: SwipeDir::South,
+                ..
+            } => {
                 if self.offset > 0 {
                     self.offset = self.offset.saturating_sub(self.per_page);
                     Action::Redraw
@@ -587,11 +615,11 @@ mod tests {
 
     fn book_toc() -> Vec<yread::model::TocEntry> {
         vec![
-            entry("Part One", 0, 0),       // char 0
-            entry("Ch 1", 5000, 1),        // char 5000
-            entry("Sec 1.1", 9000, 2),     // char 9000
-            entry("Part Two", 20000, 0),   // char 20000
-            entry("Ch 2", 24000, 1),       // char 24000
+            entry("Part One", 0, 0),     // char 0
+            entry("Ch 1", 5000, 1),      // char 5000
+            entry("Sec 1.1", 9000, 2),   // char 9000
+            entry("Part Two", 20000, 0), // char 20000
+            entry("Ch 2", 24000, 1),     // char 24000
         ]
     }
 
@@ -656,7 +684,9 @@ mod tests {
     #[test]
     fn flat_toc_shows_everything() {
         // All level 0 (from_chapters shape): no tree, no behavior change.
-        let flat: Vec<yread::model::TocEntry> = (0..5).map(|i| entry(&format!("Ch {i}"), i * 10, 0)).collect();
+        let flat: Vec<yread::model::TocEntry> = (0..5)
+            .map(|i| entry(&format!("Ch {i}"), i * 10, 0))
+            .collect();
         let d = TocDialog::from_yread_toc(&flat, 0, 30, &[0], |_| Action::Keep);
         assert_eq!(d.visible_indices().len(), 5);
     }
@@ -680,7 +710,9 @@ mod tests {
 
     #[test]
     fn mode_toggle_hidden_on_flat_toc() {
-        let flat: Vec<yread::model::TocEntry> = (0..5).map(|i| entry(&format!("Ch {i}"), i * 10, 0)).collect();
+        let flat: Vec<yread::model::TocEntry> = (0..5)
+            .map(|i| entry(&format!("Ch {i}"), i * 10, 0))
+            .collect();
         let mut d = TocDialog::from_yread_toc(&flat, 0, 30, &[0], |_| Action::Keep);
         assert!(d.mode_row_rect().is_none());
         // Stamping is still a no-op-safe call on flat lists.

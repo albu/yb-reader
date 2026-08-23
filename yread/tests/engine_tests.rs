@@ -65,7 +65,11 @@ fn test_fb2_pagination_and_char_offset_invariance() {
         Some(hypher::Lang::English),
     );
 
-    assert!(pt_11pt.page_count() >= 2, "Expected multiple pages at 11pt, got {}", pt_11pt.page_count());
+    assert!(
+        pt_11pt.page_count() >= 2,
+        "Expected multiple pages at 11pt, got {}",
+        pt_11pt.page_count()
+    );
 
     // Take a target character in the middle of page 2
     let page2_start_char = pt_11pt.char_for_page(1);
@@ -73,7 +77,11 @@ fn test_fb2_pagination_and_char_offset_invariance() {
 
     // Verify binary search locates page 1 (0-indexed)
     let found_page = pt_11pt.page_for_char(target_char);
-    assert_eq!(found_page, 1, "Character {} should land on page 1", target_char);
+    assert_eq!(
+        found_page, 1,
+        "Character {} should land on page 1",
+        target_char
+    );
 
     // 2. Now simulate live font change to 16pt (re-paginate)
     let mut config_16pt = config_small;
@@ -88,25 +96,42 @@ fn test_fb2_pagination_and_char_offset_invariance() {
     );
 
     // 16pt must produce more pages
-    assert!(pt_16pt.page_count() > pt_11pt.page_count(), "16pt should have more pages than 11pt");
+    assert!(
+        pt_16pt.page_count() > pt_11pt.page_count(),
+        "16pt should have more pages than 11pt"
+    );
 
     // Land on the exact same character offset!
     let landing_page = pt_16pt.page_for_char(target_char);
     let landing_start_char = pt_16pt.char_for_page(landing_page);
     let landing_end_char = layouts_16pt[landing_page].end_char;
 
-    assert!(target_char >= landing_start_char && target_char <= landing_end_char,
+    assert!(
+        target_char >= landing_start_char && target_char <= landing_end_char,
         "Target char {} must land inside landing page [{}, {}]",
-        target_char, landing_start_char, landing_end_char
+        target_char,
+        landing_start_char,
+        landing_end_char
     );
 
     // 3. Render landing page to grayscale buffer and verify pixels
     let mut raster = Rasterizer::new();
     let mut fb = vec![255u8; 600 * 800];
-    raster.render_page(&book, &layouts_16pt[landing_page], &config_16pt, &fonts, &mut fb, 600);
+    raster.render_page(
+        &book,
+        &layouts_16pt[landing_page],
+        &config_16pt,
+        &fonts,
+        &mut fb,
+        600,
+    );
 
     let dark_pixels = fb.iter().filter(|&&p| p < 128).count();
-    assert!(dark_pixels > 100, "Rendered page must have ink (dark pixels), got {}", dark_pixels);
+    assert!(
+        dark_pixels > 100,
+        "Rendered page must have ink (dark pixels), got {}",
+        dark_pixels
+    );
 }
 
 #[test]
@@ -164,15 +189,19 @@ fn test_epub_parse_and_paginate() {
         zip.write_all(b"application/epub+zip").unwrap();
 
         zip.start_file("META-INF/container.xml", options).unwrap();
-        zip.write_all(br#"<?xml version="1.0"?>
+        zip.write_all(
+            br#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
-</container>"#).unwrap();
+</container>"#,
+        )
+        .unwrap();
 
         zip.start_file("OEBPS/content.opf", options).unwrap();
-        zip.write_all(br#"<?xml version="1.0" encoding="utf-8"?>
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookID" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:title>A Tale of Two Cities</dc:title>
@@ -185,7 +214,9 @@ fn test_epub_parse_and_paginate() {
   <spine>
     <itemref idref="ch1"/>
   </spine>
-</package>"#).unwrap();
+</package>"#,
+        )
+        .unwrap();
 
         zip.start_file("OEBPS/ch1.xhtml", options).unwrap();
         zip.write_all(br#"<?xml version="1.0" encoding="utf-8"?>
@@ -215,7 +246,8 @@ fn test_epub_parse_and_paginate() {
     let mut cache = ShapeCache::new();
     let config = LayoutConfig::default();
 
-    let (pt, layouts) = paginate_chapter(ch, &config, &fonts, &mut cache, Some(hypher::Lang::English));
+    let (pt, layouts) =
+        paginate_chapter(ch, &config, &fonts, &mut cache, Some(hypher::Lang::English));
     assert_eq!(pt.page_count(), 1);
     assert_eq!(layouts.len(), 1);
 }
@@ -224,7 +256,10 @@ fn test_epub_parse_and_paginate() {
 fn test_html_entity_unescape_and_lossy_safety() {
     use yread::epub::unescape_html_lossy;
 
-    assert_eq!(unescape_html_lossy("Hello&nbsp;world"), "Hello\u{00A0}world");
+    assert_eq!(
+        unescape_html_lossy("Hello&nbsp;world"),
+        "Hello\u{00A0}world"
+    );
     assert_eq!(unescape_html_lossy("A&mdash;B&hellip;C"), "A—B…C");
     assert_eq!(unescape_html_lossy("&#8212;"), "—");
     assert_eq!(unescape_html_lossy("&#x2014;"), "—");
@@ -279,11 +314,15 @@ fn test_epub_footnote_and_link_resolution() {
 
     // Check that footnote_ref is populated in paragraph runs
     if let Block::Paragraph { runs, .. } = &ch.blocks[0] {
-        let fn1_run = runs.iter().find(|r| r.style.footnote_ref.as_deref() == Some("#fn1"));
+        let fn1_run = runs
+            .iter()
+            .find(|r| r.style.footnote_ref.as_deref() == Some("#fn1"));
         assert!(fn1_run.is_some());
         assert!(fn1_run.unwrap().style.is_sup);
 
-        let ext_run = runs.iter().find(|r| r.style.footnote_ref.as_deref() == Some("notes.xhtml#n2"));
+        let ext_run = runs
+            .iter()
+            .find(|r| r.style.footnote_ref.as_deref() == Some("notes.xhtml#n2"));
         assert!(ext_run.is_some());
     } else {
         panic!("Expected paragraph");
@@ -310,7 +349,10 @@ fn epub_with_body(body: &str) -> Vec<u8> {
     zip.start_file("content.opf", options).unwrap();
     zip.write_all(br#"<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>T</dc:title><dc:language>en</dc:language></metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#).unwrap();
     zip.start_file("c1.xhtml", options).unwrap();
-    let doc = format!(r#"<html><head><title>Ch</title></head><body>{}</body></html>"#, body);
+    let doc = format!(
+        r#"<html><head><title>Ch</title></head><body>{}</body></html>"#,
+        body
+    );
     zip.write_all(doc.as_bytes()).unwrap();
     zip.finish().unwrap();
     buf
@@ -325,11 +367,19 @@ fn test_lazy_epub_images_load_on_demand() {
     let book = yread::epub::parse_epub_file(path).expect("lazy parse");
     assert!(book.chapters.len() > 1);
     // No eager bytes; sizes known for layout; lazy entries registered.
-    assert!(book.images.is_empty(), "file-backed parse must not retain image bytes");
+    assert!(
+        book.images.is_empty(),
+        "file-backed parse must not retain image bytes"
+    );
     let entries = book.lazy_images.entry_count();
     assert!(entries > 50, "expected ~109 image entries, got {}", entries);
     let sniffed = book.image_sizes.len();
-    assert!(sniffed > entries / 2, "sniffer should cover most images ({} of {})", sniffed, entries);
+    assert!(
+        sniffed > entries / 2,
+        "sniffer should cover most images ({} of {})",
+        sniffed,
+        entries
+    );
 
     // An on-demand load returns decodable bytes.
     let any_id = book.image_sizes.keys().next().cloned().unwrap();
@@ -383,7 +433,8 @@ fn test_br_produces_real_line_breaks() {
     use yread::line::break_paragraph_lines;
     use yread::model::{Block, TextAlign};
 
-    let book = yread::epub::parse_epub(&epub_with_body("<p>line one<br/>line two</p>")).expect("parse");
+    let book =
+        yread::epub::parse_epub(&epub_with_body("<p>line one<br/>line two</p>")).expect("parse");
     let ch = &book.chapters[0];
     let runs = match &ch.blocks[0] {
         Block::Paragraph { runs, .. } => runs,
@@ -393,11 +444,24 @@ fn test_br_produces_real_line_breaks() {
     let fonts = FontSystem::default();
     let mut cache = ShapeCache::new();
     let lines = break_paragraph_lines(
-        &ch.text, runs, 0.0, 5000.0, 10.0, 1.1, TextAlign::Left,
-        &fonts, &mut cache, None,
+        &ch.text,
+        runs,
+        0.0,
+        5000.0,
+        10.0,
+        1.1,
+        TextAlign::Left,
+        &fonts,
+        &mut cache,
+        None,
     );
 
-    assert_eq!(lines.len(), 2, "br must split into two lines, text was {:?}", ch.text);
+    assert_eq!(
+        lines.len(),
+        2,
+        "br must split into two lines, text was {:?}",
+        ch.text
+    );
     assert_eq!(&ch.text[lines[0].start_byte..lines[0].end_byte], "line one");
     assert_eq!(&ch.text[lines[1].start_byte..lines[1].end_byte], "line two");
 }
@@ -407,7 +471,8 @@ fn test_consecutive_brs_yield_blank_line_with_monotonic_offsets() {
     use yread::line::break_paragraph_lines;
     use yread::model::{Block, TextAlign};
 
-    let book = yread::epub::parse_epub(&epub_with_body("<p>alpha<br/><br/>beta</p>")).expect("parse");
+    let book =
+        yread::epub::parse_epub(&epub_with_body("<p>alpha<br/><br/>beta</p>")).expect("parse");
     let ch = &book.chapters[0];
     let runs = match &ch.blocks[0] {
         Block::Paragraph { runs, .. } => runs,
@@ -417,14 +482,28 @@ fn test_consecutive_brs_yield_blank_line_with_monotonic_offsets() {
     let fonts = FontSystem::default();
     let mut cache = ShapeCache::new();
     let lines = break_paragraph_lines(
-        &ch.text, runs, 0.0, 5000.0, 10.0, 1.1, TextAlign::Left,
-        &fonts, &mut cache, None,
+        &ch.text,
+        runs,
+        0.0,
+        5000.0,
+        10.0,
+        1.1,
+        TextAlign::Left,
+        &fonts,
+        &mut cache,
+        None,
     );
 
     assert_eq!(lines.len(), 3, "consecutive brs = 3 lines (one blank)");
     assert!(lines[1].items.is_empty(), "middle line is blank");
-    assert_eq!(lines[1].start_char, lines[0].end_char, "blank line inherits previous end");
-    assert!(lines[1].start_char <= lines[2].start_char, "offsets stay monotonic");
+    assert_eq!(
+        lines[1].start_char, lines[0].end_char,
+        "blank line inherits previous end"
+    );
+    assert!(
+        lines[1].start_char <= lines[2].start_char,
+        "offsets stay monotonic"
+    );
 }
 
 #[test]
@@ -444,7 +523,11 @@ fn test_page_starts_are_set_consistent_and_monotonic() {
         ch.text.push_str(&text);
         let end = ch.text.len();
         blocks.push(Block::Paragraph {
-            runs: vec![Run { start, end, style: Style::default() }],
+            runs: vec![Run {
+                start,
+                end,
+                style: Style::default(),
+            }],
             indent: false,
             align: TextAlign::Justify,
             left_margin_em: 0.0,
@@ -471,31 +554,60 @@ fn test_page_starts_are_set_consistent_and_monotonic() {
         hyphenate: true,
     };
 
-    let (pt, layouts) = paginate_chapter(&ch, &config, &fonts, &mut cache, Some(hypher::Lang::English));
+    let (pt, layouts) = paginate_chapter(
+        &ch,
+        &config,
+        &fonts,
+        &mut cache,
+        Some(hypher::Lang::English),
+    );
 
-    assert!(pt.page_count() >= 3, "tiny pages must force breaks, got {}", pt.page_count());
+    assert!(
+        pt.page_count() >= 3,
+        "tiny pages must force breaks, got {}",
+        pt.page_count()
+    );
     for (i, l) in layouts.iter().enumerate() {
-        assert_eq!(l.start_char, pt.pages[i].char_offset,
-            "page {} start_char must match its PageBreak", i);
+        assert_eq!(
+            l.start_char, pt.pages[i].char_offset,
+            "page {} start_char must match its PageBreak",
+            i
+        );
     }
     for w in layouts.windows(2) {
         // Strict: a repeated start means a page recorded its predecessor's
         // offset (the old Rule/Image/CodeBlock break bug).
-        assert!(w[0].start_char < w[1].start_char, "page starts must be strictly monotonic");
-        assert!(w[0].end_char <= w[1].end_char, "page ends must be monotonic");
+        assert!(
+            w[0].start_char < w[1].start_char,
+            "page starts must be strictly monotonic"
+        );
+        assert!(
+            w[0].end_char <= w[1].end_char,
+            "page ends must be monotonic"
+        );
     }
     // A later page starting at char 0 means the start was never recorded.
-    assert!(layouts[layouts.len() - 1].start_char > 0,
-        "last page start_char must be a real offset, not the default 0");
+    assert!(
+        layouts[layouts.len() - 1].start_char > 0,
+        "last page start_char must be a real offset, not the default 0"
+    );
 
     // And the reading position round-trips: the page that claims to contain
     // a char actually renders that char.
     let probe = ch.char_count() / 2;
     let page = pt.page_for_char(probe);
-    let upper = layouts.get(page + 1).map(|l| l.start_char).unwrap_or(ch.char_count());
-    assert!(probe >= layouts[page].start_char && probe < upper,
+    let upper = layouts
+        .get(page + 1)
+        .map(|l| l.start_char)
+        .unwrap_or(ch.char_count());
+    assert!(
+        probe >= layouts[page].start_char && probe < upper,
         "char {} should be inside page {} [{}, {})",
-        probe, page, layouts[page].start_char, upper);
+        probe,
+        page,
+        layouts[page].start_char,
+        upper
+    );
 }
 
 #[test]
@@ -532,7 +644,12 @@ fn test_orphan_punctuation_never_breaks_alone_on_next_line() {
 
         for line in &lines {
             if let Some(first_item) = line.items.first() {
-                if let yread::line::LineItem::Word { byte_start, byte_end, .. } = first_item {
+                if let yread::line::LineItem::Word {
+                    byte_start,
+                    byte_end,
+                    ..
+                } = first_item
+                {
                     let first_word = &ch.text[*byte_start..*byte_end];
                     assert_ne!(first_word, ",", "comma should never start a line alone!");
                     assert_ne!(first_word, ".", "period should never start a line alone!");
@@ -541,7 +658,6 @@ fn test_orphan_punctuation_never_breaks_alone_on_next_line() {
         }
     }
 }
-
 
 #[test]
 fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
@@ -570,8 +686,16 @@ fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
     let mut hyphen_breaks = 0;
     for width in [90.0, 110.0, 130.0, 150.0, 170.0, 190.0, 230.0] {
         let lines = break_paragraph_lines(
-            &ch.text, runs, 0.0, width, 10.0, 1.2, TextAlign::Justify,
-            &fonts, &mut cache, Some(lang),
+            &ch.text,
+            runs,
+            0.0,
+            width,
+            10.0,
+            1.2,
+            TextAlign::Justify,
+            &fonts,
+            &mut cache,
+            Some(lang),
         );
         for (li, line) in lines.iter().enumerate() {
             // A rendered space is missing when two word items are
@@ -583,16 +707,26 @@ fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
                 if wordish {
                     if let Some(p) = prev {
                         let ranges = |x: &yread::line::LineItem| match x {
-                            yread::line::LineItem::Word { byte_start, byte_end, .. }
-                            | yread::line::LineItem::HyphenatedPrefix { byte_start, byte_end, .. } =>
-                                Some((*byte_start, *byte_end)),
+                            yread::line::LineItem::Word {
+                                byte_start,
+                                byte_end,
+                                ..
+                            }
+                            | yread::line::LineItem::HyphenatedPrefix {
+                                byte_start,
+                                byte_end,
+                                ..
+                            } => Some((*byte_start, *byte_end)),
                             _ => None,
                         };
                         if let (Some((_, pe)), Some((cb, _))) = (ranges(p), ranges(it)) {
                             if cb > pe && ch.text[pe..cb].contains(' ') {
                                 panic!(
                                     "width {} line {}: missing space between {:?} and {:?}",
-                                    width, li, &ch.text[pe..(pe + 8).min(cb)], &ch.text[cb..(cb + 8).min(ch.text.len())]
+                                    width,
+                                    li,
+                                    &ch.text[pe..(pe + 8).min(cb)],
+                                    &ch.text[cb..(cb + 8).min(ch.text.len())]
                                 );
                             }
                         }
@@ -624,10 +758,20 @@ fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
     let lang = yread::hypher_lang("en");
     for width in (160..400).step_by(17) {
         for block in &ch.blocks {
-            let Block::Paragraph { runs, .. } = block else { continue };
+            let Block::Paragraph { runs, .. } = block else {
+                continue;
+            };
             let lines = break_paragraph_lines(
-                &ch.text, runs, 18.0, width as f32, 12.0, 1.2,
-                TextAlign::Justify, &fonts, &mut cache, Some(lang),
+                &ch.text,
+                runs,
+                18.0,
+                width as f32,
+                12.0,
+                1.2,
+                TextAlign::Justify,
+                &fonts,
+                &mut cache,
+                Some(lang),
             );
             for (li, line) in lines.iter().enumerate() {
                 let mut prev_wordish = false;
@@ -674,12 +818,27 @@ fn test_fb2_anchor_char_offsets_survive_multibyte() {
     let o1 = *ch.anchors.get("p1").expect("p1 anchor");
     let o2 = *ch.anchors.get("p2").expect("p2 anchor");
     let o3 = *ch.anchors.get("p3").expect("p3 anchor");
-    assert!(o1 < o2 && o2 < o3, "anchors must strictly increase: {o1} {o2} {o3}");
+    assert!(
+        o1 < o2 && o2 < o3,
+        "anchors must strictly increase: {o1} {o2} {o3}"
+    );
 
     let from = |off: usize| -> String { ch.text.chars().skip(off).collect() };
-    assert!(from(o1).starts_with("First—café"), "p1 lands wrong: {:?}", from(o1));
-    assert!(from(o2).starts_with("Second 日本語 text"), "p2 lands wrong: {:?}", from(o2));
-    assert!(from(o3).starts_with("Third"), "p3 lands wrong: {:?}", from(o3));
+    assert!(
+        from(o1).starts_with("First—café"),
+        "p1 lands wrong: {:?}",
+        from(o1)
+    );
+    assert!(
+        from(o2).starts_with("Second 日本語 text"),
+        "p2 lands wrong: {:?}",
+        from(o2)
+    );
+    assert!(
+        from(o3).starts_with("Third"),
+        "p3 lands wrong: {:?}",
+        from(o3)
+    );
 
     // Counter must equal a full rescan at end of parse.
     assert_eq!(from(o3), "Third");
@@ -702,13 +861,19 @@ fn test_epub_malformed_chapter_degrades_not_dies() {
     zip.write_all(br#"<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>T</dc:title><dc:language>en</dc:language></metadata><manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/><item id="c2" href="c2.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#).unwrap();
 
     zip.start_file("c1.xhtml", options).unwrap();
-    zip.write_all(b"<html><body><p>Broken </wrongtag></body></html>").unwrap();
+    zip.write_all(b"<html><body><p>Broken </wrongtag></body></html>")
+        .unwrap();
     zip.start_file("c2.xhtml", options).unwrap();
-    zip.write_all(b"<html><body><p>Surviving chapter text</p></body></html>").unwrap();
+    zip.write_all(b"<html><body><p>Surviving chapter text</p></body></html>")
+        .unwrap();
     zip.finish().unwrap();
 
     let book = parse_epub(&buf).expect("book with one bad chapter must still parse");
-    assert_eq!(book.chapters.len(), 2, "placeholder keeps spine indices stable");
+    assert_eq!(
+        book.chapters.len(),
+        2,
+        "placeholder keeps spine indices stable"
+    );
     let c2 = &book.chapters[1];
     assert!(c2.text.contains("Surviving chapter text"));
 }

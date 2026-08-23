@@ -21,7 +21,11 @@ const EINK_ALPHA_LUT: [u8; 256] = {
             0
         } else {
             let val = (i * 268) / 255;
-            if val > 255 { 255 } else { val as u8 }
+            if val > 255 {
+                255
+            } else {
+                val as u8
+            }
         };
         lut[i] = a;
         i += 1;
@@ -132,7 +136,12 @@ impl Rasterizer {
                         p_height,
                     );
                 }
-                PageElement::Bullet { shaped, x, y, size_pt } => {
+                PageElement::Bullet {
+                    shaped,
+                    x,
+                    y,
+                    size_pt,
+                } => {
                     let face = fonts.face_for_style(crate::model::FontStyle::Bold);
                     self.render_shaped_word(
                         shaped,
@@ -147,7 +156,12 @@ impl Rasterizer {
                         p_height,
                     );
                 }
-                PageElement::CodeLine { shaped, x, y, size_pt } => {
+                PageElement::CodeLine {
+                    shaped,
+                    x,
+                    y,
+                    size_pt,
+                } => {
                     let face = fonts.code_face();
                     self.render_shaped_word(
                         shaped,
@@ -202,7 +216,13 @@ impl Rasterizer {
                         }
                     }
                 }
-                PageElement::Image { id, x, y, width, height } => {
+                PageElement::Image {
+                    id,
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
                     let img_w = (*width as usize).max(1);
                     let img_h = (*height as usize).max(1);
                     let img_x = (origin_x + x).round() as usize;
@@ -213,7 +233,9 @@ impl Rasterizer {
                         Arc::clone(t)
                     } else {
                         // Eager store or lazy archive load, memoized in Book.
-                        let Some(raw_data) = book.get_image(id) else { continue };
+                        let Some(raw_data) = book.get_image(id) else {
+                            continue;
+                        };
                         // Strict limits: `load_from_memory` would run with
                         // unlimited width/height, letting a crafted header
                         // allocate gigabytes before the resize shrinks it.
@@ -230,7 +252,11 @@ impl Rasterizer {
                         };
                         let Ok(dyn_img) = dyn_img else { continue };
                         let gray = dyn_img
-                            .resize_exact(img_w as u32, img_h as u32, image::imageops::FilterType::Lanczos3)
+                            .resize_exact(
+                                img_w as u32,
+                                img_h as u32,
+                                image::imageops::FilterType::Lanczos3,
+                            )
                             .to_luma8();
                         let t = Arc::new(gray.into_raw());
                         if self.image_cache.len() >= IMAGE_CACHE_CAP {
@@ -303,7 +329,12 @@ impl Rasterizer {
                     );
                     cur_x += shaped.advance;
                 }
-                LineItem::HyphenatedPrefix { prefix_shaped, hyphen_adv, style, .. } => {
+                LineItem::HyphenatedPrefix {
+                    prefix_shaped,
+                    hyphen_adv,
+                    style,
+                    ..
+                } => {
                     let run_size = base_font_size * style.size_mult;
                     let face = fonts.face_for_style(style.font_style);
                     self.render_shaped_word(
@@ -409,11 +440,9 @@ impl Rasterizer {
                     // red channel as alpha coverage and stamped garbage.
                     // Keep each pixel's alpha — e-ink shows shape, not hue.
                     let data = match img.content {
-                        Content::Color | Content::SubpixelMask => img
-                            .data
-                            .chunks_exact(4)
-                            .map(|px| px[3])
-                            .collect(),
+                        Content::Color | Content::SubpixelMask => {
+                            img.data.chunks_exact(4).map(|px| px[3]).collect()
+                        }
                         Content::Mask => img.data,
                     };
                     Arc::new(CachedGlyph {
@@ -452,7 +481,8 @@ impl Rasterizer {
 
                     let src_col_offset = (dst_x0 as i32 - glyph_left) as usize;
                     let count = dst_x1 - dst_x0;
-                    let src_row = &cached.data[row * g_width + src_col_offset..row * g_width + src_col_offset + count];
+                    let src_row = &cached.data
+                        [row * g_width + src_col_offset..row * g_width + src_col_offset + count];
                     let dst_row = &mut fb[dst_row_idx + dst_x0..dst_row_idx + dst_x1];
 
                     for (dst_pixel, &coverage) in dst_row.iter_mut().zip(src_row.iter()) {

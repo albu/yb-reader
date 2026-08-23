@@ -94,7 +94,11 @@ impl Screen for WordDialog {
             }
         }
 
-        let ru_h = if !self.entry.gloss_ru.is_empty() { pt(18.0) } else { 0 };
+        let ru_h = if !self.entry.gloss_ru.is_empty() {
+            pt(18.0)
+        } else {
+            0
+        };
         let body_h = (lines.len().clamp(1, 3) as i32) * pt(13.0);
         let card_h = (pt(45.0) + ru_h + body_h).clamp(pt(85.0), pt(150.0));
         let card_y = h - card_h - pt(10.0);
@@ -123,13 +127,19 @@ impl Screen for WordDialog {
 
         if self.is_learning {
             p.rect(chk_rect, 0);
-            p.text_center_in(chk_x, chk_x + chk_w, chk_y + pt(15.0), 8.0, 255, "★ Learning");
+            p.text_center_in(chk_x, chk_x + chk_w, chk_y + pt(15.0), 8.0, 255, "Learning");
         } else {
             p.rect_outline_t(chk_rect, 1, 100);
-            p.text_center_in(chk_x, chk_x + chk_w, chk_y + pt(15.0), 8.0, 50, "☆ Learn");
+            p.text_center_in(chk_x, chk_x + chk_w, chk_y + pt(15.0), 8.0, 50, "Learn");
         }
 
-        p.hline_t(title_y + pt(6.0), card_x + pt(10.0), card_x + card_w - pt(10.0), 1, 220);
+        p.hline_t(
+            title_y + pt(6.0),
+            card_x + pt(10.0),
+            card_x + card_w - pt(10.0),
+            1,
+            220,
+        );
 
         // Body: Russian translation + English Definition lines
         let mut text_y = title_y + pt(20.0);
@@ -165,4 +175,3 @@ impl Screen for WordDialog {
         }
     }
 }
-

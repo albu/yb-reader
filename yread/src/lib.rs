@@ -1,13 +1,16 @@
-pub mod model;
-pub mod fb2;
 pub mod epub;
+pub mod fb2;
 pub mod font;
-pub mod shape;
 pub mod line;
+pub mod model;
 pub mod paginate;
 pub mod raster;
+pub mod shape;
+pub mod txt;
 
-pub use model::{Book, Chapter, Block, Run, Style, FontStyle, TextAlign, PageBreak, ChapterPageTable};
+pub use model::{
+    Block, Book, Chapter, ChapterPageTable, FontStyle, PageBreak, Run, Style, TextAlign,
+};
 
 /// THE hyphenation-language mapping — the app backend, the background
 /// paginator and the bench tool must all hyphenate identically or page

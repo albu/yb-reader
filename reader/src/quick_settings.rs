@@ -4,8 +4,8 @@
 
 use ybdev::input::Gesture;
 use yui::painter::{pt, Painter, Rect};
-use yui::Orientation;
 use yui::screen::{Action, Screen};
+use yui::Orientation;
 
 use crate::crop_dialog::CropDialog;
 use crate::split::{ContrastMode, ReaderSettings, SplitConfig, SplitPreset};
@@ -113,7 +113,10 @@ impl Screen for QuickSettingsSheet {
         // Grab handle pill at top center
         let handle_w = pt(28.0);
         let handle_x = (w - handle_w) / 2;
-        p.rect(Rect::new(handle_x, sheet_y + pt(4.0), handle_w, pt(2.5)), 170);
+        p.rect(
+            Rect::new(handle_x, sheet_y + pt(4.0), handle_w, pt(2.5)),
+            170,
+        );
 
         let mut y = sheet_y + pt(12.0);
         let pad = pt(PAD_PT);
@@ -125,7 +128,14 @@ impl Screen for QuickSettingsSheet {
             // Row 1: Font Size
             p.text(pad, y + pt(15.0), 8.5, 0, "FONT SIZE");
             let size_str = format!("{:.1} pt", self.settings.font_size);
-            p.text_center_in(pad + pt(70.0), pad + pt(130.0), y + pt(15.0), 9.0, 0, &size_str);
+            p.text_center_in(
+                pad + pt(70.0),
+                pad + pt(130.0),
+                y + pt(15.0),
+                9.0,
+                0,
+                &size_str,
+            );
 
             let f_minus = Rect::new(w - pad - pt(70.0), y, pt(30.0), pt(BTN_H_PT));
             let f_plus = Rect::new(w - pad - pt(34.0), y, pt(30.0), pt(BTN_H_PT));
@@ -155,11 +165,25 @@ impl Screen for QuickSettingsSheet {
             // Row 3: Line spacing (multiplier over the book's leading)
             p.text(pad, y + pt(15.0), 8.5, 0, "SPACING");
             let sp_str = format!("{:.1}\u{d7}", self.settings.line_spacing);
-            p.text_center_in(pad + pt(70.0), pad + pt(130.0), y + pt(15.0), 9.0, 0, &sp_str);
+            p.text_center_in(
+                pad + pt(70.0),
+                pad + pt(130.0),
+                y + pt(15.0),
+                9.0,
+                0,
+                &sp_str,
+            );
             let sp_minus = Rect::new(w - pad - pt(70.0), y, pt(30.0), pt(BTN_H_PT));
             let sp_plus = Rect::new(w - pad - pt(34.0), y, pt(30.0), pt(BTN_H_PT));
             p.rect_outline_t(sp_minus, 1, 0);
-            p.text_center_in(sp_minus.x, sp_minus.x + sp_minus.w, y + pt(15.0), 10.0, 0, "-");
+            p.text_center_in(
+                sp_minus.x,
+                sp_minus.x + sp_minus.w,
+                y + pt(15.0),
+                10.0,
+                0,
+                "-",
+            );
             p.rect_outline_t(sp_plus, 1, 0);
             p.text_center_in(sp_plus.x, sp_plus.x + sp_plus.w, y + pt(15.0), 10.0, 0, "+");
             y += pt(ROW_H_PT) + pt(4.0);
@@ -192,7 +216,14 @@ impl Screen for QuickSettingsSheet {
             p.text(pad, y + pt(15.0), 8.5, 0, "CROP");
             let crop_btn = Rect::new(w - pad - pt(188.0), y, pt(188.0), pt(BTN_H_PT));
             p.rect_outline_t(crop_btn, 1, 0);
-            p.text_center_in(crop_btn.x, crop_btn.x + crop_btn.w, y + pt(15.0), 7.5, 0, "[ ⛶ Adjust Crop Guides ]");
+            p.text_center_in(
+                crop_btn.x,
+                crop_btn.x + crop_btn.w,
+                y + pt(15.0),
+                7.5,
+                0,
+                "[ Adjust Crop Guides ]",
+            );
             y += pt(ROW_H_PT) + pt(4.0);
         }
 
@@ -223,10 +254,24 @@ impl Screen for QuickSettingsSheet {
         let inv_btn = Rect::new(w - pad - pt(120.0), y, pt(120.0), pt(BTN_H_PT));
         if self.settings.invert {
             p.rect(inv_btn, 0);
-            p.text_center_in(inv_btn.x, inv_btn.x + inv_btn.w, y + pt(15.0), 7.5, 255, "ON");
+            p.text_center_in(
+                inv_btn.x,
+                inv_btn.x + inv_btn.w,
+                y + pt(15.0),
+                7.5,
+                255,
+                "ON",
+            );
         } else {
             p.rect_outline_t(inv_btn, 1, 120);
-            p.text_center_in(inv_btn.x, inv_btn.x + inv_btn.w, y + pt(15.0), 7.5, 0, "OFF");
+            p.text_center_in(
+                inv_btn.x,
+                inv_btn.x + inv_btn.w,
+                y + pt(15.0),
+                7.5,
+                0,
+                "OFF",
+            );
         }
         y += pt(ROW_H_PT) + pt(6.0);
 
@@ -237,7 +282,7 @@ impl Screen for QuickSettingsSheet {
             y + pt(15.0),
             7.5,
             120,
-            "tap above · swipe ↓ to close",
+            "tap above · swipe down to close",
         );
     }
 
@@ -245,7 +290,9 @@ impl Screen for QuickSettingsSheet {
         let (w, h) = self.dims;
         let (vx, vy) = match g {
             Gesture::Tap { x, y } => (x as i32, y as i32),
-            Gesture::Swipe { dir, .. } if dir == ybdev::input::SwipeDir::South => return Action::Pop,
+            Gesture::Swipe { dir, .. } if dir == ybdev::input::SwipeDir::South => {
+                return Action::Pop
+            }
             // Long-press, drags and north/east/west swipes mean nothing
             // here; they must not fall through to (0,0) — which sits above
             // the sheet and read as "tap outside", dismissing it.

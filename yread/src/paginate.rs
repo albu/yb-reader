@@ -1,10 +1,10 @@
 //! Multi-page layout calculation and PageTable construction.
 
-use hypher::Lang;
 use crate::font::FontSystem;
 use crate::line::{break_paragraph_lines_streaming, LayoutLine};
 use crate::model::{Block, Chapter, ChapterPageTable, PageBreak, TextAlign};
 use crate::shape::ShapeCache;
+use hypher::Lang;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutConfig {
@@ -71,11 +71,13 @@ impl Default for LayoutConfig {
 
 impl LayoutConfig {
     pub fn content_width(&self) -> f32 {
-        self.page_width.saturating_sub(self.margin_left + self.margin_right) as f32
+        self.page_width
+            .saturating_sub(self.margin_left + self.margin_right) as f32
     }
 
     pub fn content_height(&self) -> f32 {
-        self.page_height.saturating_sub(self.margin_top + self.margin_bottom) as f32
+        self.page_height
+            .saturating_sub(self.margin_top + self.margin_bottom) as f32
     }
 }
 
@@ -130,8 +132,8 @@ pub struct PageLayout {
     pub elements: Vec<PageElement>,
 }
 
-use std::collections::HashMap;
 use crate::model::FontStyle;
+use std::collections::HashMap;
 
 /// Push a finished page + its break record. `start_char`/`start_byte` may be
 /// the pending sentinel (`usize::MAX`) when the page began at a
@@ -147,8 +149,16 @@ fn finish_page(
     last_char: usize,
     last_byte: usize,
 ) {
-    let sc = if start_char == usize::MAX { last_char } else { start_char };
-    let sb = if start_byte == usize::MAX { last_byte } else { start_byte };
+    let sc = if start_char == usize::MAX {
+        last_char
+    } else {
+        start_char
+    };
+    let sb = if start_byte == usize::MAX {
+        last_byte
+    } else {
+        start_byte
+    };
     page.start_char = sc;
     if page.end_char < sc {
         page.end_char = sc;
@@ -204,15 +214,25 @@ pub fn paginate_chapter_with_images(
 
     for (b_idx, block) in chapter.blocks.iter().enumerate() {
         match block {
-            Block::Paragraph { runs, indent, align, left_margin_em, bullet_prefix, is_quote } => {
+            Block::Paragraph {
+                runs,
+                indent,
+                align,
+                left_margin_em,
+                bullet_prefix,
+                is_quote,
+            } => {
                 let em_px = config.font_size * (300.0 / 72.0);
                 let left_margin_px = *left_margin_em * em_px;
 
-                let (bullet_shaped, is_circle_bullet, bullet_adv) = if let Some(ref bullet_str) = bullet_prefix {
+                let (bullet_shaped, is_circle_bullet, bullet_adv) = if let Some(ref bullet_str) =
+                    bullet_prefix
+                {
                     if bullet_str.contains('•') {
                         (None, true, em_px * 0.9)
                     } else {
-                        let shaped = cache.shape_word(bullet_str, FontStyle::Bold, config.font_size, fonts);
+                        let shaped =
+                            cache.shape_word(bullet_str, FontStyle::Bold, config.font_size, fonts);
                         let adv = shaped.advance.max(em_px * 0.9);
                         (Some(shaped), false, adv)
                     }
@@ -221,7 +241,11 @@ pub fn paginate_chapter_with_images(
                 };
 
                 let avail_w = (content_w - left_margin_px - bullet_adv).max(100.0);
-                let first_indent = if *indent && bullet_prefix.is_none() { indent_px } else { 0.0 };
+                let first_indent = if *indent && bullet_prefix.is_none() {
+                    indent_px
+                } else {
+                    0.0
+                };
 
                 let lines = break_paragraph_lines_streaming(
                     &chapter.text,
@@ -273,7 +297,8 @@ pub fn paginate_chapter_with_images(
                     let force_break = l_idx >= max_lines_for_cur_page;
 
                     // Does this line fit on current page?
-                    if (cur_y + line_h > content_h || force_break) && !cur_page.elements.is_empty() {
+                    if (cur_y + line_h > content_h || force_break) && !cur_page.elements.is_empty()
+                    {
                         // Finish current page
                         cur_page.end_char = line.start_char;
                         finish_page(
@@ -325,7 +350,8 @@ pub fn paginate_chapter_with_images(
                         }
                     }
 
-                    let x_offset = left_margin_px + bullet_adv + if l_idx == 0 { first_indent } else { 0.0 };
+                    let x_offset =
+                        left_margin_px + bullet_adv + if l_idx == 0 { first_indent } else { 0.0 };
 
                     cur_page.elements.push(PageElement::Line {
                         line,
@@ -417,12 +443,14 @@ pub fn paginate_chapter_with_images(
 
                 let em_px = config.font_size * (300.0 / 72.0);
                 let body_line_h = em_px * config.line_spacing;
-                let heading_h: f32 = lines.iter().map(|l| l.height).sum::<f32>() + config.font_size * 0.9;
+                let heading_h: f32 =
+                    lines.iter().map(|l| l.height).sum::<f32>() + config.font_size * 0.9;
                 let min_heading_room = heading_h + 2.0 * body_line_h;
 
                 // Heading keep_with_next: must have room for heading + at least 2 body lines
                 if cur_y + min_heading_room > content_h && !cur_page.elements.is_empty() {
-                    cur_page.end_char = lines.first().map(|l| l.start_char).unwrap_or(last_char_pos);
+                    cur_page.end_char =
+                        lines.first().map(|l| l.start_char).unwrap_or(last_char_pos);
                     finish_page(
                         &mut pages,
                         &mut page_breaks,
@@ -492,7 +520,9 @@ pub fn paginate_chapter_with_images(
                 });
                 cur_y += 15.0;
             }
-            Block::Image { id, width, height, .. } => {
+            Block::Image {
+                id, width, height, ..
+            } => {
                 let (orig_w, orig_h) = image_sizes
                     .and_then(|m| m.get(id))
                     .copied()
