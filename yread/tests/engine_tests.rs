@@ -550,7 +550,9 @@ fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
 
     // Regression (2026-08-23): a line ending in a hyphenated word dropped
     // the space BEFORE it, gluing the last two words together on every
-    // hyphen-broken line of justified text.
+    // hyphen-broken line of justified text. (The bug was in the KP
+    // extractor, since removed; the source-gap invariant below is
+    // breaker-agnostic and stays as a tripwire.)
     let html = "<p>Долгими зимними вечерами электроэнергетическая \
                 промышленность южных регионов продолжала работать \
                 устойчиво и надёжно каждый single day</p>";
@@ -642,61 +644,5 @@ fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
                 }
             }
         }
-    }
-}
-
-#[test]
-fn justified_tight_lines_respect_the_measure() {
-    use yread::line::break_paragraph_lines;
-    use yread::model::{Block, TextAlign};
-    use yread::raster::alignment_adjust;
-
-    // Regression (2026-08-23): Knuth-Plass admits tight lines up to
-    // shrink capacity past the measure (ratio >= -1) and expects the
-    // renderer to squeeze — but alignment_adjust only ever stretched,
-    // so every tight line rendered past the right margin.
-    let book = parse_fb2(WAR_AND_PEACE_FB2.as_bytes()).expect("parse");
-    let ch = &book.chapters[0];
-    let fonts = FontSystem::default();
-    let mut cache = ShapeCache::new();
-    let lang = yread::hypher_lang("en");
-
-    let mut tight_lines = 0;
-    for width in (220..420).step_by(20) {
-        for block in &ch.blocks {
-            let Block::Paragraph { runs, .. } = block else { continue };
-            let lines = break_paragraph_lines(
-                &ch.text, runs, 20.0, width as f32, 12.0, 1.2,
-                TextAlign::Justify, &fonts, &mut cache, Some(lang),
-            );
-            for (li, line) in lines.iter().enumerate() {
-                if line.is_last_in_paragraph {
-                    continue; // ragged by design
-                }
-                let n = line.items.iter().filter(|i| i.is_space()).count();
-                if n == 0 {
-                    continue;
-                }
-                if line.width > line.max_width {
-                    tight_lines += 1;
-                }
-                let (off, extra) = alignment_adjust(line);
-                assert_eq!(off, 0.0, "justify never offsets the line start");
-                let rendered = line.width + extra * n as f32;
-                assert!(
-                    rendered <= line.max_width + 0.6,
-                    "width {} line {} renders {:.1} > measure {:.1} \
-                     (natural {:.1}, extra/space {:.2})",
-                    width, li, rendered, line.max_width, line.width, extra
-                );
-            }
-        }
-    }
-    // KP is rolled back (line.rs KP_ENABLED): greedy never packs past
-    // the measure, so there is nothing to exercise. When KP is re-landed,
-    // this assertion is the tripwire — delete this guard with the flag.
-    if tight_lines == 0 {
-        println!("KP disabled — no tight lines by construction; skipping");
-        return;
     }
 }

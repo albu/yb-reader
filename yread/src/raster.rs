@@ -74,17 +74,10 @@ pub fn alignment_adjust(line: &crate::line::LayoutLine) -> (f32, f32) {
             (slack, 0.0)
         }
         TextAlign::Justify => {
-            if !line.is_last_in_paragraph {
+            if !line.is_last_in_paragraph && line.width < line.max_width {
                 let space_count = line.items.iter().filter(|it| it.is_space()).count();
                 if space_count > 0 {
                     let slack = line.max_width - line.width;
-                    // Slack below 40% of the measure is distributed across
-                    // the spaces — including NEGATIVE slack: the breaker
-                    // admits tight lines up to shrink capacity past the
-                    // measure (ratio ≥ -1 ≈ ⅓ of the real space total)
-                    // and expects the renderer to squeeze them. Without
-                    // the negative case, every tight line rendered at
-                    // natural width — past the right margin.
                     if slack < line.max_width * 0.40 {
                         return (0.0, slack / space_count as f32);
                     }
