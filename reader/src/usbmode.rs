@@ -23,7 +23,6 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use ybdev::log::plog;
 
@@ -186,86 +185,101 @@ fn remount(spec: &(String, String, String)) -> bool {
         .unwrap_or(false)
 }
 
-/// Start the USB watchdog (runs for process lifetime; dies with it).
-pub fn spawn() {
-    let _ = std::thread::Builder::new()
-        .name("usbmode".to_string())
-        .spawn(|| {
-            // Persisted mode wins: transfer mode leaves stock USB alone.
-            let transfer = std::fs::read_to_string(MODE_FILE)
-                .map(|t| parse_mode(&t))
-                .unwrap_or(false);
-            TRANSFER.store(transfer, Ordering::Relaxed);
-            if transfer {
-                plog("usb: transfer mode (persisted) — drive mode untouched");
-            } else if remove_modules() {
-                plog("usb: mass-storage modules removed — charge-only while reading");
-            } else {
-                // Expected when plugged at launch (module in use): the
-                // loop below wins once the firmware unbinds on unplug.
-                plog("usb: mass-storage modules busy at start — watchdog will retry");
+/// One-shot startup: adopt the persisted mode and take the modules down
+/// if charge-only. Synchronous by design — a modprobe at boot is not on
+/// any latency path (this used to be the prologue of a dedicated 1s
+/// watchdog thread).
+pub fn init() {
+    // Persisted mode wins: transfer mode leaves stock USB alone.
+    let transfer = std::fs::read_to_string(MODE_FILE)
+        .map(|t| parse_mode(&t))
+        .unwrap_or(false);
+    TRANSFER.store(transfer, Ordering::Relaxed);
+    if transfer {
+        plog("usb: transfer mode (persisted) — drive mode untouched");
+    } else if remove_modules() {
+        plog("usb: mass-storage modules removed — charge-only while reading");
+    } else {
+        // Expected when plugged at launch (module in use): the tick
+        // below wins once the firmware unbinds on unplug.
+        plog("usb: mass-storage modules busy at start — healer will retry");
+    }
+}
+
+/// Loop-carried state of the old watchdog.
+struct WatchdogState {
+    /// Captured at startup — the reader only launches with its
+    /// partition mounted, so this always succeeds in practice.
+    spec: Option<(String, String, String)>,
+    was_bound: bool,
+    healed: bool,
+}
+static WATCHDOG: std::sync::Mutex<Option<WatchdogState>> = std::sync::Mutex::new(None);
+
+/// One pass of what used to be the 1 Hz watchdog thread. The healer's
+/// real work is rare (plug/unplug edges, module reappearances), so it
+/// now rides awake's 5 s tick — called from there and on the vbus edge
+/// it already detects. One thread fewer, and the SoC sleeps through
+/// what used to be 86k wakeups/day of /proc polling.
+pub fn tick() {
+    let mut guard = WATCHDOG.lock().unwrap_or_else(|e| e.into_inner());
+    let st = guard.get_or_insert_with(|| WatchdogState {
+        spec: mount_spec(),
+        was_bound: false,
+        healed: false,
+    });
+    if transfer_mode() {
+        // Stock behavior, except the healer: with a frozen
+        // framework nothing remounts /mnt/us after the laptop
+        // ejects, and the library would stay empty forever.
+        if mount_spec().is_none() && bound_udcs().is_empty() {
+            if let Some(s) = st.spec.as_ref() {
+                if remount(s) && !st.healed {
+                    plog("usb: remounted /mnt/us after transfer mode");
+                    st.healed = true;
+                }
             }
-            // Captured at startup — the reader only launches with its
-            // partition mounted, so this always succeeds in practice.
-            let mut spec = mount_spec();
-            let mut was_bound = false;
-            let mut healed = false;
-            loop {
-                if transfer_mode() {
-                    // Stock behavior, except the healer: with a frozen
-                    // framework nothing remounts /mnt/us after the laptop
-                    // ejects, and the library would stay empty forever.
-                    if mount_spec().is_none() && bound_udcs().is_empty() {
-                        if let Some(s) = spec.as_ref() {
-                            if remount(s) && !healed {
-                                plog("usb: remounted /mnt/us after transfer mode");
-                                healed = true;
-                            }
-                        }
-                    } else {
-                        healed = false;
-                    }
-                } else {
-                    if ms_modules_loaded_live() {
-                        if remove_modules() {
-                            plog("usb: mass-storage modules came back — removed again");
-                        }
-                    }
-                    let udcs = bound_udcs();
-                    let bound = !udcs.is_empty();
-                    let mounted = mount_spec().is_some();
-                    match decide(bound, mounted) {
-                        UsbAction::UnbindGadget => {
-                            for udc in &udcs {
-                                let _ = std::fs::write(udc, "");
-                            }
-                            if !was_bound {
-                                plog("usb: configfs gadget bound — unbinding");
-                                was_bound = true;
-                            }
-                        }
-                        UsbAction::Remount => {
-                            // Only when no gadget remains: remounting under a
-                            // host-owned export would double-mount the disk.
-                            if let Some(s) = spec.as_ref() {
-                                if remount(s) && !healed {
-                                    plog("usb: remounted /mnt/us after drive-mode race");
-                                    healed = true;
-                                }
-                            }
-                        }
-                        UsbAction::None => {
-                            was_bound = false;
-                            healed = false;
-                            if let Some(s) = mount_spec() {
-                                spec = Some(s);
-                            }
-                        }
+        } else {
+            st.healed = false;
+        }
+    } else {
+        if ms_modules_loaded_live() {
+            if remove_modules() {
+                plog("usb: mass-storage modules came back — removed again");
+            }
+        }
+        let udcs = bound_udcs();
+        let bound = !udcs.is_empty();
+        let mounted = mount_spec().is_some();
+        match decide(bound, mounted) {
+            UsbAction::UnbindGadget => {
+                for udc in &udcs {
+                    let _ = std::fs::write(udc, "");
+                }
+                if !st.was_bound {
+                    plog("usb: configfs gadget bound — unbinding");
+                    st.was_bound = true;
+                }
+            }
+            UsbAction::Remount => {
+                // Only when no gadget remains: remounting under a
+                // host-owned export would double-mount the disk.
+                if let Some(s) = st.spec.as_ref() {
+                    if remount(s) && !st.healed {
+                        plog("usb: remounted /mnt/us after drive-mode race");
+                        st.healed = true;
                     }
                 }
-                std::thread::sleep(Duration::from_millis(1000));
             }
-        });
+            UsbAction::None => {
+                st.was_bound = false;
+                st.healed = false;
+                if let Some(s) = mount_spec() {
+                    st.spec = Some(s);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

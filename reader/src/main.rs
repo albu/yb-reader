@@ -113,7 +113,7 @@ fn main() {
 
     awake::spawn();
     awake::boot_restore();
-    usbmode::spawn();
+    usbmode::init();
     screensavers::prewarm();
     let root = HomeScreen::new(w, h);
     app.run(Box::new(root));
