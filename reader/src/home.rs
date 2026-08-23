@@ -70,26 +70,16 @@ const LIB_FOOT_OFF_PT: f32 = 14.0;
 const ROW_LABELS: [&str; 5] = [
     "Flashcards Deck",
     "Receive over Wi-Fi",
+    "Live AI Stream",
     "Mirror to Mac",
     "System",
-    "Exit",
 ];
 
 /// Takeover mode: we are the whole UI, so "exit" means handing the device
-/// back to the stock framework (exit 42, boot.sh's cue), not returning to
-/// a library that isn't running. Guarded by a confirm dialog everywhere.
-fn takeover() -> bool {
+/// back to the stock framework (exit 42, boot.sh's cue) — reachable only
+/// from System's EXIT card, behind a confirm that honors its buttons.
+pub fn takeover() -> bool {
     std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists()
-}
-
-fn confirm_exit_to_stock(bg: Option<Vec<u8>>) -> Action {
-    Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
-        "Exit to Kindle?",
-        "The stock Kindle UI returns.\nReboot brings yb-reader back.",
-        "Exit",
-        bg,
-        move |_act| Action::Quit,
-    )))
 }
 
 /// Library ordering — a view concern, not a filesystem one. Cycles on a
@@ -598,12 +588,7 @@ impl Screen for HomeScreen {
                             p.text(lx + fw, ly, ROW_LABEL_PT, 130, " · all caught up");
                         }
                     } else {
-                        let label = if i == ROW_LABELS.len() - 1 && takeover() {
-                            "Exit to Kindle"
-                        } else {
-                            default_label
-                        };
-                        p.text(lx, ly, ROW_LABEL_PT, 0, label);
+                        p.text(lx, ly, ROW_LABEL_PT, 0, default_label);
                     }
 
                     p.text_right(w - pad, ly, CHEV_PT, 160, ">");
@@ -771,18 +756,10 @@ impl Screen for HomeScreen {
                                 Action::Push(Box::new(crate::flashcards::FlashcardsScreen::new()))
                             }
                             Some(1) => Action::Push(Box::new(crate::receive::ReceiveScreen::new())),
-                            Some(2) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
-                            Some(3) => Action::Push(Box::new(crate::system::SystemScreen::new())),
-                            // Exit: in takeover mode this hands the device to
-                            // the stock framework — confirm first.
-                            Some(_) => {
-                                if takeover() {
-                                    confirm_exit_to_stock(self.snap.clone())
-                                } else {
-                                    Action::Quit
-                                }
-                            }
-                            None => Action::Keep,
+                            Some(2) => Action::Push(Box::new(crate::ai_stream::AiStreamScreen::new(self.w, self.h))),
+                            Some(3) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
+                            Some(4) => Action::Push(Box::new(crate::system::SystemScreen::new())),
+                            _ => Action::Keep,
                         }
                     }
 
@@ -844,9 +821,12 @@ impl Screen for HomeScreen {
                     Action::Keep
                 }
             }
-            // Home tab: swipe down/up still exits (old muscle memory) —
-            // but leaving takeover mode deserves a confirm like the Exit
-            // row gets.
+            // Vertical swipes on the home tab do nothing. They used to
+            // quit (old muscle memory from before tabs) — and a stray
+            // South swipe opening an exit confirm that quit even on
+            // Cancel is exactly how a device "somehow" exited to stock
+            // mid-read. Exit lives on System's EXIT card now, behind a
+            // confirm that honors its buttons.
             Gesture::Swipe {
                 dir: SwipeDir::North,
                 ..
@@ -854,13 +834,7 @@ impl Screen for HomeScreen {
             | Gesture::Swipe {
                 dir: SwipeDir::South,
                 ..
-            } => {
-                if takeover() {
-                    confirm_exit_to_stock(self.snap.clone())
-                } else {
-                    Action::Quit
-                }
-            }
+            } => Action::Keep,
             // Horizontal swipes flip tabs, Boox-style.
             Gesture::Swipe {
                 dir: SwipeDir::East,
@@ -1029,7 +1003,14 @@ fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
             }
         }
         2 => {
-            // Monitor screen + stand + cast symbol
+            // Live AI Stream: terminal chip with prompt prompt sign `>_` and pulse dot
+            let box_h = s - pt(3.0);
+            p.rect_outline_t(Rect::new(x, y + pt(1.5), s, box_h), T, 0);
+            p.text(x + pt(2.5), y + pt(10.5), 7.5, 0, ">_");
+            p.circle_fill(x + s - pt(3.0), y + pt(4.5), pt(1.2), 0);
+        }
+        3 => {
+            // Monitor screen + stand + cast symbol (Mirror to Mac)
             let mon_h = s - pt(4.0);
             p.rect_outline_t(Rect::new(x, y, s, mon_h), T, 0);
             // Monitor stand
@@ -1052,15 +1033,15 @@ fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
                 p.rect(Rect::new(px, py, 2, 2), 0);
             }
         }
-        3 => {
-            // Control Sliders: two parallel tracks with offset knobs
+        4 => {
+            // Control Sliders: two parallel tracks with offset knobs (System)
             p.hline_t(y + pt(3.5), x, x + s, 2, 150);
             p.circle_fill(x + pt(3.5), y + pt(3.5) + 1, pt(2.5), 0);
             p.hline_t(y + pt(9.5), x, x + s, 2, 150);
             p.circle_fill(x + s - pt(3.5), y + pt(9.5) + 1, pt(2.5), 0);
         }
         _ => {
-            // Power / Exit glyph: circle with vertical top line
+            // Power / Exit glyph: circle with vertical top line (Exit)
             let r = (s - pt(2.0)) / 2;
             p.circle_outline_t(mid_x, mid_y, r, T, 0);
             // White mask for top slot

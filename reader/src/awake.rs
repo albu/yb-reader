@@ -118,6 +118,31 @@ pub fn spawn() {
         .spawn(loop_fn);
 }
 
+/// Boot-time radio restore. The persisted Wi-Fi/SSH intents are the
+/// user's standing choice, but nothing applied them on a fresh boot:
+/// the healer is gated to live-session screens, so after any reboot
+/// the radio sat down until something was opened — an unreachable
+/// device for as long as nobody touched it (2026-08-23: the whole
+/// corner-back incident window). Takeover only: in stock mode the
+/// framework owns the radio and our policy must not fight it. Off the
+/// UI thread — boot's first paint must not wait on lipc round-trips.
+pub fn boot_restore() {
+    if !ybdev::sysinfo::takeover()
+        || ybdev::wifi::user_off()
+        || !ybdev::wifi::wifi_wanted_on_wake()
+        || wifi::wifi_state() == Some(true)
+    {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("wifi-boot".to_string())
+        .spawn(|| {
+            plog("awake: boot — restoring wifi per saved intent");
+            wifi::turn_on_wifi();
+            ybdev::wifi::verify_or_power_down();
+        });
+}
+
 /// Pure edge, host-testable.
 fn vbus_plugged(prev: bool, cur: bool) -> bool {
     cur && !prev

@@ -41,6 +41,17 @@ if ! grep -qx dropbear /proc/[0-9]*/comm 2>/dev/null; then
     fi
 fi
 
+# 1b. ...and let it be reached. The stock firewall's INPUT policy is
+# DROP, so a freshly-booted dropbear listens into a black hole until
+# something adds the allow rule — the curtain's SSH card does exactly
+# this (ybdev::ssh::rules); after a reboot nothing did, and ssh "didn't
+# wake up" (2026-08-23). Same specs, idempotent via -C.
+IPT=/usr/sbin/iptables
+"$IPT" -C INPUT -p tcp --dport 2222 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    "$IPT" -I INPUT 1 -p tcp --dport 2222 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+"$IPT" -C OUTPUT -p tcp --sport 2222 -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null || \
+    "$IPT" -A OUTPUT -p tcp --sport 2222 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+
 # 2. Crash counter. A replaced binary earns a fresh count (deploys must
 #    not trip the fallback); only the same binary failing repeatedly
 #    does. Cleared again after 60s of genuine runtime below.

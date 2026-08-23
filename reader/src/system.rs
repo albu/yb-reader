@@ -20,8 +20,8 @@ const CARD_TOP_PT: f32 = 66.0;
 const CARD_H_PT: f32 = 34.0;
 const CARD_GAP_PT: f32 = 8.0;
 
-const REFRESH_TITLE_PT: f32 = 292.0;
-const REFRESH_PILL_PT: f32 = 308.0;
+const REFRESH_TITLE_PT: f32 = 330.0;
+const REFRESH_PILL_PT: f32 = 346.0;
 
 const DIM: u8 = 110;
 const INK: u8 = 0;
@@ -215,6 +215,26 @@ impl Screen for SystemScreen {
             &format!("Next boot: {next}"),
         );
 
+        // Exit, deliberately this deep: in takeover it hands the whole
+        // device to the stock framework — an accidental trigger looks
+        // like a hung device while the framework boots — so it is a
+        // System card behind a confirm that honors its buttons, never
+        // a home row or a swipe. Light card, not the dark action
+        // style: quieter than Reboot, matching how rarely it's used.
+        let (ev, es) = if os_boot {
+            ("Exit to Kindle", "Stock UI returns · Reboot: yb OS")
+        } else {
+            ("Quit", "Back to the stock launcher")
+        };
+        SystemScreen::draw_card(
+            p,
+            Rect::new(pad, top + 5 * (ch + gap), cw, ch),
+            "EXIT",
+            ev,
+            es,
+            false,
+        );
+
         // E-Ink full-refresh cadence.
         let cur = crate::positions::global_refresh_interval();
         p.text(pad, pt(REFRESH_TITLE_PT), 8.0, INK, "E-Ink full refresh");
@@ -319,6 +339,35 @@ impl Screen for SystemScreen {
                     )));
                 }
 
+                let r_exit = Rect::new(pad, top + 5 * (ch + gap), cw, ch);
+                if r_exit.contains(x, y) {
+                    let (title, body, yes) = if crate::home::takeover() {
+                        (
+                            "Exit to Kindle?",
+                            "The stock Kindle UI returns.\nReboot brings yb-reader back.",
+                            "Exit",
+                        )
+                    } else {
+                        ("Quit yb-reader?", "Back to the stock launcher.", "Quit")
+                    };
+                    // Yes quits; No must only pop. The home swipe-exit
+                    // bug was a callback that ignored the button and
+                    // quit either way — dismissing the dialog exited.
+                    return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                        title,
+                        body,
+                        yes,
+                        None,
+                        move |act| {
+                            if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
+                                Action::Quit
+                            } else {
+                                Action::Pop
+                            }
+                        },
+                    )));
+                }
+
                 // Refresh-interval pills.
                 let py = pt(REFRESH_PILL_PT);
                 let ph = pt(16.0);
@@ -381,12 +430,12 @@ mod tests {
             assert!(n >= min, "{name}: only {n} ink pixels in rows {y0}-{y1}");
         };
         let lit = buf.iter().filter(|&&b| b > 200).count();
-        // 88%: five cards of text are legitimately under 90 — the guard
+        // 88%: six cards of text are legitimately under 90 — the guard
         // exists to catch a gray/black full-screen fill, not card count.
         assert!(lit > 1248 * 1648 * 88 / 100, "page is not white: {lit}");
         ink("title", 90, 170, 60);
-        ink("cards", 270, 900, 150);
-        // Pills at REFRESH_PILL_PT (308pt ≈ 1285px at 4.17 px/pt).
-        ink("refresh", 1230, 1350, 40);
+        ink("cards", 270, 1290, 150);
+        // Pills at REFRESH_PILL_PT (346pt ≈ 1442px at 4.17 px/pt).
+        ink("refresh", 1400, 1520, 40);
     }
 }

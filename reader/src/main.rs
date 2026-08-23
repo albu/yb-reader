@@ -2,6 +2,7 @@
 //! closures push the feature screens. All loops, refresh discipline and
 //! edge gestures live in yui::App.
 
+mod ai_stream;
 mod awake;
 mod backend;
 mod backend_mupdf;
@@ -111,6 +112,7 @@ fn main() {
     let (w, h) = app.dims();
 
     awake::spawn();
+    awake::boot_restore();
     usbmode::spawn();
     screensavers::prewarm();
     let root = HomeScreen::new(w, h);

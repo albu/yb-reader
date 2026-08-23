@@ -202,7 +202,18 @@ impl App {
                 if let Some(make) = self.overlay.as_ref() {
                     return Action::Push(make());
                 }
-            } else if g.corner_back() || g.corner_back_in(vw, vh) {
+            } else if (g.corner_back() || g.corner_back_in(vw, vh))
+                && self.stack.len() > 1
+            {
+                // Back only goes somewhere. Corner-back on the ROOT
+                // screen is a Pop of the root — which quits the app,
+                // and in takeover that is exit-to-stock with no
+                // confirm: a stray bottom-corner swipe did exactly
+                // that five seconds after boot (field log 2026-08-23:
+                // Swipe North from y=1647, graceful exit 42 in the
+                // same second, device "hung" while the framework
+                // churned). On the root the gesture now falls through
+                // to the screen's own handler.
                 return Action::Pop;
             }
         }
