@@ -21,6 +21,13 @@ pub const MAX_BODY_BYTES: i64 = 16 * 1024 * 1024;
 /// cap a peer can trickle bytes with no newline forever and grow the heap
 /// until the allocator aborts.
 const MAX_LINE_BYTES: usize = 16 * 1024;
+/// Hard wall-clock ceiling on one request()'s RECEIVE phase, checked before
+/// every socket read. The per-read REQUEST_TIMEOUT restarts on each byte,
+/// so a peer trickling 1 B/4.9 s could otherwise hold a request open
+/// forever — and mirror.rs runs these requests inline on the UI thread,
+/// where "forever" freezes the device. Legit frames land in tens of ms on
+/// a warm link (radio wake adds ~0.2 s); 2.5 s is ~10× headroom.
+pub const REQUEST_BUDGET: Duration = Duration::from_millis(2_500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -44,6 +51,11 @@ pub struct Conn {
     buf: Vec<u8>,
     pos: usize,
     fill_len: usize,
+    /// Wall-clock deadline for the in-flight request, armed by `request`
+    /// and enforced before every socket read. `None` between requests.
+    deadline: Option<std::time::Instant>,
+    /// Budget applied per request; defaults to REQUEST_BUDGET.
+    budget: Duration,
 }
 
 impl Conn {
@@ -55,13 +67,22 @@ impl Conn {
             buf: vec![0u8; 8192],
             pos: 0,
             fill_len: 0,
+            deadline: None,
+            budget: REQUEST_BUDGET,
         }
+    }
+
+    /// Override the per-request wall-clock budget (tests shrink it).
+    #[cfg(test)]
+    pub fn set_budget(&mut self, budget: Duration) {
+        self.budget = budget;
     }
 
     pub fn close(&mut self) {
         self.stream = None;
         self.pos = 0;
         self.fill_len = 0;
+        self.deadline = None;
     }
 
     pub fn open(&mut self) -> bool {
@@ -87,7 +108,10 @@ impl Conn {
             Err(e) => {
                 ybdev::log::plog(&format!(
                     "conn open {}:{} failed: {} kind={:?}",
-                    self.host, self.port, e, e.kind()
+                    self.host,
+                    self.port,
+                    e,
+                    e.kind()
                 ));
                 false
             }
@@ -120,11 +144,17 @@ impl Conn {
                 return Err(Stage::Send);
             }
         }
+        // Receive phase starts here: arm the wall-clock budget enforced by
+        // budget_gate() before every subsequent socket read.
+        self.deadline = Some(std::time::Instant::now() + self.budget);
 
         let line = self.read_line().map_err(|e| {
             ybdev::log::plog(&format!(
                 "{} {} status-line read failed: {} kind={:?}",
-                method, path, e, e.kind()
+                method,
+                path,
+                e,
+                e.kind()
             ));
             self.close();
             Stage::Status
@@ -140,7 +170,9 @@ impl Conn {
         let Some(status) = status else {
             ybdev::log::plog(&format!(
                 "{} {} status line not HTTP: {:?}",
-                method, path, &line.as_bytes()[..line.len().min(80)]
+                method,
+                path,
+                &line.as_bytes()[..line.len().min(80)]
             ));
             self.close();
             return Err(Stage::Status);
@@ -194,6 +226,10 @@ impl Conn {
                     continue;
                 }
                 let want = remaining.min(chunk.len());
+                if self.budget_gate().is_err() {
+                    self.close();
+                    return Err(Stage::Body);
+                }
                 match self.stream.as_mut().unwrap().read(&mut chunk[..want]) {
                     Ok(0) => {
                         self.close();
@@ -213,6 +249,10 @@ impl Conn {
                 }
             }
         }
+        // Request completed cleanly: disarm so a later idle read (there
+        // are none today, but keep-alive state must not inherit a stale
+        // deadline) doesn't trip the gate.
+        self.deadline = None;
         Ok(Resp { status, headers })
     }
 
@@ -235,7 +275,30 @@ impl Conn {
         }
     }
 
+    /// Enforce the request budget before a socket read: shrink the socket
+    /// timeout to the remaining budget and fail once it is spent. The
+    /// per-read REQUEST_TIMEOUT restarts on every received byte, so only
+    /// this wall-clock gate bounds a trickle feed.
+    fn budget_gate(&mut self) -> std::io::Result<()> {
+        if let Some(d) = self.deadline {
+            let now = std::time::Instant::now();
+            if now >= d {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "request budget exhausted",
+                ));
+            }
+            let _ = self
+                .stream
+                .as_mut()
+                .unwrap()
+                .set_read_timeout(Some((d - now).min(REQUEST_TIMEOUT)));
+        }
+        Ok(())
+    }
+
     fn refill(&mut self) -> std::io::Result<()> {
+        self.budget_gate()?;
         let n = self.stream.as_mut().unwrap().read(&mut self.buf)?;
         if n == 0 {
             return Err(std::io::Error::new(
@@ -344,7 +407,10 @@ mod tests {
         let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n";
         let mut c = conn_against(resp.to_vec());
         let mut sink = |_: &[u8]| true;
-        assert_eq!(c.request("GET", "/frame.png", &mut sink).err(), Some(Stage::Headers));
+        assert_eq!(
+            c.request("GET", "/frame.png", &mut sink).err(),
+            Some(Stage::Headers)
+        );
     }
 
     #[test]
@@ -361,10 +427,7 @@ mod tests {
     #[test]
     fn happy_path_still_works() {
         let body = b"hello frame";
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        );
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
         let mut resp = resp.into_bytes();
         resp.extend_from_slice(body);
         let mut c = conn_against(resp);
@@ -376,5 +439,34 @@ mod tests {
         let r = c.request("GET", "/frame.png", &mut sink).unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(got, body);
+    }
+
+    #[test]
+    fn request_budget_bounds_a_trickling_peer() {
+        use std::io::Write as _;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut s, &mut buf);
+            // Drip the status line one byte at a time, each inside the
+            // (shrunken) per-read timeout window: socket timeouts never
+            // fire, the wall-clock budget must.
+            for b in b"HTTP/1.1 200 OK\r\n" {
+                s.write_all(&[*b]).unwrap();
+                let _ = s.flush();
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        let mut c = Conn::new(&addr.ip().to_string(), addr.port());
+        c.set_budget(std::time::Duration::from_millis(150));
+        assert!(c.open());
+        let mut sink = |_: &[u8]| true;
+        assert_eq!(
+            c.request("GET", "/frame.png", &mut sink).err(),
+            Some(Stage::Status)
+        );
     }
 }

@@ -19,9 +19,9 @@ use crate::library::{self, list_books};
 use crate::mirror::MirrorScreen;
 use crate::positions::{self, Pos};
 use yui::nav::{self, Icon, NavTab};
-use yui::painter::{pt, Painter, Rect};
-use yui::Orientation;
+use yui::painter::{pt, Painter, Rect, PX};
 use yui::screen::{Action, Screen};
+use yui::Orientation;
 
 const TABS: [NavTab; 2] = [
     NavTab::new(Icon::Home, "home"),
@@ -34,41 +34,36 @@ const KICKER_BASE_PT: f32 = 30.0;
 const KICKER_SIZE_PT: f32 = 7.0;
 const HEADER_RULE_PT: f32 = 40.0;
 /// Action rows start under the header rule when no Continue card
-/// exists, below the card's divider otherwise.
+/// exists, below the card otherwise.
 const ROWS_TOP_PT: f32 = 56.0;
-const ROWS_TOP_CONT_PT: f32 = 122.0;
-const ROW_H_PT: f32 = 34.0;
+const ROWS_TOP_CONT_PT: f32 = 128.0;
+const ROW_H_PT: f32 = 38.0;
 const ROW_LABEL_PT: f32 = 10.0;
-const ROW_LABEL_BASE_PT: f32 = 21.0;
+const ROW_LABEL_BASE_PT: f32 = 23.0;
 const CHEV_PT: f32 = 12.0;
 /// Icon column: 13pt box, 8pt gap.
 const ICON_BOX_PT: f32 = 13.0;
 const ICON_GAP_PT: f32 = 8.0;
 
 /// --- Library tab layout (pt) ---
-const LIB_TITLE_BASE_PT: f32 = 30.0;
-const LIB_TITLE_SIZE_PT: f32 = 11.0;
 const LIB_COUNT_PT: f32 = 7.5;
 const KICKER2_SIZE_PT: f32 = 7.0;
 
-/// Continue block (only drawn when a last-read book exists).
-const CONT_TOP_PT: f32 = 62.0;
-const CONT_H_PT: f32 = 44.0;
-const CONT_TITLE_PT: f32 = 10.0;
+/// Continue hero block (only drawn when a last-read book exists).
+const CONT_TOP_PT: f32 = 64.0;
+const CONT_H_PT: f32 = 46.0;
+const CONT_TITLE_PT: f32 = 10.5;
 const CONT_SUB_PT: f32 = 7.5;
 const CONT_ICON_PT: f32 = 16.0;
-/// Divider under the Continue card, before the home action rows.
-const CONT_DIV_PT: f32 = 112.0;
 
 /// All-books list: kicker + rows.
-const LIST_TOP_PT: f32 = 62.0;
-/// Two-line rows: title over author, format label in its own left
-/// column, progress status on the right edge.
+const LIST_TOP_PT: f32 = 64.0;
+/// Two-line rows: title over author / fallback path, format + progress
+/// clustered on the right edge.
 const LIB_ROW_PT: f32 = 28.0;
 const LIB_ITEM_PT: f32 = 9.5;
 const LIB_ITEM_BASE_PT: f32 = 12.0;
 const LIB_AUTHOR_BASE_PT: f32 = 23.0;
-const FMT_COL_PT: f32 = 24.0;
 const LIB_FOOT_PT: f32 = 7.0;
 const LIB_FOOT_OFF_PT: f32 = 14.0;
 
@@ -174,15 +169,23 @@ fn progress_tag(pos: Option<&Pos>) -> Option<String> {
     }
 }
 
-
 pub struct HomeScreen {
     w: u32,
     h: u32,
     tab: usize,
+    /// All books scanned in library (unfiltered).
+    all_books: Vec<PathBuf>,
+    all_names: Vec<String>,
+    all_disp: Vec<String>,
+    all_authors: Vec<String>,
+    /// Unique collection names (subfolder paths inside documents/).
+    collections: Vec<String>,
+    /// Active collection filter (None = All Books).
+    active_collection: Option<String>,
+    collection_idx: usize,
+    /// Filtered book set for display on library tab.
     books: Vec<PathBuf>,
     names: Vec<String>,
-    /// What rows actually show: metadata title or filename-sans-extension.
-    /// `names` stays the identity (positions/highlights are keyed by it).
     disp: Vec<String>,
     authors: Vec<String>,
     /// Positions captured at scan, so draw/sort don't re-read the file.
@@ -208,6 +211,13 @@ impl HomeScreen {
             w,
             h,
             tab: 0,
+            all_books: vec![],
+            all_names: vec![],
+            all_disp: vec![],
+            all_authors: vec![],
+            collections: vec![],
+            active_collection: None,
+            collection_idx: 0,
             books: vec![],
             names: vec![],
             disp: vec![],
@@ -224,9 +234,9 @@ impl HomeScreen {
     }
 
     fn scan(&mut self) {
-        self.books = list_books();
-        self.names = self
-            .books
+        self.all_books = list_books();
+        self.all_names = self
+            .all_books
             .iter()
             .map(|p| {
                 p.file_name()
@@ -237,10 +247,10 @@ impl HomeScreen {
         // Deleted books' position entries die here — the store never
         // self-cleans otherwise. (Refuses empty scans: an unreadable
         // documents/ directory must not wipe every position.)
-        positions::prune(&self.names);
-        let metas = library::meta_for(&self.books);
-        self.disp = self
-            .names
+        positions::prune(&self.all_names);
+        let metas = library::meta_for(&self.all_books);
+        self.all_disp = self
+            .all_names
             .iter()
             .zip(metas.iter())
             .map(|(n, m)| {
@@ -249,29 +259,83 @@ impl HomeScreen {
                     .unwrap_or_else(|| sans_ext(n))
             })
             .collect();
-        self.authors = self
-            .names
+        self.all_authors = self
+            .all_names
             .iter()
             .zip(metas.iter())
-            .map(|(_, m)| {
-                m.as_ref()
-                    .map(|(_, a)| a.clone())
-                    .unwrap_or_default()
-            })
+            .map(|(_, m)| m.as_ref().map(|(_, a)| a.clone()).unwrap_or_default())
             .collect();
         self.pos_map = positions::all();
-        self.offset = 0;
+
+        let mut cols: Vec<String> = self
+            .all_books
+            .iter()
+            .filter_map(|p| library::collection_of(p))
+            .collect();
+        cols.sort();
+        cols.dedup();
+        self.collections = cols;
+
+        if let Some(ref cur) = self.active_collection {
+            if let Some(pos) = self.collections.iter().position(|c| c == cur) {
+                self.collection_idx = pos + 1;
+            } else {
+                self.active_collection = None;
+                self.collection_idx = 0;
+            }
+        } else {
+            self.collection_idx = 0;
+        }
+
         self.cont = None;
         // Continue = freshest stored position whose file still exists.
         if let Some((name, pos)) = positions::last_read() {
-            if let Some(i) = self.names.iter().position(|n| *n == name) {
-                self.cont = Some((self.books[i].clone(), pos));
+            if let Some(i) = self.all_names.iter().position(|n| *n == name) {
+                self.cont = Some((self.all_books[i].clone(), pos));
             }
         }
-        self.apply_sort();
+        self.apply_filter();
         // Due count for the Flashcards row, refreshed per scan (enter +
         // resume) instead of re-parsing flashcards.json on every draw.
         self.due_count = crate::flashcards::FlashcardDeck::load().due_count();
+    }
+
+    fn apply_filter(&mut self) {
+        let mut items: Vec<(PathBuf, String, String, String)> = Vec::new();
+        for i in 0..self.all_books.len() {
+            let p = &self.all_books[i];
+            let keep = match &self.active_collection {
+                None => true,
+                Some(col) => library::collection_of(p).as_deref() == Some(col.as_str()),
+            };
+            if keep {
+                items.push((
+                    p.clone(),
+                    self.all_names[i].clone(),
+                    self.all_disp[i].clone(),
+                    self.all_authors[i].clone(),
+                ));
+            }
+        }
+        self.books = items.iter().map(|x| x.0.clone()).collect();
+        self.names = items.iter().map(|x| x.1.clone()).collect();
+        self.disp = items.iter().map(|x| x.2.clone()).collect();
+        self.authors = items.iter().map(|x| x.3.clone()).collect();
+        self.offset = 0;
+        self.apply_sort();
+    }
+
+    fn cycle_collection(&mut self) {
+        if self.collections.is_empty() {
+            return;
+        }
+        self.collection_idx = (self.collection_idx + 1) % (self.collections.len() + 1);
+        self.active_collection = if self.collection_idx == 0 {
+            None
+        } else {
+            Some(self.collections[self.collection_idx - 1].clone())
+        };
+        self.apply_filter();
     }
 
     /// Order the in-memory list by the current mode, keeping the parallel
@@ -346,7 +410,11 @@ impl HomeScreen {
     /// Where the home tab's action rows start: below the Continue card
     /// when one exists, under the header rule otherwise.
     fn rows_top(has_cont: bool) -> i32 {
-        pt(if has_cont { ROWS_TOP_CONT_PT } else { ROWS_TOP_PT })
+        pt(if has_cont {
+            ROWS_TOP_CONT_PT
+        } else {
+            ROWS_TOP_PT
+        })
     }
 
     /// Open the Continue book where it was left — the body both tabs'
@@ -378,9 +446,8 @@ impl HomeScreen {
         Action::Redraw
     }
 
-    /// The Continue card — kicker, open-book icon, title, author · page,
-    /// progress bar, chevron. Drawn on the home tab under the header;
-    /// the action rows follow its divider.
+    /// The Continue hero block — optical buffer kicker, open-book line-art icon,
+    /// 10.5pt title, author · page (pct), inset progress bar, chevron.
     fn draw_continue_block(&self, p: &mut Painter) {
         let w = p.size().0;
         let pad = pt(PAD_PT);
@@ -389,53 +456,57 @@ impl HomeScreen {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        // Show what the row shows: metadata title + author (by filename
-        // lookup — identity, not display).
-        let i = self.names.iter().position(|n| *n == name);
+        let i = self.all_names.iter().position(|n| *n == name);
         let disp = i
-            .map(|i| self.disp[i].clone())
+            .map(|i| self.all_disp[i].clone())
             .unwrap_or_else(|| sans_ext(&name));
-        let author = i.map(|i| self.authors[i].clone()).unwrap_or_default();
-        p.text(pad, pt(54.0), KICKER2_SIZE_PT, 130, "CONTINUE");
+        let author = i.map(|i| self.all_authors[i].clone()).unwrap_or_default();
+
+        // Low-contrast optical cushion between the solid header rule and the hero book
+        p.text(pad, pt(56.0), KICKER2_SIZE_PT, 140, "CONTINUE");
+
         let top = pt(CONT_TOP_PT);
-        draw_book_icon(p, pad, top + (pt(CONT_H_PT) - pt(CONT_ICON_PT)) / 2);
-        let label = p.truncate(CONT_TITLE_PT, &disp, p.width_pt() - 2.0 * PAD_PT - 18.0);
-        p.text(
-            pad + pt(CONT_ICON_PT) + pt(8.0),
-            top + pt(20.0),
-            CONT_TITLE_PT,
-            0,
-            &label,
+        draw_book_icon(
+            p,
+            pad,
+            top + (pt(CONT_H_PT) - pt(CONT_ICON_PT)) / 2 - pt(2.0),
         );
-        let page = if pos.total > 0 {
-            format!("page {} of {}", pos.page + 1, pos.total)
+
+        let tx = pad + pt(CONT_ICON_PT) + pt(8.0);
+        let chev_w = p.text_width(CHEV_PT, ">") / PX + 4.0;
+        let budget = (p.width_pt() - 2.0 * PAD_PT - CONT_ICON_PT - 8.0 - chev_w).max(10.0);
+        let label = p.truncate(CONT_TITLE_PT, &disp, budget);
+        p.text(tx, top + pt(17.0), CONT_TITLE_PT, 0, &label);
+        p.text_right(w - pad, top + pt(23.0), CHEV_PT, 160, ">");
+
+        let pct_opt = progress_str(pos);
+        let page_info = if pos.total > 0 {
+            if let Some(pct) = pct_opt {
+                format!("page {} of {} ({})", pos.page + 1, pos.total, pct)
+            } else {
+                format!("page {} of {}", pos.page + 1, pos.total)
+            }
         } else {
             format!("page {}", pos.page + 1)
         };
         let sub = if author.is_empty() {
-            page
+            page_info
         } else {
-            format!("{} · {}", author, page)
+            format!("{} · {}", author, page_info)
         };
-        p.text(
-            pad + pt(CONT_ICON_PT) + pt(8.0),
-            top + pt(36.0),
-            CONT_SUB_PT,
-            130,
-            &sub,
-        );
-        // Thin progress bar along the block's bottom edge.
+        let sub_trunc = p.truncate(CONT_SUB_PT, &sub, budget);
+        p.text(tx, top + pt(30.0), CONT_SUB_PT, 130, &sub_trunc);
+
+        // Inset thin progress bar aligned with the text block
         if pos.total > 0 {
-            let bx = pad + pt(CONT_ICON_PT) + pt(8.0);
-            let bw = (w - pad - bx).max(1);
+            let bw = (w - pad - tx).max(1);
             let frac = ((pos.page + 1) as f32 / pos.total as f32).clamp(0.0, 1.0);
-            p.rect(Rect::new(bx, top + pt(41.0), bw, pt(2.0)), 230);
+            p.rect(Rect::new(tx, top + pt(38.0), bw, pt(2.0)), 235);
             let fw = ((bw as f32) * frac).round() as i32;
             if fw > 0 {
-                p.rect(Rect::new(bx, top + pt(41.0), fw.min(bw), pt(2.0)), 90);
+                p.rect(Rect::new(tx, top + pt(38.0), fw.min(bw), pt(2.0)), 90);
             }
         }
-        p.text_right(w - pad, top + pt(26.0), CHEV_PT, 160, ">");
     }
 }
 
@@ -460,8 +531,6 @@ impl Screen for HomeScreen {
         Action::Redraw
     }
 
-
-
     fn draw(&mut self, p: &mut Painter) {
         let (w, h) = p.size();
         let content_h = h - nav::bar_h_px();
@@ -481,73 +550,104 @@ impl Screen for HomeScreen {
             format!("{}%", cap)
         };
         p.text(pad, pt(12.0), 6.5, 165, &t);
+        let bat_w = p.text_width(6.5, &bat) as i32;
+        crate::chrome::draw_wifi_glyph(p, w - pad - bat_w - pt(6.0), pt(9.5), 6.5, 165);
         p.text_right(w - pad, pt(12.0), 6.5, 165, &bat);
+
+        // Persistent header band across all tabs:
+        p.text(pad, pt(KICKER_BASE_PT), KICKER_SIZE_PT, 130, "YB READER");
+        // Build stamp, top right: the on-device answer to "did the
+        // deploy land?" (* = dirty tree when built).
+        p.text_right(
+            w - pad,
+            pt(KICKER_BASE_PT),
+            KICKER_SIZE_PT,
+            180,
+            concat!("v", env!("YB_BUILD")),
+        );
+        p.hline_t(pt(HEADER_RULE_PT), pad, w - pad, 3, 140);
 
         match self.tab {
             0 => {
-                p.text(pad, pt(KICKER_BASE_PT), KICKER_SIZE_PT, 130, "YB READER");
-                // Build stamp, top right: the on-device answer to "did the
-                // deploy land?" (* = dirty tree when built).
-                p.text_right(
-                    w - pad,
-                    pt(KICKER_BASE_PT),
-                    KICKER_SIZE_PT,
-                    180,
-                    concat!("v", env!("YB_BUILD")),
-                );
-                p.hline_t(pt(HEADER_RULE_PT), pad, w - pad, 3, 140);
                 // The dashboard card: what's being read, front and center.
                 let has_cont = self.cont.is_some();
                 if has_cont {
                     self.draw_continue_block(p);
-                    p.hline_t(pt(CONT_DIV_PT), pad, w - pad, 2, 180);
                 }
                 let rows_top = HomeScreen::rows_top(has_cont);
                 for (i, default_label) in ROW_LABELS.iter().enumerate() {
                     let top = rows_top + i as i32 * pt(ROW_H_PT);
                     draw_row_icon(p, i, pad, top + (pt(ROW_H_PT) - pt(ICON_BOX_PT)) / 2);
 
-                    let label = if i == 0 {
+                    let lx = pad + pt(ICON_BOX_PT) + pt(ICON_GAP_PT);
+                    let ly = top + pt(ROW_LABEL_BASE_PT);
+                    if i == 0 {
+                        p.text(lx, ly, ROW_LABEL_PT, 0, "Flashcards");
+                        let fw = p.text_width(ROW_LABEL_PT, "Flashcards") as i32;
                         if self.due_count > 0 {
-                            format!("Flashcards ({} due)", self.due_count)
+                            p.text(lx + fw, ly, ROW_LABEL_PT, 130, " · ");
+                            let dw = p.text_width(ROW_LABEL_PT, " · ") as i32;
+                            p.text(
+                                lx + fw + dw,
+                                ly,
+                                ROW_LABEL_PT,
+                                0,
+                                &format!("{} due", self.due_count),
+                            );
                         } else {
-                            "Flashcards · all caught up".to_string()
+                            p.text(lx + fw, ly, ROW_LABEL_PT, 130, " · all caught up");
                         }
-                    } else if i == ROW_LABELS.len() - 1 && takeover() {
-                        "Exit to Kindle".to_string()
                     } else {
-                        default_label.to_string()
-                    };
+                        let label = if i == ROW_LABELS.len() - 1 && takeover() {
+                            "Exit to Kindle"
+                        } else {
+                            default_label
+                        };
+                        p.text(lx, ly, ROW_LABEL_PT, 0, label);
+                    }
 
-                    p.text(
-                        pad + pt(ICON_BOX_PT) + pt(ICON_GAP_PT),
-                        top + pt(ROW_LABEL_BASE_PT),
-                        ROW_LABEL_PT,
-                        0,
-                        &label,
-                    );
-                    p.text_right(w - pad, top + pt(ROW_LABEL_BASE_PT), CHEV_PT, 160, ">");
+                    p.text_right(w - pad, ly, CHEV_PT, 160, ">");
                     if i + 1 < ROW_LABELS.len() {
                         p.hline_t(top + pt(ROW_H_PT), pad, w - pad, 2, 180);
                     }
                 }
             }
             _ => {
-                p.text(pad, pt(LIB_TITLE_BASE_PT), LIB_TITLE_SIZE_PT, 0, "Library");
-                p.text_right(
-                    w - pad,
-                    pt(LIB_TITLE_BASE_PT),
-                    LIB_COUNT_PT,
-                    130,
-                    &format!("{} books · {}", self.names.len(), self.sort.label()),
-                );
-                p.hline_t(pt(HEADER_RULE_PT), pad, w - pad, 3, 140);
-
-                if !self.names.is_empty() {
-                    p.text(pad, pt(54.0), KICKER2_SIZE_PT, 130, "ALL BOOKS");
+                if !self.all_books.is_empty() {
+                    let label = match &self.active_collection {
+                        None => "ALL BOOKS".to_string(),
+                        Some(col) => col.to_uppercase(),
+                    };
+                    p.text(pad, pt(56.0), KICKER2_SIZE_PT, 140, &label);
+                    if !self.collections.is_empty() {
+                        // The ▾ is line-drawn, not a glyph: the embedded
+                        // Noto Sans subset has no triangles, and fontdue
+                        // renders the missing char as a stray rectangle.
+                        let lw = p.text_width(KICKER2_SIZE_PT, &label);
+                        let cx = pad + lw as i32 + pt(4.0);
+                        // Mid cap-height of the 7pt kicker, baseline 56.
+                        let cy = pt(53.5);
+                        let s = pt(1.75);
+                        p.line_w(cx - s, cy - s, cx, cy + s, 2, 140);
+                        p.line_w(cx + s, cy - s, cx, cy + s, 2, 140);
+                        p.text(
+                            cx + pt(4.0),
+                            pt(56.0),
+                            KICKER2_SIZE_PT,
+                            140,
+                            &format!("({})", self.books.len()),
+                        );
+                    }
+                    p.text_right(
+                        w - pad,
+                        pt(56.0),
+                        LIB_COUNT_PT,
+                        130,
+                        &format!("{} books · {}", self.books.len(), self.sort.label()),
+                    );
                 }
 
-                if self.names.is_empty() {
+                if self.all_books.is_empty() {
                     // The empty state is the wireless CTA — the receive
                     // loop is the fastest first-book path, and tapping
                     // anywhere on the content opens it.
@@ -564,47 +664,50 @@ impl Screen for HomeScreen {
                         160,
                         "or copy files to /mnt/us/documents",
                     );
+                } else if self.books.is_empty() {
+                    p.text_center(content_h / 2 - pt(4.0), 10.0, 0, "No books in collection");
+                    p.text_center(
+                        content_h / 2 + pt(14.0),
+                        8.5,
+                        130,
+                        "tap the kicker above to cycle collections",
+                    );
                 } else {
                     let rows_top = pt(LIST_TOP_PT);
-                    self.per_page =
-                        ((content_h - rows_top - pt(LIB_FOOT_OFF_PT)) / pt(LIB_ROW_PT))
-                            .max(1) as usize;
-                    let visible = self.names.len().min(self.offset + self.per_page);
+                    self.per_page = ((content_h - rows_top - pt(LIB_FOOT_OFF_PT)) / pt(LIB_ROW_PT))
+                        .max(1) as usize;
+                    let visible = self.books.len().min(self.offset + self.per_page);
                     for (i, idx) in (self.offset..visible).enumerate() {
                         let top = rows_top + i as i32 * pt(LIB_ROW_PT);
                         let ext = self.books[idx]
                             .extension()
                             .map(|e| e.to_string_lossy().to_uppercase())
                             .unwrap_or_default();
-                        if !ext.is_empty() {
-                            p.text(pad, top + pt(LIB_ITEM_BASE_PT), 7.0, 130, &ext);
-                        }
                         let tag = progress_tag(self.pos_map.get(&self.names[idx]));
-                        // Reserve the right edge for the status when
-                        // present; rows without one use the full width.
-                        let reserve = if tag.is_some() { 16.0 } else { 2.0 };
-                        let budget = p.width_pt() - 2.0 * PAD_PT - FMT_COL_PT - reserve;
+                        let meta = match (ext.is_empty(), tag) {
+                            (true, Some(t)) => t,
+                            (false, Some(t)) => format!("{} · {}", ext, t),
+                            (false, None) => ext,
+                            (true, None) => String::new(),
+                        };
+                        let meta_w = if meta.is_empty() {
+                            0.0
+                        } else {
+                            p.text_width(7.0, &meta) / PX + 4.0
+                        };
+                        let budget = (p.width_pt() - 2.0 * PAD_PT - meta_w - 6.0).max(10.0);
                         let label = p.truncate(LIB_ITEM_PT, &self.disp[idx], budget);
-                        p.text(
-                            pad + pt(FMT_COL_PT),
-                            top + pt(LIB_ITEM_BASE_PT),
-                            LIB_ITEM_PT,
-                            0,
-                            &label,
-                        );
+                        p.text(pad, top + pt(LIB_ITEM_BASE_PT), LIB_ITEM_PT, 0, &label);
                         let author = &self.authors[idx];
-                        if !author.is_empty() {
-                            let a = p.truncate(7.0, author, budget);
-                            p.text(
-                                pad + pt(FMT_COL_PT),
-                                top + pt(LIB_AUTHOR_BASE_PT),
-                                7.0,
-                                130,
-                                &a,
-                            );
-                        }
-                        if let Some(s) = &tag {
-                            p.text_right(w - pad, top + pt(LIB_ITEM_BASE_PT), 7.0, 130, s);
+                        let subtext = if !author.is_empty() {
+                            author.as_str()
+                        } else {
+                            self.books[idx].to_str().unwrap_or(&self.names[idx])
+                        };
+                        let a = p.truncate(7.0, subtext, p.width_pt() - 2.0 * PAD_PT);
+                        p.text(pad, top + pt(LIB_AUTHOR_BASE_PT), 7.0, 130, &a);
+                        if !meta.is_empty() {
+                            p.text_right(w - pad, top + pt(LIB_ITEM_BASE_PT), 7.0, 130, &meta);
                         }
                     }
                     // Footer doubles as the sort control: the label with a
@@ -613,15 +716,10 @@ impl Screen for HomeScreen {
                         "{}-{} of {} · sort: {} (tap)",
                         self.offset + 1,
                         visible,
-                        self.names.len(),
+                        self.books.len(),
                         self.sort.label()
                     );
-                    p.text_center(
-                        content_h - pt(LIB_FOOT_OFF_PT),
-                        LIB_FOOT_PT,
-                        130,
-                        &footer,
-                    );
+                    p.text_center(content_h - pt(LIB_FOOT_OFF_PT), LIB_FOOT_PT, 130, &footer);
                 }
             }
         }
@@ -669,10 +767,10 @@ impl Screen for HomeScreen {
                             return self.open_continue();
                         }
                         match HomeScreen::hit_home_row(y, self.cont.is_some()) {
-                            Some(0) => Action::Push(Box::new(crate::flashcards::FlashcardsScreen::new())),
-                            Some(1) => {
-                                Action::Push(Box::new(crate::receive::ReceiveScreen::new()))
+                            Some(0) => {
+                                Action::Push(Box::new(crate::flashcards::FlashcardsScreen::new()))
                             }
+                            Some(1) => Action::Push(Box::new(crate::receive::ReceiveScreen::new())),
                             Some(2) => Action::Push(Box::new(MirrorScreen::new(self.w, self.h))),
                             Some(3) => Action::Push(Box::new(crate::system::SystemScreen::new())),
                             // Exit: in takeover mode this hands the device to
@@ -691,10 +789,16 @@ impl Screen for HomeScreen {
                     _ => {
                         // Empty library: the whole content area is the
                         // receive CTA (see draw).
-                        if self.names.is_empty() {
-                            return Action::Push(Box::new(
-                                crate::receive::ReceiveScreen::new(),
-                            ));
+                        if self.all_books.is_empty() {
+                            return Action::Push(Box::new(crate::receive::ReceiveScreen::new()));
+                        }
+
+                        // Collection switcher on the kicker line
+                        if y >= pt(HEADER_RULE_PT) && y < pt(LIST_TOP_PT) {
+                            if !self.collections.is_empty() {
+                                self.cycle_collection();
+                                return Action::RedrawFull;
+                            }
                         }
 
                         // Sort control: the footer band (primary, the hint
@@ -721,12 +825,18 @@ impl Screen for HomeScreen {
                 }
             }
             // Library tab: vertical swipes scroll the list.
-            Gesture::Swipe { dir: SwipeDir::North, .. } if self.tab == 1 => {
-                self.offset = (self.offset + self.per_page.max(1))
-                    .min(self.names.len().saturating_sub(1));
+            Gesture::Swipe {
+                dir: SwipeDir::North,
+                ..
+            } if self.tab == 1 => {
+                self.offset =
+                    (self.offset + self.per_page.max(1)).min(self.names.len().saturating_sub(1));
                 Action::RedrawFull
             }
-            Gesture::Swipe { dir: SwipeDir::South, .. } if self.tab == 1 => {
+            Gesture::Swipe {
+                dir: SwipeDir::South,
+                ..
+            } if self.tab == 1 => {
                 if self.offset > 0 {
                     self.offset -= self.per_page.min(self.offset);
                     Action::RedrawFull
@@ -737,8 +847,14 @@ impl Screen for HomeScreen {
             // Home tab: swipe down/up still exits (old muscle memory) —
             // but leaving takeover mode deserves a confirm like the Exit
             // row gets.
-            Gesture::Swipe { dir: SwipeDir::North, .. }
-            | Gesture::Swipe { dir: SwipeDir::South, .. } => {
+            Gesture::Swipe {
+                dir: SwipeDir::North,
+                ..
+            }
+            | Gesture::Swipe {
+                dir: SwipeDir::South,
+                ..
+            } => {
                 if takeover() {
                     confirm_exit_to_stock(self.snap.clone())
                 } else {
@@ -746,8 +862,14 @@ impl Screen for HomeScreen {
                 }
             }
             // Horizontal swipes flip tabs, Boox-style.
-            Gesture::Swipe { dir: SwipeDir::East, .. } => self.switch(-1),
-            Gesture::Swipe { dir: SwipeDir::West, .. } => self.switch(1),
+            Gesture::Swipe {
+                dir: SwipeDir::East,
+                ..
+            } => self.switch(-1),
+            Gesture::Swipe {
+                dir: SwipeDir::West,
+                ..
+            } => self.switch(1),
             Gesture::TwoFingerTap => Action::Keep,
             // Library tab: long-press a row (Continue included) to delete
             // the book — the wireless loop needs cable-free removal too.
@@ -780,7 +902,6 @@ impl Screen for HomeScreen {
             _ => Action::Keep,
         }
     }
-
 }
 
 /// Small open-book glyph for the Continue row.
@@ -796,17 +917,73 @@ fn draw_book_icon(p: &mut Painter, x: i32, y: i32) {
 
     // Left page (curved top and bottom)
     p.line_w(mid, y + pad_y, x + pt(4.0), y + pad_y - pt(1.5), 2, 0);
-    p.line_w(x + pt(4.0), y + pad_y - pt(1.5), x + pt(1.5), y + pad_y + pt(0.5), 2, 0);
-    p.line_w(x + pt(1.5), y + pad_y + pt(0.5), x + pt(1.5), y + pad_y + book_h - pt(0.5), 2, 0);
-    p.line_w(x + pt(1.5), y + pad_y + book_h - pt(0.5), x + pt(4.0), y + pad_y + book_h - pt(2.0), 2, 0);
-    p.line_w(x + pt(4.0), y + pad_y + book_h - pt(2.0), mid, y + pad_y + book_h, 2, 0);
+    p.line_w(
+        x + pt(4.0),
+        y + pad_y - pt(1.5),
+        x + pt(1.5),
+        y + pad_y + pt(0.5),
+        2,
+        0,
+    );
+    p.line_w(
+        x + pt(1.5),
+        y + pad_y + pt(0.5),
+        x + pt(1.5),
+        y + pad_y + book_h - pt(0.5),
+        2,
+        0,
+    );
+    p.line_w(
+        x + pt(1.5),
+        y + pad_y + book_h - pt(0.5),
+        x + pt(4.0),
+        y + pad_y + book_h - pt(2.0),
+        2,
+        0,
+    );
+    p.line_w(
+        x + pt(4.0),
+        y + pad_y + book_h - pt(2.0),
+        mid,
+        y + pad_y + book_h,
+        2,
+        0,
+    );
 
     // Right page (curved top and bottom)
     p.line_w(mid, y + pad_y, x + w - pt(4.0), y + pad_y - pt(1.5), 2, 0);
-    p.line_w(x + w - pt(4.0), y + pad_y - pt(1.5), x + w - pt(1.5), y + pad_y + pt(0.5), 2, 0);
-    p.line_w(x + w - pt(1.5), y + pad_y + pt(0.5), x + w - pt(1.5), y + pad_y + book_h - pt(0.5), 2, 0);
-    p.line_w(x + w - pt(1.5), y + pad_y + book_h - pt(0.5), x + w - pt(4.0), y + pad_y + book_h - pt(2.0), 2, 0);
-    p.line_w(x + w - pt(4.0), y + pad_y + book_h - pt(2.0), mid, y + pad_y + book_h, 2, 0);
+    p.line_w(
+        x + w - pt(4.0),
+        y + pad_y - pt(1.5),
+        x + w - pt(1.5),
+        y + pad_y + pt(0.5),
+        2,
+        0,
+    );
+    p.line_w(
+        x + w - pt(1.5),
+        y + pad_y + pt(0.5),
+        x + w - pt(1.5),
+        y + pad_y + book_h - pt(0.5),
+        2,
+        0,
+    );
+    p.line_w(
+        x + w - pt(1.5),
+        y + pad_y + book_h - pt(0.5),
+        x + w - pt(4.0),
+        y + pad_y + book_h - pt(2.0),
+        2,
+        0,
+    );
+    p.line_w(
+        x + w - pt(4.0),
+        y + pad_y + book_h - pt(2.0),
+        mid,
+        y + pad_y + book_h,
+        2,
+        0,
+    );
 }
 
 /// Row icons in a 13pt box:
@@ -894,7 +1071,6 @@ fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,9 +1082,18 @@ mod tests {
         assert_eq!(HomeScreen::hit_home_row(top + 2, false), Some(0));
         assert_eq!(HomeScreen::hit_home_row(top + row_h - 1, false), Some(0));
         assert_eq!(HomeScreen::hit_home_row(top + row_h + 4, false), Some(1));
-        assert_eq!(HomeScreen::hit_home_row(top + 2 * row_h + 4, false), Some(2));
-        assert_eq!(HomeScreen::hit_home_row(top + 3 * row_h + 4, false), Some(3));
-        assert_eq!(HomeScreen::hit_home_row(top + 4 * row_h + 4, false), Some(4));
+        assert_eq!(
+            HomeScreen::hit_home_row(top + 2 * row_h + 4, false),
+            Some(2)
+        );
+        assert_eq!(
+            HomeScreen::hit_home_row(top + 3 * row_h + 4, false),
+            Some(3)
+        );
+        assert_eq!(
+            HomeScreen::hit_home_row(top + 4 * row_h + 4, false),
+            Some(4)
+        );
         // Header and below the last row are not rows.
         assert_eq!(HomeScreen::hit_home_row(top - 1, false), None);
         assert_eq!(HomeScreen::hit_home_row(top + 5 * row_h, false), None);
@@ -918,20 +1103,21 @@ mod tests {
     fn home_rows_shift_below_the_continue_card() {
         let top = HomeScreen::rows_top(true);
         let bare = HomeScreen::rows_top(false);
-        // Strictly below the card (and its divider)…
-        assert!(top > pt(CONT_TOP_PT + CONT_H_PT));
+        // Strictly below the card…
+        assert!(top > pt(CONT_TOP_PT) + pt(CONT_H_PT));
         assert!(top > bare);
         // …so the card's band hits no row, and the shifted rows still map.
         assert_eq!(HomeScreen::hit_home_row(bare + 2, true), None);
         assert_eq!(HomeScreen::hit_home_row(top + 2, true), Some(0));
-        assert_eq!(HomeScreen::hit_home_row(top + 5 * pt(ROW_H_PT) - 1, true), Some(4));
+        assert_eq!(
+            HomeScreen::hit_home_row(top + 5 * pt(ROW_H_PT) - 1, true),
+            Some(4)
+        );
         assert_eq!(HomeScreen::hit_home_row(top + 5 * pt(ROW_H_PT), true), None);
         // The card itself is the Continue tap zone, rows or not.
         assert!(HomeScreen::in_continue(pt(CONT_TOP_PT) + 1));
-        assert!(HomeScreen::in_continue(pt(CONT_TOP_PT + CONT_H_PT) - 1));
+        assert!(HomeScreen::in_continue(pt(CONT_TOP_PT) + pt(CONT_H_PT) - 1));
     }
-
-
 
     #[test]
     fn continue_block_bounds() {
@@ -1048,6 +1234,8 @@ mod tests {
     fn empty_library_tap_opens_receive_and_full_list_does_not() {
         let mut s = HomeScreen::new(1236, 1648);
         s.tab = 1;
+        s.all_books = vec![];
+        s.all_names = vec![];
         s.books = vec![];
         s.names = vec![];
         // Anywhere in the content (not the nav bar, not the header band).
@@ -1058,12 +1246,51 @@ mod tests {
 
         // With books present the same tap is a dead zone: no list row, no
         // sort band, nothing pushed.
+        s.all_books = vec![PathBuf::from("/x/one.epub")];
+        s.all_names = vec!["one.epub".into()];
         s.books = vec![PathBuf::from("/x/one.epub")];
         s.names = vec!["one.epub".into()];
         assert!(matches!(
             s.on_gesture(Gesture::Tap { x: 600, y: 800 }),
             Action::Keep
         ));
+    }
+
+    #[test]
+    fn collection_filter_and_cycle() {
+        let mut s = HomeScreen::new(1236, 1648);
+        s.tab = 1;
+        s.all_books = vec![
+            PathBuf::from("/mnt/us/documents/Tech/rust.epub"),
+            PathBuf::from("/mnt/us/documents/Sci-Fi/dune.epub"),
+            PathBuf::from("/mnt/us/documents/root.epub"),
+        ];
+        s.all_names = vec!["rust.epub".into(), "dune.epub".into(), "root.epub".into()];
+        s.all_disp = s.all_names.clone();
+        s.all_authors = vec!["Author 1".into(), "Author 2".into(), "Author 3".into()];
+        s.collections = vec!["Sci-Fi".into(), "Tech".into()];
+        s.apply_filter();
+
+        // Initially None (All Books)
+        assert_eq!(s.active_collection, None);
+        assert_eq!(s.books.len(), 3);
+
+        // Cycle to first collection (Sci-Fi)
+        s.cycle_collection();
+        assert_eq!(s.active_collection.as_deref(), Some("Sci-Fi"));
+        assert_eq!(s.books.len(), 1);
+        assert_eq!(s.names[0], "dune.epub");
+
+        // Cycle to second collection (Tech)
+        s.cycle_collection();
+        assert_eq!(s.active_collection.as_deref(), Some("Tech"));
+        assert_eq!(s.books.len(), 1);
+        assert_eq!(s.names[0], "rust.epub");
+
+        // Cycle back to All Books
+        s.cycle_collection();
+        assert_eq!(s.active_collection, None);
+        assert_eq!(s.books.len(), 3);
     }
 
     #[test]
@@ -1128,8 +1355,10 @@ mod tests {
         ];
         let pos = Pos::simple(213, 412, 1_700_000_000);
         s.pos_map.insert("sample.epub".into(), pos);
-        s.pos_map
-            .insert("clean_architecture.pdf".into(), Pos::simple(30, 240, 1_690_000_000));
+        s.pos_map.insert(
+            "clean_architecture.pdf".into(),
+            Pos::simple(30, 240, 1_690_000_000),
+        );
         s.cont = Some((PathBuf::from("/x/sample.epub"), pos));
         s.apply_sort();
 
@@ -1154,7 +1383,10 @@ mod tests {
             let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
             enc.set_color(png::ColorType::Grayscale);
             enc.set_depth(png::BitDepth::Eight);
-            enc.write_header().unwrap().write_image_data(&canvas).unwrap();
+            enc.write_header()
+                .unwrap()
+                .write_image_data(&canvas)
+                .unwrap();
         }
     }
 }

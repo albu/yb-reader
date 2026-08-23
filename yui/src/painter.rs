@@ -118,12 +118,9 @@ impl<'a> Painter<'a> {
                 for vy in 0..vh {
                     let row = &self.canvas[vy * vw..vy * vw + vw];
                     for (vx, &p) in row.iter().enumerate() {
-                        let (px, py) = self.orientation.point_to_panel(
-                            self.pw,
-                            self.ph,
-                            vx as i32,
-                            vy as i32,
-                        );
+                        let (px, py) = self
+                            .orientation
+                            .point_to_panel(self.pw, self.ph, vx as i32, vy as i32);
                         self.panel[py as usize * self.pstride + px as usize] = p;
                     }
                 }
@@ -149,12 +146,9 @@ impl<'a> Painter<'a> {
             _ => {
                 for vy in 0..vh {
                     for vx in 0..vw {
-                        let (px, py) = self.orientation.point_to_panel(
-                            self.pw,
-                            self.ph,
-                            vx as i32,
-                            vy as i32,
-                        );
+                        let (px, py) = self
+                            .orientation
+                            .point_to_panel(self.pw, self.ph, vx as i32, vy as i32);
                         out[vy * vw + vx] = self.panel[py as usize * self.pstride + px as usize];
                     }
                 }
@@ -206,7 +200,15 @@ impl<'a> Painter<'a> {
     }
 
     /// Centered within [x0, x1) — for cells (nav tabs, list columns).
-    pub fn text_center_in(&mut self, x0: i32, x1: i32, y: i32, size_pt: f32, color: u8, text: &str) {
+    pub fn text_center_in(
+        &mut self,
+        x0: i32,
+        x1: i32,
+        y: i32,
+        size_pt: f32,
+        color: u8,
+        text: &str,
+    ) {
         let tw = self.text_width(size_pt, text) as i32;
         let cx = (x0 + x1) / 2;
         self.text(cx - tw / 2, y, size_pt, color, text);
@@ -225,8 +227,7 @@ impl<'a> Painter<'a> {
 
     /// Truncate with "…" to fit `max_w_pt` points.
     pub fn truncate(&self, size_pt: f32, text: &str, max_w_pt: f32) -> String {
-        self.font
-            .truncate(size_pt * PX, text, max_w_pt * PX)
+        self.font.truncate(size_pt * PX, text, max_w_pt * PX)
     }
 
     pub fn rect(&mut self, r: Rect, color: u8) {
@@ -241,7 +242,10 @@ impl<'a> Painter<'a> {
     /// Horizontal rule `t` px thick. At 300 dpi, 1px lines are ~0.09mm
     /// and effectively invisible on e-ink — UI separators want 2-3px.
     pub fn hline_t(&mut self, y: i32, x0: i32, x1: i32, t: i32, color: u8) {
-        self.rect(Rect::new(x0.min(x1), y, (x1 - x0).abs() + 1, t.max(1)), color);
+        self.rect(
+            Rect::new(x0.min(x1), y, (x1 - x0).abs() + 1, t.max(1)),
+            color,
+        );
     }
 
     /// Outline (frame) `t` px thick around a rect.
@@ -314,7 +318,6 @@ impl<'a> Painter<'a> {
         let fw = (r.w as f32 * frac.clamp(0.0, 1.0)) as i32;
         if fw > 0 {
             self.rect(Rect::new(r.x, r.y, fw, r.h), 0);
-
         }
     }
 
@@ -372,10 +375,16 @@ mod tests {
     fn rect_fills_exactly_its_bounds() {
         let f = font();
         let mut buf = vec![255u8; PSTRIDE * PH as usize];
-        painted!(buf, (PW, PH), Orientation::Portrait, f, |p: &mut Painter| {
-            p.clear(255);
-            p.rect(Rect::new(10, 20, 30, 40), 0);
-        });
+        painted!(
+            buf,
+            (PW, PH),
+            Orientation::Portrait,
+            f,
+            |p: &mut Painter| {
+                p.clear(255);
+                p.rect(Rect::new(10, 20, 30, 40), 0);
+            }
+        );
         for y in 0..PH as usize {
             for x in 0..PSTRIDE {
                 let inside = x >= 10 && x < 40 && y >= 20 && y < 60;
@@ -389,15 +398,25 @@ mod tests {
     fn rect_clips_to_panel() {
         let f = font();
         let mut buf = vec![255u8; PSTRIDE * PH as usize];
-        painted!(buf, (PW, PH), Orientation::Portrait, f, |p: &mut Painter| {
-            p.clear(255);
-            // Overhangs on every side; must not panic and must not wrap rows.
-            p.rect(Rect::new(-10, -10, 1300, 1700), 0);
-        });
+        painted!(
+            buf,
+            (PW, PH),
+            Orientation::Portrait,
+            f,
+            |p: &mut Painter| {
+                p.clear(255);
+                // Overhangs on every side; must not panic and must not wrap rows.
+                p.rect(Rect::new(-10, -10, 1300, 1700), 0);
+            }
+        );
         // Visible area fully black, right-edge stride padding untouched.
         for y in 0..PH as usize {
             assert_eq!(buf[y * PSTRIDE + 1235], 0);
-            assert_eq!(buf[y * PSTRIDE + 1236], 255, "stride padding must stay clean");
+            assert_eq!(
+                buf[y * PSTRIDE + 1236],
+                255,
+                "stride padding must stay clean"
+            );
         }
     }
 
@@ -451,12 +470,18 @@ mod tests {
     fn bar_fill_widths() {
         let f = font();
         let mut buf = vec![255u8; PSTRIDE * 100];
-        painted!(buf, (PW, 100), Orientation::Portrait, f, |p: &mut Painter| {
-            p.clear(255);
-            p.bar(Rect::new(0, 0, 100, 10), 0.0);
-            p.bar(Rect::new(0, 10, 100, 10), 0.5);
-            p.bar(Rect::new(0, 20, 100, 10), 1.0);
-        });
+        painted!(
+            buf,
+            (PW, 100),
+            Orientation::Portrait,
+            f,
+            |p: &mut Painter| {
+                p.clear(255);
+                p.bar(Rect::new(0, 0, 100, 10), 0.0);
+                p.bar(Rect::new(0, 10, 100, 10), 0.5);
+                p.bar(Rect::new(0, 20, 100, 10), 1.0);
+            }
+        );
         assert_eq!(buf[5], 200, "frac 0: track only");
         assert_eq!(buf[10 * PSTRIDE + 49], 0, "frac 0.5: half filled");
         assert_eq!(buf[10 * PSTRIDE + 51], 200, "frac 0.5: second half track");
@@ -469,10 +494,16 @@ mod tests {
         let mut buf = vec![255u8; PSTRIDE * 10];
         // Source: 8 rows of 10 px, stride 10 (tight), each row one flat value.
         let src: Vec<u8> = (0..8).flat_map(|r| vec![r + 1; 10]).collect();
-        painted!(buf, (PW, 10), Orientation::Portrait, f, |p: &mut Painter| {
-            p.clear(255);
-            p.blit_gray(100, 2, 10, 8, &src, 10);
-        });
+        painted!(
+            buf,
+            (PW, 10),
+            Orientation::Portrait,
+            f,
+            |p: &mut Painter| {
+                p.clear(255);
+                p.blit_gray(100, 2, 10, 8, &src, 10);
+            }
+        );
         for r in 0..8 {
             assert_eq!(buf[(2 + r) * PSTRIDE + 105], (r + 1) as u8, "row {r}");
         }

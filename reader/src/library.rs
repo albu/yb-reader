@@ -17,32 +17,57 @@ const META_PATH: &str = "/mnt/us/extensions/reader/data/meta.tsv";
 /// framework (clippings ledger) or the jailbreak — not library entries.
 const SYSTEM_FILES: [&str; 2] = ["My Clippings.txt", "JAILBROKEN.txt"];
 
-pub fn list_books() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(LIB_DIR) {
+fn scan_dir_recursive(dir: &Path, v: &mut Vec<PathBuf>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
             let name = p
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if SYSTEM_FILES.contains(&name.as_str()) {
+            if name.starts_with('.')
+                || name.ends_with(".sdr")
+                || SYSTEM_FILES.contains(&name.as_str())
+            {
                 continue;
             }
-            let ext = p
-                .extension()
-                .map(|e| e.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
-            if matches!(
-                ext.as_str(),
-                "epub" | "pdf" | "mobi" | "azw3" | "fb2" | "txt" | "cbz"
-            ) {
-                v.push(p);
+            if p.is_dir() {
+                scan_dir_recursive(&p, v);
+            } else if p.is_file() {
+                let ext = p
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                if matches!(
+                    ext.as_str(),
+                    // mobi/azw3 stay out: no parser exists, so listing
+                    // them only sets up an open error.
+                    "epub" | "pdf" | "fb2" | "txt" | "cbz"
+                ) {
+                    v.push(p);
+                }
             }
         }
     }
+}
+
+pub fn list_books() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    scan_dir_recursive(Path::new(LIB_DIR), &mut v);
     v.sort();
     v
+}
+
+/// Return the collection (subfolder path relative to documents/) for a book.
+pub fn collection_of(p: &Path) -> Option<String> {
+    let rel = p.strip_prefix(LIB_DIR).ok()?;
+    let parent = rel.parent()?;
+    let s = parent.to_string_lossy();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.into_owned())
+    }
 }
 
 /// Extract title and author metadata from book files.
@@ -70,17 +95,16 @@ pub fn book_meta(path: &Path) -> Option<(String, String)> {
             // a malformed FB2 can panic inside the parser, so the scan must
             // catch it and fall back to filename-only metadata instead of
             // unwinding out of HomeScreen.
-            let parsed =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    yread::fb2::parse_fb2_path(path)
-                }))
-                .unwrap_or_else(|p| {
-                    ybdev::log::plog(&format!(
-                        "fb2 meta parse panicked: {}",
-                        crate::backend::panic_message(&p)
-                    ));
-                    Err(String::new())
-                });
+            let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                yread::fb2::parse_fb2_path(path)
+            }))
+            .unwrap_or_else(|p| {
+                ybdev::log::plog(&format!(
+                    "fb2 meta parse panicked: {}",
+                    crate::backend::panic_message(&p)
+                ));
+                Err(String::new())
+            });
             if let Ok(book) = parsed {
                 let title = sanitize(&book.meta.title);
                 if usable_title(&title) {
@@ -149,7 +173,11 @@ fn parse_line(line: &str) -> Option<(String, u64, u64, Option<(String, String)>)
     if name.is_empty() {
         return None;
     }
-    let meta = if title.is_empty() { None } else { Some((title, author)) };
+    let meta = if title.is_empty() {
+        None
+    } else {
+        Some((title, author))
+    };
     Some((name, mtime, size, meta))
 }
 

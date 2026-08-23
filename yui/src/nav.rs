@@ -13,8 +13,9 @@ const LABEL_BASE_PT: f32 = 35.0;
 const ICON_Y_OFF_PT: f32 = 8.0;
 const ICON_W_PT: f32 = 17.0;
 const ICON_H_PT: f32 = 14.0;
+const UNDERLINE_W_PT: f32 = 40.0;
 const UNDERLINE_PT: f32 = 3.0;
-
+const UNDERLINE_BOTTOM_PAD_PT: f32 = 3.0;
 
 /// Line-art tab icons (drawn with Painter primitives, no font needed).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,12 +70,34 @@ pub fn draw_nav(p: &mut Painter, tabs: &[NavTab], selected: usize) {
         let color = if active { 0u8 } else { 120 };
         let left = i as i32 * tw;
         let cx = left + tw / 2;
-        draw_icon(p, t.icon, cx - pt(ICON_W_PT) / 2, top + pt(ICON_Y_OFF_PT), color);
+        draw_icon(
+            p,
+            t.icon,
+            cx - pt(ICON_W_PT) / 2,
+            top + pt(ICON_Y_OFF_PT),
+            color,
+        );
         // Centered within THIS tab's cell — a panel-wide center would
         // stack every label on top of the others.
-        p.text_center_in(left, left + tw, top + pt(LABEL_BASE_PT), LABEL_SIZE_PT, color, t.label);
+        p.text_center_in(
+            left,
+            left + tw,
+            top + pt(LABEL_BASE_PT),
+            LABEL_SIZE_PT,
+            color,
+            t.label,
+        );
         if active {
-            p.rect(Rect::new(left, h - pt(UNDERLINE_PT), tw, pt(UNDERLINE_PT)), 0);
+            let bar_w = pt(UNDERLINE_W_PT);
+            p.rect(
+                Rect::new(
+                    cx - bar_w / 2,
+                    h - pt(UNDERLINE_BOTTOM_PAD_PT + UNDERLINE_PT),
+                    bar_w,
+                    pt(UNDERLINE_PT),
+                ),
+                0,
+            );
         }
     }
 }
@@ -105,7 +128,14 @@ fn draw_icon(p: &mut Painter, icon: Icon, x: i32, y: i32, color: u8) {
             p.rect(Rect::new(door_x, door_y, door_w, door_h), 255);
             p.line_w(door_x, door_y + door_h, door_x, door_y, 2, color);
             p.line_w(door_x, door_y, door_x + door_w, door_y, 2, color);
-            p.line_w(door_x + door_w, door_y, door_x + door_w, door_y + door_h, 2, color);
+            p.line_w(
+                door_x + door_w,
+                door_y,
+                door_x + door_w,
+                door_y + door_h,
+                2,
+                color,
+            );
         }
         Icon::Books => {
             let mid = x + w / 2;
@@ -115,25 +145,87 @@ fn draw_icon(p: &mut Painter, icon: Icon, x: i32, y: i32, color: u8) {
             p.line_w(mid, y + pad_y, mid, y + pad_y + book_h, 3, color);
             // Left page top curve (mid -> mid_pt -> left)
             p.line_w(mid, y + pad_y, x + pt(4.5), y + pad_y - pt(1.5), 2, color);
-            p.line_w(x + pt(4.5), y + pad_y - pt(1.5), x + pt(1.5), y + pad_y + pt(0.5), 2, color);
+            p.line_w(
+                x + pt(4.5),
+                y + pad_y - pt(1.5),
+                x + pt(1.5),
+                y + pad_y + pt(0.5),
+                2,
+                color,
+            );
             // Left page outer edge
-            p.line_w(x + pt(1.5), y + pad_y + pt(0.5), x + pt(1.5), y + pad_y + book_h - pt(0.5), 2, color);
+            p.line_w(
+                x + pt(1.5),
+                y + pad_y + pt(0.5),
+                x + pt(1.5),
+                y + pad_y + book_h - pt(0.5),
+                2,
+                color,
+            );
             // Left page bottom curve
-            p.line_w(x + pt(1.5), y + pad_y + book_h - pt(0.5), x + pt(4.5), y + pad_y + book_h - pt(2.0), 2, color);
-            p.line_w(x + pt(4.5), y + pad_y + book_h - pt(2.0), mid, y + pad_y + book_h, 2, color);
+            p.line_w(
+                x + pt(1.5),
+                y + pad_y + book_h - pt(0.5),
+                x + pt(4.5),
+                y + pad_y + book_h - pt(2.0),
+                2,
+                color,
+            );
+            p.line_w(
+                x + pt(4.5),
+                y + pad_y + book_h - pt(2.0),
+                mid,
+                y + pad_y + book_h,
+                2,
+                color,
+            );
 
             // Right page top curve
-            p.line_w(mid, y + pad_y, x + w - pt(4.5), y + pad_y - pt(1.5), 2, color);
-            p.line_w(x + w - pt(4.5), y + pad_y - pt(1.5), x + w - pt(1.5), y + pad_y + pt(0.5), 2, color);
+            p.line_w(
+                mid,
+                y + pad_y,
+                x + w - pt(4.5),
+                y + pad_y - pt(1.5),
+                2,
+                color,
+            );
+            p.line_w(
+                x + w - pt(4.5),
+                y + pad_y - pt(1.5),
+                x + w - pt(1.5),
+                y + pad_y + pt(0.5),
+                2,
+                color,
+            );
             // Right page outer edge
-            p.line_w(x + w - pt(1.5), y + pad_y + pt(0.5), x + w - pt(1.5), y + pad_y + book_h - pt(0.5), 2, color);
+            p.line_w(
+                x + w - pt(1.5),
+                y + pad_y + pt(0.5),
+                x + w - pt(1.5),
+                y + pad_y + book_h - pt(0.5),
+                2,
+                color,
+            );
             // Right page bottom curve
-            p.line_w(x + w - pt(1.5), y + pad_y + book_h - pt(0.5), x + w - pt(4.5), y + pad_y + book_h - pt(2.0), 2, color);
-            p.line_w(x + w - pt(4.5), y + pad_y + book_h - pt(2.0), mid, y + pad_y + book_h, 2, color);
+            p.line_w(
+                x + w - pt(1.5),
+                y + pad_y + book_h - pt(0.5),
+                x + w - pt(4.5),
+                y + pad_y + book_h - pt(2.0),
+                2,
+                color,
+            );
+            p.line_w(
+                x + w - pt(4.5),
+                y + pad_y + book_h - pt(2.0),
+                mid,
+                y + pad_y + book_h,
+                2,
+                color,
+            );
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

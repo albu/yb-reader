@@ -10,6 +10,7 @@
 //! of it (the same language the dialogs speak).
 
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ybdev::frontlight::Frontlight;
 use ybdev::input::{Gesture, SwipeDir};
@@ -96,6 +97,14 @@ pub struct RotateCtx {
     pub settings: ReaderSettings,
 }
 
+/// A Wi-Fi bring-up/down is in flight (set by the toggle tap, cleared by
+/// the worker thread), and which direction it runs. Statics, not screen
+/// fields: closing and reopening the curtain mid-bring-up must still
+/// show the pending state — and re-tapping must not stack a second radio
+/// sequence on top of the first.
+static WIFI_TOGGLE_BUSY: AtomicBool = AtomicBool::new(false);
+static WIFI_TOGGLE_TO_ON: AtomicBool = AtomicBool::new(true);
+
 pub struct CurtainScreen {
     fl: Option<Frontlight>,
     time: String,
@@ -105,6 +114,9 @@ pub struct CurtainScreen {
     bg: Option<Vec<u8>>,
     // When opened from the reader: the ROTATE pill's book context.
     rotate: Option<RotateCtx>,
+    // Busy flag as this paint last saw it — the tick that observes it
+    // clear earns the one redraw that flips the card to its end state.
+    wifi_was_busy: bool,
     // Cached layout geometry in visual px
     w: i32,
     h: i32,
@@ -142,6 +154,7 @@ impl CurtainScreen {
             date,
             bg: None,
             rotate,
+            wifi_was_busy: false,
             w: 1236,
             h: 1648,
             track_x0: 0,
@@ -161,14 +174,7 @@ impl CurtainScreen {
 
     /// One bare slider line: icon, percentage, thick smooth track with a knob.
     /// Tap or drag anywhere on the row's band.
-    fn draw_line_slider(
-        &self,
-        p: &mut Painter,
-        row_y: i32,
-        amber: bool,
-        frac: f32,
-        pct: i32,
-    ) {
+    fn draw_line_slider(&self, p: &mut Painter, row_y: i32, amber: bool, frac: f32, pct: i32) {
         let pad = pt(PAD_PT);
         let cy = row_y + pt(ROW_CY_OFF_PT);
 
@@ -206,9 +212,15 @@ fn draw_sun_icon(p: &mut Painter, cx: i32, cy: i32, r: i32, color: u8) {
     p.circle_fill(cx, cy, r, color);
     let ray_len = pt(2.0);
     let ray_dist = r + pt(1.5);
-    p.rect(Rect::new(cx - 1, cy - ray_dist - ray_len, 2, ray_len), color);
+    p.rect(
+        Rect::new(cx - 1, cy - ray_dist - ray_len, 2, ray_len),
+        color,
+    );
     p.rect(Rect::new(cx - 1, cy + ray_dist, 2, ray_len), color);
-    p.rect(Rect::new(cx - ray_dist - ray_len, cy - 1, ray_len, 2), color);
+    p.rect(
+        Rect::new(cx - ray_dist - ray_len, cy - 1, ray_len, 2),
+        color,
+    );
     p.rect(Rect::new(cx + ray_dist, cy - 1, ray_len, 2), color);
 }
 
@@ -216,10 +228,16 @@ fn draw_battery_icon(p: &mut Painter, x: i32, y: i32, cap: i32, plugged: bool) {
     let w = pt(13.0);
     let h = pt(7.5);
     p.rect_outline_t(Rect::new(x, y, w - pt(2.0), h), 1, INK);
-    p.rect(Rect::new(x + w - pt(2.0), y + pt(2.0), pt(1.5), h - pt(4.0)), INK);
+    p.rect(
+        Rect::new(x + w - pt(2.0), y + pt(2.0), pt(1.5), h - pt(4.0)),
+        INK,
+    );
     let inner_w = ((w - pt(4.0)) as f32 * (cap as f32 / 100.0).clamp(0.0, 1.0)).round() as i32;
     if inner_w > 0 {
-        p.rect(Rect::new(x + pt(1.0), y + pt(1.0), inner_w, h - pt(2.0)), INK);
+        p.rect(
+            Rect::new(x + pt(1.0), y + pt(1.0), inner_w, h - pt(2.0)),
+            INK,
+        );
     }
     if plugged {
         p.rect(Rect::new(x + pt(4.0), y + pt(2.0), pt(3.0), pt(3.5)), 255);
@@ -285,7 +303,10 @@ impl Screen for CurtainScreen {
         let handle_h = pt(HANDLE_H_PT);
         let handle_x = (w - handle_w) / 2;
         let handle_y = pt(HANDLE_TOP_PT);
-        p.rect(Rect::new(handle_x, handle_y, handle_w, handle_h), CARD_BORDER);
+        p.rect(
+            Rect::new(handle_x, handle_y, handle_w, handle_h),
+            CARD_BORDER,
+        );
 
         // 2. Human Clock & Full Date
         p.text_center(pt(CLOCK_BASE_PT), CLOCK_SIZE_PT, INK, &self.time);
@@ -305,18 +326,43 @@ impl Screen for CurtainScreen {
         let bat_sub = if plugged { "Charging" } else { "Battery" };
         let r_bat = Rect::new(pad, row1_y, card_w, card_h);
         CurtainScreen::draw_card(p, r_bat, "POWER", &bat_val, bat_sub);
-        draw_battery_icon(p, r_bat.x + r_bat.w - pt(18.0), r_bat.y + pt(11.0), cap as i32, plugged);
+        draw_battery_icon(
+            p,
+            r_bat.x + r_bat.w - pt(18.0),
+            r_bat.y + pt(11.0),
+            cap as i32,
+            plugged,
+        );
 
         // Card 2 (Top-Right): Network (Wi-Fi toggle)
         let ip = sysinfo::wifi_ip();
-        let (wifi_val, wifi_sub, is_online) = if let Some(ip_str) = ip {
+        let busy = WIFI_TOGGLE_BUSY.load(Ordering::SeqCst);
+        // Record at paint time too: a worker that finishes between the
+        // push and the first tick must not leave was_busy false and eat
+        // the completion edge.
+        self.wifi_was_busy = busy;
+        let (wifi_val, wifi_sub, is_online) = if busy {
+            // The radio sequence runs off the UI thread; this state is
+            // what the tap promised, shown until the tick after the
+            // worker clears the busy flag.
+            if WIFI_TOGGLE_TO_ON.load(Ordering::SeqCst) {
+                ("Turning on…", String::new(), false)
+            } else {
+                ("Turning off…", String::new(), false)
+            }
+        } else if let Some(ip_str) = ip {
             ("Online", ip_str, true)
         } else {
             ("Offline", "Tap: turn on".to_string(), false)
         };
         let r_net = Rect::new(pad + card_w + pt(CARD_GAP_PT), row1_y, card_w, card_h);
         CurtainScreen::draw_card(p, r_net, "NETWORK", wifi_val, &wifi_sub);
-        draw_wifi_bars(p, r_net.x + r_net.w - pt(16.0), r_net.y + pt(11.0), is_online);
+        draw_wifi_bars(
+            p,
+            r_net.x + r_net.w - pt(16.0),
+            r_net.y + pt(11.0),
+            is_online,
+        );
 
         // Card 3 (Bottom-Left): SSH Remote toggle
         let ssh_running = ybdev::ssh::running();
@@ -330,7 +376,13 @@ impl Screen for CurtainScreen {
         if ssh_running {
             p.rect_outline_t(r_ssh, 2, INK);
         }
-        p.text(r_ssh.x + r_ssh.w - pt(16.0), r_ssh.y + pt(19.5), 8.0, INK, ">_");
+        p.text(
+            r_ssh.x + r_ssh.w - pt(16.0),
+            r_ssh.y + pt(19.5),
+            8.0,
+            INK,
+            ">_",
+        );
 
         // Card 4 (Bottom-Right): Orientation / Rotation
         let (rot_val, rot_sub, rot_icon_color) = if let Some(ctx) = &self.rotate {
@@ -346,7 +398,12 @@ impl Screen for CurtainScreen {
         };
         let r_rot = Rect::new(pad + card_w + pt(CARD_GAP_PT), row2_y, card_w, card_h);
         CurtainScreen::draw_card(p, r_rot, "ORIENTATION", rot_val, rot_sub);
-        draw_rotate_icon(p, r_rot.x + r_rot.w - pt(15.0), r_rot.y + pt(16.0), rot_icon_color);
+        draw_rotate_icon(
+            p,
+            r_rot.x + r_rot.w - pt(15.0),
+            r_rot.y + pt(16.0),
+            rot_icon_color,
+        );
 
         // 4. Frontlight: two bare sliders
         let Some(fl) = &self.fl else {
@@ -413,7 +470,14 @@ impl Screen for CurtainScreen {
             }
             if i > 0 {
                 let beside_fill = on || prev_on;
-                p.line_w(r.x, r.y + 2, r.x, r.y + r.h - 2, 1, if beside_fill { 255 } else { CARD_BORDER });
+                p.line_w(
+                    r.x,
+                    r.y + 2,
+                    r.x,
+                    r.y + r.h - 2,
+                    1,
+                    if beside_fill { 255 } else { CARD_BORDER },
+                );
             }
             prev_on = on;
         }
@@ -443,16 +507,57 @@ impl Screen for CurtainScreen {
                 let card_h = pt(CARD_H_PT);
                 let row2_y = pt(CARD_TOP_PT) + card_h + pt(CARD_GAP_PT);
 
-                let r_net = Rect::new(pad + card_w + pt(CARD_GAP_PT), pt(CARD_TOP_PT), card_w, card_h);
+                let r_net = Rect::new(
+                    pad + card_w + pt(CARD_GAP_PT),
+                    pt(CARD_TOP_PT),
+                    card_w,
+                    card_h,
+                );
                 if r_net.contains(x, y) {
-                    if crate::wifi::wifi_state() == Some(true) {
-                        let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.wifid", "enable", "0"]).status();
-                        let _ = std::process::Command::new("lipc-set-prop").args(&["-i", "com.lab126.cmd", "wirelessEnable", "0"]).status();
+                    if WIFI_TOGGLE_BUSY.load(Ordering::SeqCst) {
+                        // A sequence is already running; the card says so.
+                        return Action::Keep;
+                    }
+                    // Direction from the kernel link state, not a lipc
+                    // round-trip: the toggle acts on what the card SHOWS
+                    // (Online ⇔ operstate up), and this tap path stays
+                    // fork-free. The old wifi_state() probe answered
+                    // "enabled" for an up-but-unassociated radio while
+                    // the card read Offline — tap meant the opposite of
+                    // the label. The stuck-scanning case that loses the
+                    // manual kill switch here is exactly what the wake
+                    // drain guard powers down (ybdev::wifi).
+                    let up = sysinfo::wifi_up();
+                    let want_on = !up;
+                    // Intent first, synchronously: it is two cheap file
+                    // ops, and it must survive even if we crash before
+                    // the thread finishes — the wake policy reads it.
+                    if up {
                         ybdev::wifi::user_turned_off();
                     } else {
                         ybdev::wifi::user_turned_on();
-                        crate::wifi::turn_on_wifi();
                     }
+                    WIFI_TOGGLE_TO_ON.store(want_on, Ordering::SeqCst);
+                    WIFI_TOGGLE_BUSY.store(true, Ordering::SeqCst);
+                    let _ = std::thread::Builder::new()
+                        .name("wifi-toggle".to_string())
+                        .spawn(move || {
+                            // Same sequences as before (ybdev owns them;
+                            // turn_on also clears the USER_OFF latch) but
+                            // off the UI thread — the lipc calls block on
+                            // the frozen framework, which is what made
+                            // the tile feel dead. Turn-on waits out
+                            // association so the next paint shows the
+                            // END state (Online/Offline), not a lie.
+                            if want_on {
+                                ybdev::wifi::turn_on();
+                                let _ =
+                                    ybdev::wifi::wait_connected(std::time::Duration::from_secs(20));
+                            } else {
+                                ybdev::wifi::turn_off();
+                            }
+                            WIFI_TOGGLE_BUSY.store(false, Ordering::SeqCst);
+                        });
                     return Action::Redraw;
                 }
 
@@ -479,7 +584,11 @@ impl Screen for CurtainScreen {
                     ctx.settings.split.rotation =
                         SplitConfig::next_rotation(ctx.settings.split.rotation);
                     crate::dialogs::record_sub(
-                        &ctx.book, ctx.page, ctx.sub, ctx.total, ctx.settings,
+                        &ctx.book,
+                        ctx.page,
+                        ctx.sub,
+                        ctx.total,
+                        ctx.settings,
                     );
                     return Action::Pop;
                 }
@@ -550,6 +659,20 @@ impl Screen for CurtainScreen {
         }
     }
 
+    /// The default 1s tick is the completion bell: the toggle's worker
+    /// thread clears the busy flag whenever it finishes, and this is what
+    /// notices — earning exactly one repaint of the card's end state.
+    fn on_tick(&mut self) -> Action {
+        let busy = WIFI_TOGGLE_BUSY.load(Ordering::SeqCst);
+        let finished = self.wifi_was_busy && !busy;
+        self.wifi_was_busy = busy;
+        if finished {
+            Action::Redraw
+        } else {
+            Action::Keep
+        }
+    }
+
     fn default_edges(&self) -> bool {
         false
     }
@@ -592,6 +715,20 @@ mod tests {
     use yui::Font;
 
     #[test]
+    fn wifi_toggle_tick_flips_exactly_once() {
+        let mut c = CurtainScreen::new();
+        // Idle: ticks are free.
+        assert!(matches!(c.on_tick(), Action::Keep));
+        // Bring-up starts; the first tick records busy, still no repaint.
+        WIFI_TOGGLE_BUSY.store(true, Ordering::SeqCst);
+        assert!(matches!(c.on_tick(), Action::Keep));
+        // Worker finishes → exactly one earned redraw, then silence.
+        WIFI_TOGGLE_BUSY.store(false, Ordering::SeqCst);
+        assert!(matches!(c.on_tick(), Action::Redraw));
+        assert!(matches!(c.on_tick(), Action::Keep));
+    }
+
+    #[test]
     fn preset_segments_hit_cleanly() {
         let w = 1236;
         let n = ybdev::frontlight::PRESETS.len() + 1;
@@ -629,7 +766,10 @@ mod tests {
             p.flush();
         }
         let ink = |name: &str, y0: usize, y1: usize, min: usize| {
-            let n = buf[y0 * 1248..y1 * 1248].iter().filter(|&&b| b < 140).count();
+            let n = buf[y0 * 1248..y1 * 1248]
+                .iter()
+                .filter(|&&b| b < 140)
+                .count();
             assert!(n >= min, "{name}: only {n} ink pixels in rows {y0}-{y1}");
         };
         ink("clock", 60, 200, 200);
@@ -643,9 +783,6 @@ mod tests {
             .count();
         assert!(dim > 1000, "backdrop not dimmed below the sheet: {dim}");
         let lit = buf[0..800 * 1248].iter().filter(|&&b| b > 200).count();
-        assert!(
-            lit > 800 * 1248 * 90 / 100,
-            "sheet is not white: {lit}"
-        );
+        assert!(lit > 800 * 1248 * 90 / 100, "sheet is not white: {lit}");
     }
 }

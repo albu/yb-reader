@@ -19,21 +19,35 @@ pub enum SwipeDir {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gesture {
-    Tap { x: u32, y: u32 },
-    LongPress { x: u32, y: u32 },
+    Tap {
+        x: u32,
+        y: u32,
+    },
+    LongPress {
+        x: u32,
+        y: u32,
+    },
     /// Continuous position after a fired long-press (finger stayed down
     /// and moved). Emitted in ~12px steps; screens snap to word/slider
     /// granularity and redraw only on index change, so the stream is
     /// naturally throttled. No tap/swipe is synthesized on release.
-    Drag { x: u32, y: u32 },
+    Drag {
+        x: u32,
+        y: u32,
+    },
     /// Direction plus the swipe's START and END points: handlers can bind
     /// edge gestures (top-edge swipe-down = brightness, bottom-right
     /// swipe-up = back) and turn bar-drags into value adjustments.
-    Swipe { dir: SwipeDir, x: u32, y: u32, ex: u32, ey: u32 },
+    Swipe {
+        dir: SwipeDir,
+        x: u32,
+        y: u32,
+        ex: u32,
+        ey: u32,
+    },
     TwoFingerTap,
     PowerButton,
 }
-
 
 /// Edge zones on the 1236x1648 panel: the top strip (where the stock
 /// framework's status banner used to live) and the Boox-style back corner.
@@ -71,6 +85,19 @@ impl Gesture {
                 if *x > min_x && *y > min_y
         )
     }
+
+    /// An upward swipe that starts in the bottom-left corner → the
+    /// mirror screen's quick settings (the left analog of
+    /// corner_back_in's 28% × 18% corner).
+    pub fn corner_settings_in(&self, w: u32, h: u32) -> bool {
+        let max_x = w * 28 / 100;
+        let min_y = h - (h * 18 / 100);
+        matches!(
+            self,
+            Gesture::Swipe { dir: SwipeDir::North, x, y, .. }
+                if *x < max_x && *y > min_y
+        )
+    }
 }
 
 #[repr(C)]
@@ -105,7 +132,6 @@ const EV_ABS_BIT: u64 = 1 << 3;
 const ABS_MT_POSITION_X_BIT: u64 = 1 << 53;
 const ABS_MT_POSITION_Y_BIT: u64 = 1 << 54;
 
-
 #[derive(Clone, Copy, Debug)]
 struct Touch {
     x: i32,
@@ -120,7 +146,6 @@ struct Touch {
     /// point for the next Drag step. None until the long-press fires.
     drag_from: Option<(i32, i32)>,
 }
-
 
 pub struct Input {
     f: File,
@@ -141,7 +166,9 @@ fn read_to_string_lossy(path: &str) -> String {
 pub fn discover_pwrkey() -> Option<String> {
     let proc = read_to_string_lossy("/proc/bus/input/devices");
     for block in proc.split("\n\n") {
-        if block.to_ascii_lowercase().contains("pwrkey") || block.to_ascii_lowercase().contains("power") {
+        if block.to_ascii_lowercase().contains("pwrkey")
+            || block.to_ascii_lowercase().contains("power")
+        {
             for line in block.lines() {
                 if let Some(rest) = line.trim().strip_prefix("H:") {
                     let ev_node = rest
@@ -238,10 +265,8 @@ fn score_block(block: &str) -> Option<(u32, String)> {
         || name_lc.contains("pt_")
         || name_lc.contains("tp")
         || name_lc.contains("mtk");
-    let score = (mt_x as u32) * 8
-        + (mt_y as u32) * 4
-        + (mt_x || mt_y) as u32 * 2
-        + name_hint as u32;
+    let score =
+        (mt_x as u32) * 8 + (mt_y as u32) * 4 + (mt_x || mt_y) as u32 * 2 + name_hint as u32;
     let ev_node = handlers
         .strip_prefix("Handlers=")
         .unwrap_or(&handlers)
@@ -270,7 +295,45 @@ fn mask_from_words(words: &[u64]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{mask_from_words, parse_hex_words, score_block};
+    use super::{mask_from_words, parse_hex_words, score_block, Gesture, SwipeDir};
+
+    fn north(x: u32, y: u32) -> Gesture {
+        Gesture::Swipe {
+            dir: SwipeDir::North,
+            x,
+            y,
+            ex: x,
+            ey: y.saturating_sub(80),
+        }
+    }
+
+    #[test]
+    fn corner_settings_region_is_the_bottom_left_analog_of_back() {
+        // 1236×1648 panel: back owns x > 890-ish, settings x < 345-ish,
+        // both only in the bottom 18%.
+        let (w, h) = (1236u32, 1648u32);
+        assert!(north(30, 1600).corner_settings_in(w, h));
+        assert!(north(340, 1550).corner_settings_in(w, h));
+        // Too high, or the bottom-right corner which is corner_back's.
+        assert!(!north(30, 1000).corner_settings_in(w, h));
+        assert!(!north(1000, 1600).corner_settings_in(w, h));
+        assert!(north(1000, 1600).corner_back_in(w, h));
+        // The two corners must not overlap in the middle.
+        for x in [400u32, 600, 830] {
+            assert!(!north(x, 1600).corner_settings_in(w, h));
+            assert!(!north(x, 1600).corner_back_in(w, h));
+        }
+        // Only upward swipes open it.
+        assert!(!Gesture::Swipe {
+            dir: SwipeDir::East,
+            x: 30,
+            y: 1600,
+            ex: 400,
+            ey: 1600
+        }
+        .corner_settings_in(w, h));
+        assert!(!Gesture::Tap { x: 30, y: 1600 }.corner_settings_in(w, h));
+    }
 
     #[test]
     fn decodes_pt_mt_abs_mask_high_word_first() {
@@ -325,7 +388,6 @@ B: ABS=e618000 0
 }
 
 impl Input {
-
     pub fn open(path: &str) -> Result<Input, String> {
         let f = OpenOptions::new()
             .read(true)
@@ -475,7 +537,6 @@ impl Input {
                     pwr_seen = true;
                 }
             }
-
         }
         if pwr_seen {
             Some(Gesture::PowerButton)
@@ -647,8 +708,6 @@ impl Input {
                 y: t.down_y.max(0) as u32,
             });
         }
-
-
 
         // Legacy single-touch protocol (BTN_TOUCH + ABS_X/Y): on release.
         if !self.legacy_down {

@@ -186,10 +186,15 @@ impl App {
             }
         }
 
-
-        let edges = self.stack.last().map(|s| s.default_edges()).unwrap_or(false);
+        let edges = self
+            .stack
+            .last()
+            .map(|s| s.default_edges())
+            .unwrap_or(false);
         if edges {
-            let (vw, vh) = self.orientation.visual_dims(self.panel.width, self.panel.height);
+            let (vw, vh) = self
+                .orientation
+                .visual_dims(self.panel.width, self.panel.height);
             if g.top_edge_swipe() || g.top_edge_swipe_in(vh) {
                 // No default overlay: the app registers its control
                 // center (with_edge_overlay) or edge gestures aren't
@@ -206,11 +211,6 @@ impl App {
             None => Action::Quit,
         }
     }
-
-
-
-
-
 
     fn apply(&mut self, a: Action) -> bool {
         let (cont, redraw_full) = transition(&mut self.stack, a);
@@ -250,15 +250,7 @@ impl App {
         let h = panel.height;
         let stride = panel.stride as usize;
         {
-            let mut p = Painter::new(
-                panel.buf_mut(),
-                w,
-                h,
-                stride,
-                *orientation,
-                canvas,
-                font,
-            );
+            let mut p = Painter::new(panel.buf_mut(), w, h, stride, *orientation, canvas, font);
             if let Some(s) = stack.last_mut() {
                 s.draw(&mut p);
             }
@@ -385,7 +377,11 @@ mod tests {
         // A TOC picked on top of a scrubber must unwind both dialogs and
         // resume the reader beneath, not the scrubber in the middle.
         let log = Rc::new(RefCell::new(vec![]));
-        let mut stack = vec![fake("reader", &log), fake("scrubber", &log), fake("toc", &log)];
+        let mut stack = vec![
+            fake("reader", &log),
+            fake("scrubber", &log),
+            fake("toc", &log),
+        ];
         log.borrow_mut().clear();
 
         let (cont, redraw) = transition(&mut stack, Action::PopN(2));

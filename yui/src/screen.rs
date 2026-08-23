@@ -83,7 +83,6 @@ pub trait Screen {
     }
 }
 
-
 // Manual Debug: the Push variant carries a Box<dyn Screen> that can't
 // derive — the variant name is all logs ever need.
 impl std::fmt::Debug for Action {

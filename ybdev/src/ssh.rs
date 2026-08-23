@@ -25,26 +25,30 @@ pub fn running() -> bool {
 }
 
 fn pids() -> impl Iterator<Item = i32> {
-    fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| {
-        let name = e.file_name();
-        let s = name.to_string_lossy();
-        // /proc/<digits> only
-        if !s.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let comm = fs::read_to_string(e.path().join("comm")).ok()?;
-        if comm.trim() != "dropbear" {
-            return None;
-        }
-        // ALIVE only: a daemonizing dropbear leaves unreaped zombie
-        // intermediates — TERM-immune, comm intact — and counting one
-        // makes the toggle lie "on" forever (bug found on device,
-        // 2026-08-17).
-        let alive = fs::read_to_string(e.path().join("status"))
-            .map(|st| !st.lines().any(|l| l.starts_with("State:\tZ")))
-            .unwrap_or(false);
-        alive.then(|| s.parse::<i32>().ok())?
-    })
+    fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            // /proc/<digits> only
+            if !s.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let comm = fs::read_to_string(e.path().join("comm")).ok()?;
+            if comm.trim() != "dropbear" {
+                return None;
+            }
+            // ALIVE only: a daemonizing dropbear leaves unreaped zombie
+            // intermediates — TERM-immune, comm intact — and counting one
+            // makes the toggle lie "on" forever (bug found on device,
+            // 2026-08-17).
+            let alive = fs::read_to_string(e.path().join("status"))
+                .map(|st| !st.lines().any(|l| l.starts_with("State:\tZ")))
+                .unwrap_or(false);
+            alive.then(|| s.parse::<i32>().ok())?
+        })
 }
 
 /// Add (action "A") or remove ("D") the firewall rule pair — the same

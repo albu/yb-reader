@@ -5,8 +5,8 @@
 pub struct ServerConf {
     pub server: Option<String>,
     pub refresh_every: Option<u32>,
-    /// Read-mode page-turn keys: "arrows" (default) or "space"
-    /// (Space / Shift+Space).
+    /// Read-mode page-turn keys: "arrows" (default), "space"
+    /// (Space / Shift+Space) or "pages" (PageDown / PageUp).
     pub turn_keys: Option<String>,
 }
 
@@ -48,6 +48,23 @@ pub fn write_server(path: &str, server: &str) {
         }
     }
     lines.push(format!("SERVER={}", server));
+    let _ = std::fs::write(path, lines.join("\n") + "\n");
+}
+
+/// Rewrite the conf file, preserving every non-TURN_KEYS line and
+/// appending `TURN_KEYS=...` — the settings sheet's preset picker owns
+/// this line, the discovery flow owns SERVER (write_server), and the two
+/// writers must not clobber each other.
+pub fn write_turn_keys(path: &str, preset: &str) {
+    let mut lines: Vec<String> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(path) {
+        for line in text.lines() {
+            if !line.trim_start().starts_with("TURN_KEYS=") {
+                lines.push(line.to_string());
+            }
+        }
+    }
+    lines.push(format!("TURN_KEYS={}", preset));
     let _ = std::fs::write(path, lines.join("\n") + "\n");
 }
 
@@ -125,3 +142,47 @@ pub fn sanitize_fetch_name(name: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn turn_keys_and_server_writers_preserve_each_other() {
+        let path = std::env::temp_dir().join(format!("mirror_conf_{}.txt", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = fs::remove_file(path);
+        fs::write(
+            path,
+            "SERVER=http://192.0.2.1:8765\nREFRESH_EVERY=30\nTURN_KEYS=space\n",
+        )
+        .unwrap();
+
+        // The sheet picks a new preset: SERVER and REFRESH_EVERY survive.
+        write_turn_keys(path, "pages");
+        let conf = read(path);
+        assert_eq!(conf.server.as_deref(), Some("http://192.0.2.1:8765"));
+        assert_eq!(conf.refresh_every, Some(30));
+        assert_eq!(conf.turn_keys.as_deref(), Some("pages"));
+
+        // Discovery then rewrites SERVER: the picked preset survives.
+        write_server(path, "http://192.168.1.9:8765");
+        let conf = read(path);
+        assert_eq!(conf.server.as_deref(), Some("http://192.168.1.9:8765"));
+        assert_eq!(conf.turn_keys.as_deref(), Some("pages"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn write_turn_keys_creates_the_file_when_absent() {
+        let path =
+            std::env::temp_dir().join(format!("mirror_conf_absent_{}.txt", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = fs::remove_file(path);
+
+        write_turn_keys(path, "arrows");
+        assert_eq!(read(path).turn_keys.as_deref(), Some("arrows"));
+        let _ = fs::remove_file(path);
+    }
+}

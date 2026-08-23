@@ -28,6 +28,42 @@ pub fn wifi_up() -> bool {
         .unwrap_or(false)
 }
 
+/// Radio state for status glyphs, at the granularity sysfs can answer
+/// without forking lipc (status rows repaint on busy ticks — a fork per
+/// paint is off the table). Admin state is wlan0's IFF_UP flag, link
+/// state the operstate: Up = associated; Searching = radio powered but
+/// no association yet (bring-up takes seconds); Off = interface down.
+pub enum WifiRadio {
+    Off,
+    Searching,
+    Connected,
+}
+
+/// Pure mapping, host-testable.
+fn wifi_radio_from(operstate: Option<String>, flags: Option<String>) -> WifiRadio {
+    // /sys/class/net/<if>/flags reads like "0x1003"; bit 0x1 is IFF_UP.
+    let admin_up = flags
+        .as_deref()
+        .and_then(|s| s.trim().strip_prefix("0x"))
+        .and_then(|s| u32::from_str_radix(s, 16).ok())
+        .map(|f| f & 0x1 != 0)
+        .unwrap_or(false);
+    if !admin_up {
+        return WifiRadio::Off;
+    }
+    match operstate.as_deref() {
+        Some("up") => WifiRadio::Connected,
+        _ => WifiRadio::Searching,
+    }
+}
+
+pub fn wifi_radio() -> WifiRadio {
+    wifi_radio_from(
+        fs::read_to_string("/sys/class/net/wlan0/operstate").ok(),
+        fs::read_to_string("/sys/class/net/wlan0/flags").ok(),
+    )
+}
+
 /// wlan0 IPv4 via SIOCGIFADDR (no fork, no /proc parsing).
 pub fn wifi_ip() -> Option<String> {
     // The ioctl below returns a STALE address after the radio drops —
@@ -66,7 +102,6 @@ pub fn wifi_ip() -> Option<String> {
     let oct = ifr.addr.sin_addr.s_addr.to_ne_bytes();
     Some(format!("{}.{}.{}.{}", oct[0], oct[1], oct[2], oct[3]))
 }
-
 
 /// Free space on the user partition, GB.
 pub fn storage_free_gb() -> Option<f64> {
@@ -141,7 +176,6 @@ pub fn set_cpu_governor(governor: &str) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,11 +192,41 @@ mod tests {
         assert_eq!(parse_kv_kb(status, "VmRSS"), Some(72516));
         assert_eq!(parse_kv_kb(status, "VmPeak"), None);
         // "MemFree" must not satisfy a "MemAvailable" lookup (prefix trap).
-        let meminfo = "MemTotal:         485604 kB\nMemFree:   30208 kB\nMemAvailable:\t 96328 kB\n";
+        let meminfo =
+            "MemTotal:         485604 kB\nMemFree:   30208 kB\nMemAvailable:\t 96328 kB\n";
         assert_eq!(parse_kv_kb(meminfo, "MemAvailable"), Some(96328));
         assert_eq!(parse_kv_kb(meminfo, "MemFree"), Some(30208));
         // Wrong unit or garbage → None, never a wrong number.
         assert_eq!(parse_kv_kb("VmRSS: 72516 pages\n", "VmRSS"), None);
         assert_eq!(parse_kv_kb("VmRSS: n/a kB\n", "VmRSS"), None);
+    }
+
+    #[test]
+    fn radio_glyph_states() {
+        use WifiRadio::*;
+        // Admin up + operstate up = associated.
+        assert!(matches!(
+            wifi_radio_from(Some("up".into()), Some("0x1003".into())),
+            Connected
+        ));
+        // Radio powered, no association yet (bring-up / drain-guard case).
+        for st in ["down", "dormant", "unknown", ""] {
+            assert!(matches!(
+                wifi_radio_from(Some(st.into()), Some("0x1003".into())),
+                Searching
+            ));
+        }
+        // Admin down (or interface gone) = airplane mode, whatever the
+        // operstate file still claims.
+        assert!(matches!(
+            wifi_radio_from(Some("up".into()), Some("0x1002".into())),
+            Off
+        ));
+        assert!(matches!(wifi_radio_from(None, None), Off));
+        // Unparseable flags must fail toward Off, not a phantom radio.
+        assert!(matches!(
+            wifi_radio_from(Some("up".into()), Some("junk".into())),
+            Off
+        ));
     }
 }

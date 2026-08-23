@@ -33,9 +33,10 @@ pub fn current_time_str() -> String {
     cache.1.clone()
 }
 
-/// Status header: clock + truncated title + battery along the visual top
-/// edge — one code path for every orientation (Painter handles the grip).
-pub fn draw_header(p: &mut Painter, time_str: &str, book: &str, is_night: bool) {
+/// Status header: clock + truncated title + the right status cluster
+/// (bookmark · wifi · battery, even gutters) along the visual top edge —
+/// one code path for every orientation (Painter handles the grip).
+pub fn draw_header(p: &mut Painter, time_str: &str, book: &str, is_night: bool, sel_mode: bool) {
     let (w, _h) = p.size();
     let fg_color = if is_night { 200 } else { 90 };
     let (bat_cap, _) = sysinfo::battery();
@@ -43,8 +44,79 @@ pub fn draw_header(p: &mut Painter, time_str: &str, book: &str, is_night: bool) 
     let title_trunc = p.truncate(7.0, book, p.width_pt() - 70.0);
     p.text(pt(16.0), pt(14.0), 7.0, fg_color, time_str);
     p.text_center(pt(14.0), 7.0, fg_color, &title_trunc);
-    p.text_right(w - pt(16.0), pt(14.0), 7.0, fg_color, &bat_str);
-    p.hline_t(pt(20.0), pt(16.0), w - pt(16.0), 1, if is_night { 60 } else { 225 });
+    // The right cluster, laid out right to left from the margin with a
+    // uniform 6pt gutter — one composed group, not three stray marks.
+    // Worst case ("100%", bars) reaches ~67pt in, inside the title's
+    // 70pt truncation budget.
+    let xr = w - pt(16.0);
+    let bat_w = p.text_width(7.0, &bat_str) as i32;
+    p.text_right(xr, pt(14.0), 7.0, fg_color, &bat_str);
+    let gw = draw_wifi_glyph(p, xr - bat_w - pt(6.0), pt(11.5), 7.0, fg_color);
+    draw_bookmark_ribbon(p, xr - bat_w - pt(6.0) - gw - pt(6.0), sel_mode, fg_color);
+    p.hline_t(
+        pt(20.0),
+        pt(16.0),
+        w - pt(16.0),
+        1,
+        if is_night { 60 } else { 225 },
+    );
+}
+
+/// Radio status glyph for the ambient top rows, right-aligned ending at
+/// `x_right`, vertically centered on `cy`: filled bars when associated,
+/// hollow bars while the radio powers up without a link yet, and an
+/// airplane when it is down (sysfs only — safe on busy ticks). Returns
+/// its rendered width for cluster layout.
+pub fn draw_wifi_glyph(p: &mut Painter, x_right: i32, cy: i32, size_pt: f32, color: u8) -> i32 {
+    wifi_glyph(p, x_right, cy, size_pt, color, sysinfo::wifi_radio())
+}
+
+/// The drawing, parameterized over the state so host tests can render
+/// every variant (the host has no wlan0 to read).
+pub fn wifi_glyph(
+    p: &mut Painter,
+    x_right: i32,
+    cy: i32,
+    size_pt: f32,
+    color: u8,
+    radio: sysinfo::WifiRadio,
+) -> i32 {
+    let s = pt(size_pt);
+    match radio {
+        radio @ (sysinfo::WifiRadio::Connected | sysinfo::WifiRadio::Searching) => {
+            // The curtain's bar language, scaled to row size. Hollow
+            // bars = powered but not associated yet.
+            let hollow = matches!(radio, sysinfo::WifiRadio::Searching);
+            let n = 4;
+            let bw = (s as f32 * 0.26).round() as i32;
+            let gap = (s as f32 * 0.14).round() as i32;
+            let total_w = n * bw + (n - 1) * gap;
+            let x0 = x_right - total_w;
+            for i in 0..n {
+                let bh = (s as f32 * (0.25 + 0.25 * i as f32)).round() as i32;
+                let r = Rect::new(x0 + i * (bw + gap), cy - bh / 2, bw, bh);
+                if hollow {
+                    p.rect_outline_t(r, 1, color);
+                } else {
+                    p.rect(r, color);
+                }
+            }
+            total_w
+        }
+        sysinfo::WifiRadio::Off => {
+            // Flight-mode pictogram pointing up: fuselage, swept wings,
+            // tail — three rects read as a plane at this size.
+            let w = (s as f32 * 1.1).round() as i32;
+            let x0 = x_right - w;
+            let thick = ((s as f32 * 0.18).round() as i32).max(2);
+            let cx = x0 + w / 2;
+            p.rect(Rect::new(cx - thick / 2, cy - s / 2, thick, s), color); // fuselage
+            p.rect(Rect::new(x0, cy - s / 8, w, thick), color); // wings
+            let tw = w / 2;
+            p.rect(Rect::new(cx - tw / 2, cy + s / 3, tw, thick), color); // tail
+            w
+        }
+    }
 }
 
 /// Progress footer along the visual bottom edge: centered status text +
@@ -94,22 +166,112 @@ pub fn draw_footer(
     }
 }
 
-/// Selection-mode bookmark: a ribbon hanging from the top edge, left of
-/// the battery — outline when off, filled when on.
-pub fn draw_bookmark_ribbon(p: &mut Painter, w: i32, sel_mode: bool) {
-    let bw = pt(13.0);
-    let bh = pt(20.0);
-    let x = w - pt(58.0);
-    let y = 0;
-    let body_h = bh - pt(4.0);
+/// Selection-mode bookmark, folded into the header's right cluster. It
+/// used to hang alone from the very top edge, straddling the rule line,
+/// which read as a foreign object between two status glyphs; it now
+/// sits compactly inside the band like its neighbors. Outline when off,
+/// filled when on. Returns its width for cluster layout.
+pub fn draw_bookmark_ribbon(p: &mut Painter, x_right: i32, sel_mode: bool, color: u8) -> i32 {
+    let bw = pt(11.0);
+    let body_h = pt(9.0);
+    let tail_h = pt(4.0);
+    let y = pt(4.0); // hangs inside the band — the rule runs at 20pt
+    let x = x_right - bw;
     let seg = bw / 3;
     if sel_mode {
-        p.rect(Rect::new(x, y, bw, body_h), 0);
-        p.rect(Rect::new(x, y + body_h, seg, pt(4.0)), 0);
-        p.rect(Rect::new(x + 2 * seg, y + body_h, seg, pt(4.0)), 0);
+        p.rect(Rect::new(x, y, bw, body_h), color);
+        p.rect(Rect::new(x, y + body_h, seg, tail_h), color);
+        p.rect(Rect::new(x + 2 * seg, y + body_h, seg, tail_h), color);
     } else {
-        p.rect_outline_t(Rect::new(x, y, bw, body_h), 2, 130);
-        p.line_w(x, y + body_h, x + bw / 2, y + bh, 2, 130);
-        p.line_w(x + bw, y + body_h, x + bw / 2, y + bh, 2, 130);
+        p.rect_outline_t(Rect::new(x, y, bw, body_h), 2, color);
+        p.line_w(x, y + body_h, x + bw / 2, y + body_h + tail_h, 2, color);
+        p.line_w(
+            x + bw,
+            y + body_h,
+            x + bw / 2,
+            y + body_h + tail_h,
+            2,
+            color,
+        );
+    }
+    bw
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yui::Font;
+
+    /// Every glyph variant must put ink in its box and stay inside it —
+    /// the geometry is hand-tuned pt math, exactly the kind that drifts.
+    #[test]
+    fn wifi_glyph_states_render_in_bounds() {
+        let font = Font::load().unwrap();
+        let cases = [
+            (sysinfo::WifiRadio::Connected, "bars"),
+            (sysinfo::WifiRadio::Searching, "hollow bars"),
+            (sysinfo::WifiRadio::Off, "airplane"),
+        ];
+        for (state, name) in cases {
+            let mut buf = vec![255u8; 200 * 100];
+            let mut canvas = vec![0u8; 200 * 100];
+            {
+                let mut p = Painter::new(
+                    &mut buf,
+                    200,
+                    100,
+                    200,
+                    yui::Orientation::Portrait,
+                    &mut canvas,
+                    &font,
+                );
+                wifi_glyph(&mut p, 180, 50, 8.0, 0, state);
+                p.flush();
+            }
+            // The box the glyph may occupy: right edge at 180, ~12pt wide
+            // at this size, full glyph height around cy=50.
+            let mut ink_out = 0;
+            for (y, row) in buf.chunks_exact(200).enumerate() {
+                for (x, &b) in row.iter().enumerate() {
+                    if b < 140 && !(x >= 120 && x <= 181 && y >= 30 && y <= 70) {
+                        ink_out += 1;
+                    }
+                }
+            }
+            assert_eq!(ink_out, 0, "{name}: ink outside the glyph box");
+            let ink = buf[40 * 200..61 * 200].iter().filter(|&&b| b < 140).count();
+            assert!(ink > 10, "{name}: no ink drawn ({ink})");
+        }
+    }
+
+    /// The compact ribbon must sit inside the header band (nothing below
+    /// the rule at pt(20)) in both states, and report its width.
+    #[test]
+    fn bookmark_ribbon_stays_inside_the_band() {
+        let font = Font::load().unwrap();
+        for sel_mode in [false, true] {
+            let mut buf = vec![255u8; 200 * 100];
+            let mut canvas = vec![0u8; 200 * 100];
+            {
+                let mut p = Painter::new(
+                    &mut buf,
+                    200,
+                    100,
+                    200,
+                    yui::Orientation::Portrait,
+                    &mut canvas,
+                    &font,
+                );
+                let w = draw_bookmark_ribbon(&mut p, 180, sel_mode, 0);
+                p.flush();
+                assert!(w > 0 && w <= pt(11.0), "ribbon width {w}");
+            }
+            // The band ends at the rule (pt(20) ≈ row 83); the old
+            // full-height ribbon crossed it — that's the regression.
+            let below = buf[84 * 200..].iter().filter(|&&b| b < 140).count();
+            assert_eq!(below, 0, "ribbon crosses the header rule");
+            let ink = buf[..84 * 200].iter().filter(|&&b| b < 140).count();
+            assert!(ink > 10, "ribbon drew no ink");
+        }
     }
 }
