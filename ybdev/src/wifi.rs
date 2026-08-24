@@ -220,12 +220,11 @@ mod tests {
         set_session_wants(true);
         user_turned_off();
         assert!(!wifi_wanted_on_wake());
-        // Opting back in clears the latch.
+        // Opting back in clears the latch unconditionally — the atomic
+        // store does not depend on the intent-file write succeeding on
+        // the host (those files live under /var/local, absent here).
         user_turned_on();
         set_session_wants(false);
-        // Intent files point at /var/local — writes fail (or no-op)
-        // on the host, so only the latch semantics are asserted here.
-        assert!(!user_off() || !wifi_wanted_on_wake());
-        set_session_wants(false);
+        assert!(!user_off(), "user_turned_on must clear the manual-off latch");
     }
 }

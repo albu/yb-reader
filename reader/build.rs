@@ -14,11 +14,14 @@ fn main() {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "nogit".to_string());
-    // `status --porcelain` covers staged, unstaged AND untracked files —
-    // `diff --quiet` missed staged-only edits, so a deploy built from a
-    // staged tree reported a clean sha.
+    // `status --porcelain --untracked-files=no` covers staged AND
+    // unstaged tracked edits — `diff --quiet` missed staged-only edits,
+    // so a deploy built from a staged tree reported a clean sha.
+    // Untracked files are excluded: scratch in the tree is not part of
+    // what got compiled unless it is `mod`-referenced, and marking every
+    // deploy dirty over stray files erases the signal.
     let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--untracked-files=no"])
         .output()
         .ok()
         .map(|o| !o.stdout.is_empty())
