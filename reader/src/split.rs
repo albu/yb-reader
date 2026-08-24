@@ -154,9 +154,10 @@ impl SplitConfig {
     }
 
     /// Generates the list of sub-boxes in reading order for a given page number (0-indexed).
-    /// If `mirror_even_odd` is true, odd pages (1, 3, 5...) swap left and right margins.
+    /// If `mirror_even_odd` is true, 1-based odd pages (Page 1, 3, 5...) swap left and right margins.
     pub fn sub_boxes_for_page(&self, page_no: usize) -> Vec<RectF> {
-        let (ml, mr) = if self.mirror_even_odd && (page_no % 2 == 1) {
+        let is_odd = (page_no + 1) % 2 == 1;
+        let (ml, mr) = if self.mirror_even_odd && is_odd {
             (self.margin_right, self.margin_left)
         } else {
             (self.margin_left, self.margin_right)
@@ -416,17 +417,17 @@ mod tests {
         cfg.margin_right = 0.10;
         cfg.mirror_even_odd = true;
 
-        // Even page (page 0, 2): margin_left = 0.16, margin_right = 0.10 -> x0=0.16, x1=0.90
-        let boxes_even = cfg.sub_boxes_for_page(0);
-        assert_eq!(boxes_even.len(), 1);
-        assert!((boxes_even[0].x0 - 0.16).abs() < 1e-4);
-        assert!((boxes_even[0].x1 - 0.90).abs() < 1e-4);
-
-        // Odd page (page 1, 3): swapped! margin_left = 0.10, margin_right = 0.16 -> x0=0.10, x1=0.84
-        let boxes_odd = cfg.sub_boxes_for_page(1);
+        // Odd page (page_no = 0, Book Page 1): swapped! margin_left = 0.10, margin_right = 0.16 -> x0=0.10, x1=0.84
+        let boxes_odd = cfg.sub_boxes_for_page(0);
         assert_eq!(boxes_odd.len(), 1);
         assert!((boxes_odd[0].x0 - 0.10).abs() < 1e-4);
         assert!((boxes_odd[0].x1 - 0.84).abs() < 1e-4);
+
+        // Even page (page_no = 1, Book Page 2): margin_left = 0.16, margin_right = 0.10 -> x0=0.16, x1=0.90
+        let boxes_even = cfg.sub_boxes_for_page(1);
+        assert_eq!(boxes_even.len(), 1);
+        assert!((boxes_even[0].x0 - 0.16).abs() < 1e-4);
+        assert!((boxes_even[0].x1 - 0.90).abs() < 1e-4);
 
         // Width on both pages is identical (1.0 - 0.16 - 0.10 = 0.74)
         assert!((boxes_even[0].width() - boxes_odd[0].width()).abs() < 1e-4);

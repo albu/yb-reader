@@ -68,20 +68,20 @@ impl CropDialog {
     }
 
     fn nudge(&mut self, delta: f32) {
-        let is_odd = self.settings.split.mirror_even_odd && (self.view_page_no % 2 == 1);
+        let is_odd = (self.view_page_no + 1) % 2 == 1;
         let s = &mut self.settings.split;
         match self.active_edge {
             ActiveEdge::Top => s.margin_top = (s.margin_top + delta).clamp(0.0, 0.40),
             ActiveEdge::Bottom => s.margin_bottom = (s.margin_bottom + delta).clamp(0.0, 0.40),
             ActiveEdge::Left => {
-                if is_odd {
+                if s.mirror_even_odd && is_odd {
                     s.margin_right = (s.margin_right + delta).clamp(0.0, 0.40);
                 } else {
                     s.margin_left = (s.margin_left + delta).clamp(0.0, 0.40);
                 }
             }
             ActiveEdge::Right => {
-                if is_odd {
+                if s.mirror_even_odd && is_odd {
                     s.margin_left = (s.margin_left + delta).clamp(0.0, 0.40);
                 } else {
                     s.margin_right = (s.margin_right + delta).clamp(0.0, 0.40);
@@ -157,24 +157,21 @@ impl Screen for CropDialog {
             close_btn.x,
             close_btn.x + close_btn.w,
             pt(16.0),
-            6.5,
+            7.0,
             0,
-            "✕ Close",
+            "[ Close ]",
         );
 
         p.text_center_in(0, w, pt(14.0), 8.5, 0, "CROP STUDIO");
-        let page_type = if self.view_page_no % 2 == 0 {
-            "Even Page"
-        } else {
-            "Odd Page"
-        };
+        let is_odd = (self.view_page_no + 1) % 2 == 1;
+        let page_type = if is_odd { "Odd Page" } else { "Even Page" };
         p.text_center_in(
             0,
             w,
             pt(23.0),
             6.5,
             100,
-            &format!("Page {} of {} • {}", self.view_page_no + 1, self.total, page_type),
+            &format!("Page {} of {} - {}", self.view_page_no + 1, self.total, page_type),
         );
 
         // Render full uncropped portrait page fitted to the preview area
@@ -240,7 +237,7 @@ impl Screen for CropDialog {
 
         // Compute crop guide coordinates in screen pixels
         let s = &self.settings.split;
-        let (ml, mr) = if s.mirror_even_odd && (self.view_page_no % 2 == 1) {
+        let (ml, mr) = if s.mirror_even_odd && is_odd {
             (s.margin_right, s.margin_left)
         } else {
             (s.margin_left, s.margin_right)
@@ -317,19 +314,19 @@ impl Screen for CropDialog {
             y += dash + gap;
         }
 
-        // Corner brackets ⌜ ⌝ ⌞ ⌟ around the crop box
+        // Corner brackets around the crop box
         let clen = pt(14.0);
         let cth = 3;
-        // Top-Left ⌜
+        // Top-Left
         p.rect(Rect::new(x0, y0, clen, cth), 0);
         p.rect(Rect::new(x0, y0, cth, clen), 0);
-        // Top-Right ⌝
+        // Top-Right
         p.rect(Rect::new(x1 - clen, y0, clen, cth), 0);
         p.rect(Rect::new(x1 - cth, y0, cth, clen), 0);
-        // Bottom-Left ⌞
+        // Bottom-Left
         p.rect(Rect::new(x0, y1 - cth, clen, cth), 0);
         p.rect(Rect::new(x0, y1 - clen, cth, clen), 0);
-        // Bottom-Right ⌟
+        // Bottom-Right
         p.rect(Rect::new(x1 - clen, y1 - cth, clen, cth), 0);
         p.rect(Rect::new(x1 - cth, y1 - clen, cth, clen), 0);
 
@@ -400,40 +397,31 @@ impl Screen for CropDialog {
         let btn2_x = btn1_x + nav_w + pt(6.0);
 
         if s.mirror_even_odd {
-            let even_pno = if self.view_page_no % 2 == 0 {
-                self.view_page_no
+            let (odd_pno, even_pno) = if (self.view_page_no + 1) % 2 == 1 {
+                (
+                    self.view_page_no,
+                    (self.view_page_no + 1).min(self.total.saturating_sub(1)),
+                )
             } else {
-                self.view_page_no.saturating_sub(1)
-            };
-            let odd_pno = if even_pno + 1 < self.total {
-                even_pno + 1
-            } else {
-                even_pno
+                (
+                    self.view_page_no.saturating_sub(1),
+                    self.view_page_no,
+                )
             };
 
-            let even_btn = Rect::new(btn1_x, r1_y, nav_w, r1_h);
-            let odd_btn = Rect::new(btn2_x, r1_y, nav_w, r1_h);
+            let odd_btn = Rect::new(btn1_x, r1_y, nav_w, r1_h);
+            let even_btn = Rect::new(btn2_x, r1_y, nav_w, r1_h);
 
-            if self.view_page_no % 2 == 0 {
-                p.rect(even_btn, 0);
-                p.text_center_in(
-                    even_btn.x,
-                    even_btn.x + even_btn.w,
-                    r1_y + pt(15.0),
-                    7.0,
-                    255,
-                    &format!("Even (p.{}) ✓", even_pno + 1),
-                );
-                p.rect_outline_t(odd_btn, 1, 120);
+            if is_odd {
+                p.rect(odd_btn, 0);
                 p.text_center_in(
                     odd_btn.x,
                     odd_btn.x + odd_btn.w,
                     r1_y + pt(15.0),
                     7.0,
-                    0,
-                    &format!("Odd (p.{})", odd_pno + 1),
+                    255,
+                    &format!("Odd (p.{}) *", odd_pno + 1),
                 );
-            } else {
                 p.rect_outline_t(even_btn, 1, 120);
                 p.text_center_in(
                     even_btn.x,
@@ -443,14 +431,24 @@ impl Screen for CropDialog {
                     0,
                     &format!("Even (p.{})", even_pno + 1),
                 );
-                p.rect(odd_btn, 0);
+            } else {
+                p.rect_outline_t(odd_btn, 1, 120);
                 p.text_center_in(
                     odd_btn.x,
                     odd_btn.x + odd_btn.w,
                     r1_y + pt(15.0),
                     7.0,
+                    0,
+                    &format!("Odd (p.{})", odd_pno + 1),
+                );
+                p.rect(even_btn, 0);
+                p.text_center_in(
+                    even_btn.x,
+                    even_btn.x + even_btn.w,
+                    r1_y + pt(15.0),
+                    7.0,
                     255,
-                    &format!("Odd (p.{}) ✓", odd_pno + 1),
+                    &format!("Even (p.{}) *", even_pno + 1),
                 );
             }
         } else {
@@ -463,7 +461,7 @@ impl Screen for CropDialog {
                 r1_y + pt(15.0),
                 7.0,
                 0,
-                "◀ Prev Page",
+                "< Prev Page",
             );
             p.rect_outline_t(next_btn, 1, 120);
             p.text_center_in(
@@ -472,7 +470,7 @@ impl Screen for CropDialog {
                 r1_y + pt(15.0),
                 7.0,
                 0,
-                "Next Page ▶",
+                "Next Page >",
             );
         }
 
@@ -505,24 +503,25 @@ impl Screen for CropDialog {
         let r3_h = pt(26.0);
 
         // Minus button
-        let m_btn = Rect::new(pad, r3_y, pt(38.0), r3_h);
+        let m_btn = Rect::new(pad, r3_y, pt(34.0), r3_h);
         p.rect_outline_t(m_btn, 1, 0);
         p.text_center_in(m_btn.x, m_btn.x + m_btn.w, r3_y + pt(17.5), 9.0, 0, "-");
 
-        // Percentage display
-        let is_odd = s.mirror_even_odd && (self.view_page_no % 2 == 1);
+        // Percentage display box
+        let pct_box = Rect::new(pad + pt(38.0), r3_y, pt(42.0), r3_h);
+        p.rect_outline_t(pct_box, 1, 140);
         let pct = match self.active_edge {
             ActiveEdge::Top => (s.margin_top * 100.0).round() as i32,
             ActiveEdge::Bottom => (s.margin_bottom * 100.0).round() as i32,
             ActiveEdge::Left => {
-                if is_odd {
+                if s.mirror_even_odd && is_odd {
                     (s.margin_right * 100.0).round() as i32
                 } else {
                     (s.margin_left * 100.0).round() as i32
                 }
             }
             ActiveEdge::Right => {
-                if is_odd {
+                if s.mirror_even_odd && is_odd {
                     (s.margin_left * 100.0).round() as i32
                 } else {
                     (s.margin_right * 100.0).round() as i32
@@ -532,21 +531,21 @@ impl Screen for CropDialog {
         };
         let pct_str = format!("{}%", pct);
         p.text_center_in(
-            pad + pt(40.0),
-            pad + pt(86.0),
+            pct_box.x,
+            pct_box.x + pct_box.w,
             r3_y + pt(17.5),
-            8.0,
+            7.5,
             0,
             &pct_str,
         );
 
         // Plus button
-        let p_btn = Rect::new(pad + pt(88.0), r3_y, pt(38.0), r3_h);
+        let p_btn = Rect::new(pad + pt(84.0), r3_y, pt(34.0), r3_h);
         p.rect_outline_t(p_btn, 1, 0);
         p.text_center_in(p_btn.x, p_btn.x + p_btn.w, r3_y + pt(17.5), 9.0, 0, "+");
 
         // Auto-Crop button
-        let auto_btn = Rect::new(w - pad - pt(212.0), r3_y, pt(78.0), r3_h);
+        let auto_btn = Rect::new(pad + pt(126.0), r3_y, pt(88.0), r3_h);
         p.rect_outline_t(auto_btn, 1, 0);
         p.text_center_in(
             auto_btn.x,
@@ -558,7 +557,7 @@ impl Screen for CropDialog {
         );
 
         // Reset button
-        let res_btn = Rect::new(w - pad - pt(128.0), r3_y, pt(56.0), r3_h);
+        let res_btn = Rect::new(w - pad - pt(146.0), r3_y, pt(66.0), r3_h);
         p.rect_outline_t(res_btn, 1, 100);
         p.text_center_in(
             res_btn.x,
@@ -570,7 +569,7 @@ impl Screen for CropDialog {
         );
 
         // Apply button
-        let apply_btn = Rect::new(w - pad - pt(66.0), r3_y, pt(66.0), r3_h);
+        let apply_btn = Rect::new(w - pad - pt(74.0), r3_y, pt(74.0), r3_h);
         p.rect(apply_btn, 0);
         p.text_center_in(
             apply_btn.x,
@@ -630,24 +629,25 @@ impl Screen for CropDialog {
                         let btn2_x = btn1_x + nav_w + pt(6.0);
 
                         if self.settings.split.mirror_even_odd {
-                            let even_pno = if self.view_page_no % 2 == 0 {
-                                self.view_page_no
+                            let (odd_pno, even_pno) = if (self.view_page_no + 1) % 2 == 1 {
+                                (
+                                    self.view_page_no,
+                                    (self.view_page_no + 1).min(self.total.saturating_sub(1)),
+                                )
                             } else {
-                                self.view_page_no.saturating_sub(1)
+                                (
+                                    self.view_page_no.saturating_sub(1),
+                                    self.view_page_no,
+                                )
                             };
-                            let odd_pno = if even_pno + 1 < self.total {
-                                even_pno + 1
-                            } else {
-                                even_pno
-                            };
-                            let even_btn = Rect::new(btn1_x, r1_y, nav_w, r1_h);
-                            let odd_btn = Rect::new(btn2_x, r1_y, nav_w, r1_h);
-                            if even_btn.contains(vx, vy) {
-                                self.view_page_no = even_pno;
-                                return Action::Redraw;
-                            }
+                            let odd_btn = Rect::new(btn1_x, r1_y, nav_w, r1_h);
+                            let even_btn = Rect::new(btn2_x, r1_y, nav_w, r1_h);
                             if odd_btn.contains(vx, vy) {
                                 self.view_page_no = odd_pno;
+                                return Action::Redraw;
+                            }
+                            if even_btn.contains(vx, vy) {
+                                self.view_page_no = even_pno;
                                 return Action::Redraw;
                             }
                         } else {
@@ -685,11 +685,11 @@ impl Screen for CropDialog {
                     let r3_y = panel_y + pt(59.0);
                     let r3_h = pt(26.0);
                     if vy >= r3_y {
-                        let m_btn = Rect::new(pad, r3_y, pt(38.0), r3_h);
-                        let p_btn = Rect::new(pad + pt(88.0), r3_y, pt(38.0), r3_h);
-                        let auto_btn = Rect::new(w - pad - pt(212.0), r3_y, pt(78.0), r3_h);
-                        let res_btn = Rect::new(w - pad - pt(128.0), r3_y, pt(56.0), r3_h);
-                        let apply_btn = Rect::new(w - pad - pt(66.0), r3_y, pt(66.0), r3_h);
+                        let m_btn = Rect::new(pad, r3_y, pt(34.0), r3_h);
+                        let p_btn = Rect::new(pad + pt(84.0), r3_y, pt(34.0), r3_h);
+                        let auto_btn = Rect::new(pad + pt(126.0), r3_y, pt(88.0), r3_h);
+                        let res_btn = Rect::new(w - pad - pt(146.0), r3_y, pt(66.0), r3_h);
+                        let apply_btn = Rect::new(w - pad - pt(74.0), r3_y, pt(74.0), r3_h);
 
                         if m_btn.contains(vx, vy) {
                             self.nudge(-0.01);
@@ -740,7 +740,8 @@ impl Screen for CropDialog {
                 let page_oy = prev_y + (prev_h - rh) / 2;
 
                 let s = &self.settings.split;
-                let (ml, mr) = if s.mirror_even_odd && (self.view_page_no % 2 == 1) {
+                let is_odd = (self.view_page_no + 1) % 2 == 1;
+                let (ml, mr) = if s.mirror_even_odd && is_odd {
                     (s.margin_right, s.margin_left)
                 } else {
                     (s.margin_left, s.margin_right)
@@ -790,7 +791,8 @@ impl Screen for CropDialog {
                 let page_oy = prev_y + (prev_h - rh) / 2;
 
                 let s = &self.settings.split;
-                let (ml, mr) = if s.mirror_even_odd && (self.view_page_no % 2 == 1) {
+                let is_odd = (self.view_page_no + 1) % 2 == 1;
+                let (ml, mr) = if s.mirror_even_odd && is_odd {
                     (s.margin_right, s.margin_left)
                 } else {
                     (s.margin_left, s.margin_right)
@@ -844,8 +846,7 @@ impl Screen for CropDialog {
                     let page_ox = prev_x + (prev_w - rw) / 2;
                     let page_oy = prev_y + (prev_h - rh) / 2;
 
-                    let is_odd =
-                        self.settings.split.mirror_even_odd && (self.view_page_no % 2 == 1);
+                    let is_odd = (self.view_page_no + 1) % 2 == 1;
                     let s = &mut self.settings.split;
                     match edge {
                         ActiveEdge::Top => {
@@ -857,7 +858,7 @@ impl Screen for CropDialog {
                         }
                         ActiveEdge::Left => {
                             let val = ((vx - page_ox) as f32 / rw as f32).clamp(0.0, 0.40);
-                            if is_odd {
+                            if s.mirror_even_odd && is_odd {
                                 s.margin_right = val;
                             } else {
                                 s.margin_left = val;
@@ -865,7 +866,7 @@ impl Screen for CropDialog {
                         }
                         ActiveEdge::Right => {
                             let val = ((page_ox + rw - vx) as f32 / rw as f32).clamp(0.0, 0.40);
-                            if is_odd {
+                            if s.mirror_even_odd && is_odd {
                                 s.margin_left = val;
                             } else {
                                 s.margin_right = val;
@@ -884,5 +885,102 @@ impl Screen for CropDialog {
 
     fn default_edges(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_render_sample_crop_preview() {
+        let path = Path::new("/tmp/sample.pdf");
+        if !path.exists() {
+            return;
+        }
+
+        let doc = std::rc::Rc::new(mupdf::Document::open(path.as_os_str()).unwrap());
+        let total = doc.page_count().unwrap() as usize;
+
+        let font = yui::font::Font::load().unwrap();
+        let mut settings = ReaderSettings::default();
+        settings.split.preset = crate::split::SplitPreset::FitPage;
+
+        // 1. Run detect_even_odd_margins on page 10
+        let (ml, mt, mr, mb) = crate::render::detect_even_odd_margins(doc.as_ref(), 10).unwrap();
+        println!("DETECTED EVEN/ODD MARGINS on sample.pdf: ml_even={ml:.4}, mt={mt:.4}, mr_even={mr:.4}, mb={mb:.4}");
+        settings.split.margin_left = ml;
+        settings.split.margin_top = mt;
+        settings.split.margin_right = mr;
+        settings.split.margin_bottom = mb;
+        settings.split.mirror_even_odd = true;
+
+        let out_dir = "/tmp/yb-crop-preview";
+        std::fs::create_dir_all(out_dir).unwrap();
+
+        // 2. Render Crop Studio on Odd Page (Page 11, index 10)
+        let mut dialog = CropDialog::new(
+            "sample.pdf".to_string(),
+            10,
+            0,
+            total,
+            settings,
+            Some(doc.clone()),
+        );
+        dialog.view_page_no = 10;
+
+        let mut canvas = vec![0u8; 1236 * 1648];
+        let mut panel = vec![255u8; 1248 * 1648];
+        {
+            let mut p = yui::Painter::new(
+                &mut panel,
+                1236,
+                1648,
+                1248,
+                Orientation::Portrait,
+                &mut canvas,
+                &font,
+            );
+            dialog.draw(&mut p);
+        }
+
+        let file = std::fs::File::create(format!("{out_dir}/crop_studio_odd_p11.png")).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&canvas).unwrap();
+
+        // 3. Render Crop Studio on Even Page (Page 12, index 11)
+        dialog.view_page_no = 11;
+        {
+            let mut p = yui::Painter::new(
+                &mut panel,
+                1236,
+                1648,
+                1248,
+                Orientation::Portrait,
+                &mut canvas,
+                &font,
+            );
+            dialog.draw(&mut p);
+        }
+
+        let file = std::fs::File::create(format!("{out_dir}/crop_studio_even_p12.png")).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&canvas).unwrap();
+
+        // 4. Render Auto-Cropped Reader view for Page 11 and Page 12
+        for pno in [10, 11] {
+            let gray = crate::render::render_page(doc.as_ref(), pno, 0, &settings, 1236, 1648).unwrap();
+            let file = std::fs::File::create(format!("{out_dir}/reader_cropped_p{}.png", pno + 1)).unwrap();
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(&gray).unwrap();
+        }
+        println!("Rendered crop studio and reader previews to {}", out_dir);
     }
 }

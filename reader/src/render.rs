@@ -382,7 +382,7 @@ pub fn detect_even_odd_margins(doc: &Document, cur_page: usize) -> Option<(f32, 
     for pno in sample_pages {
         if let Ok(page) = doc.load_page(pno as i32) {
             if let Some(m) = detect_page_margins(&page, 8.0) {
-                if pno % 2 == 0 {
+                if (pno + 1) % 2 == 0 {
                     even_samples.push(m);
                 } else {
                     odd_samples.push(m);
@@ -869,14 +869,14 @@ mod tests {
         std::fs::write(
             &path,
             build_pdf(&[
-                // Page 0 (Even): Text on the right (ml=0.20, mr=0.10)
-                (
-                    "BT /F1 24 Tf 150 400 Td (EvenPageText) Tj ET".to_string(),
-                    String::new(),
-                ),
-                // Page 1 (Odd): Text on the left (ml=0.10, mr=0.20)
+                // Page 0 (Book Page 1, Odd): Text on the left (ml=0.10 inner, mr=0.20 outer)
                 (
                     "BT /F1 24 Tf 60 400 Td (OddPageText) Tj ET".to_string(),
+                    String::new(),
+                ),
+                // Page 1 (Book Page 2, Even): Text on the right (ml=0.20 outer, mr=0.10 inner)
+                (
+                    "BT /F1 24 Tf 150 400 Td (EvenPageText) Tj ET".to_string(),
                     String::new(),
                 ),
             ]),
