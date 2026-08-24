@@ -83,7 +83,7 @@ pub fn yread_toc_dialog(
                 char_offset,
                 page,
             } => {
-                let encoded_sub = chapter_idx * 1_000_000 + (char_offset % 1_000_000);
+                let encoded_sub = crate::backend_yread::pack_yread_sub(chapter_idx, char_offset);
                 positions::record_pos(&path_name, page, total_pages, encoded_sub, Some(settings));
                 Action::Pop
             }

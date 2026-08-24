@@ -1,6 +1,6 @@
 use crate::vocab::WordEntry;
 use ybdev::input::Gesture;
-use yui::painter::{pt, Painter, Rect};
+use yui::painter::{pt, Painter, PX, Rect};
 use yui::screen::{Action, Screen};
 
 pub struct WordDialog {
@@ -110,7 +110,7 @@ impl Screen for WordDialog {
 
         // Header Row: Word Title + CEFR badge + Learn Checkbox Pill
         let title_y = card_y + pt(18.0);
-        let title = p.truncate(13.0, &self.entry.word, (card_w - pt(120.0)) as f32);
+        let title = p.truncate(13.0, &self.entry.word, (card_w - pt(120.0)) as f32 / PX);
         p.text(card_x + pt(12.0), title_y, 13.0, 0, &title);
 
         let badge_text = format!("{} · lvl {}", self.entry.cefr_str(), self.entry.difficulty);
@@ -144,7 +144,7 @@ impl Screen for WordDialog {
         // Body: Russian translation + English Definition lines
         let mut text_y = title_y + pt(20.0);
         if !self.entry.gloss_ru.is_empty() {
-            let ru_trunc = p.truncate(10.5, &self.entry.gloss_ru, max_text_w);
+            let ru_trunc = p.truncate(10.5, &self.entry.gloss_ru, max_text_w / PX);
             p.text(card_x + pt(12.0), text_y, 10.5, 0, &ru_trunc);
             text_y += pt(15.0);
         }

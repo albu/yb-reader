@@ -290,7 +290,7 @@ impl Screen for QuickSettingsSheet {
         let (w, h) = self.dims;
         let (vx, vy) = match g {
             Gesture::Tap { x, y } => (x as i32, y as i32),
-            Gesture::Swipe { dir, .. } if dir == ybdev::input::SwipeDir::South => {
+            Gesture::Swipe { dir: ybdev::input::SwipeDir::South, .. } => {
                 return Action::Pop
             }
             // Long-press, drags and north/east/west swipes mean nothing

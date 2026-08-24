@@ -104,6 +104,9 @@ pub struct RotateCtx {
 /// sequence on top of the first.
 static WIFI_TOGGLE_BUSY: AtomicBool = AtomicBool::new(false);
 static WIFI_TOGGLE_TO_ON: AtomicBool = AtomicBool::new(true);
+/// SSH-card "bring Wi-Fi up" runs on a worker thread (ensure_wifi blocks
+/// up to 20 s); this latch stops re-taps from stacking heals.
+static SSH_WIFI_BUSY: AtomicBool = AtomicBool::new(false);
 
 pub struct CurtainScreen {
     fl: Option<Frontlight>,
@@ -250,8 +253,8 @@ fn draw_wifi_bars(p: &mut Painter, x: i32, y: i32, online: bool) {
     let gap = pt(1.0);
     let color = if online { INK } else { DIM };
     for i in 0..4 {
-        let bh = pt(2.0) + (i as i32 * pt(1.8));
-        let bx = x + i as i32 * (bar_w + gap);
+        let bh = pt(2.0) + (i * pt(1.8));
+        let bx = x + i * (bar_w + gap);
         let by = y + pt(8.0) - bh;
         p.rect(Rect::new(bx, by, bar_w, bh), color);
     }
@@ -573,7 +576,17 @@ impl Screen for CurtainScreen {
                         // is also a reason to bring Wi-Fi up, now and on
                         // every future wake.
                         ybdev::wifi::set_ssh_wanted(true);
-                        crate::wifi::ensure_wifi();
+                        if !SSH_WIFI_BUSY.swap(true, Ordering::SeqCst) {
+                            // Off the UI thread: ensure_wifi waits up to
+                            // 20 s for association, which would otherwise
+                            // freeze the whole curtain on this tap.
+                            let _ = std::thread::Builder::new()
+                                .name("ssh-wifi".to_string())
+                                .spawn(move || {
+                                    crate::wifi::ensure_wifi();
+                                    SSH_WIFI_BUSY.store(false, Ordering::SeqCst);
+                                });
+                        }
                     }
                     return Action::Redraw;
                 }

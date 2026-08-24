@@ -48,7 +48,11 @@ pub fn write_server(path: &str, server: &str) {
         }
     }
     lines.push(format!("SERVER={}", server));
-    let _ = std::fs::write(path, lines.join("\n") + "\n");
+    if let Err(e) = std::fs::write(path, lines.join("\n") + "\n") {
+        // A silent drop here would make the user's pinned server
+        // "forget" on every launch (discovery rewrites it each run).
+        crate::log::plog(&format!("conf: failed to write SERVER to {}: {}", path, e));
+    }
 }
 
 /// Rewrite the conf file, preserving every non-TURN_KEYS line and
@@ -65,7 +69,9 @@ pub fn write_turn_keys(path: &str, preset: &str) {
         }
     }
     lines.push(format!("TURN_KEYS={}", preset));
-    let _ = std::fs::write(path, lines.join("\n") + "\n");
+    if let Err(e) = std::fs::write(path, lines.join("\n") + "\n") {
+        crate::log::plog(&format!("conf: failed to write TURN_KEYS to {}: {}", path, e));
+    }
 }
 
 /// "http://192.0.2.1:8765" / "192.0.2.1:8765" / "192.0.2.1" /

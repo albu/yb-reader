@@ -352,7 +352,7 @@ impl HomeScreen {
             .map(|(((a, b), c), d)| (a, b, c, d))
             .collect();
         match self.sort {
-            SortMode::Title => items.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase())),
+            SortMode::Title => items.sort_by_key(|a| a.2.to_lowercase()),
             SortMode::Recent => items.sort_by(|a, b| {
                 recency_key(&b.1, &self.pos_map, &b.0)
                     .cmp(&recency_key(&a.1, &self.pos_map, &a.0))
@@ -410,10 +410,12 @@ impl HomeScreen {
     /// Open the Continue book where it was left — the body both tabs'
     /// Continue taps share.
     fn open_continue(&self) -> Action {
-        let (path, pos) = self.cont.as_ref().unwrap();
+        let Some((path, pos)) = self.cont.as_ref() else {
+            return Action::Keep;
+        };
         Action::Push(Box::new(ReaderScreen::new(
             path.clone(),
-            pos.page as usize,
+            pos.page,
             self.w,
             self.h,
         )))
@@ -441,7 +443,9 @@ impl HomeScreen {
     fn draw_continue_block(&self, p: &mut Painter) {
         let w = p.size().0;
         let pad = pt(PAD_PT);
-        let (path, pos) = self.cont.as_ref().unwrap();
+        let Some((path, pos)) = self.cont.as_ref() else {
+            return;
+        };
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -771,12 +775,11 @@ impl Screen for HomeScreen {
                         }
 
                         // Collection switcher on the kicker line
-                        if y >= pt(HEADER_RULE_PT) && y < pt(LIST_TOP_PT) {
-                            if !self.collections.is_empty() {
+                        if y >= pt(HEADER_RULE_PT) && y < pt(LIST_TOP_PT)
+                            && !self.collections.is_empty() {
                                 self.cycle_collection();
                                 return Action::RedrawFull;
                             }
-                        }
 
                         // Sort control: the footer band (primary, the hint
                         // lives there) or the header (secondary).

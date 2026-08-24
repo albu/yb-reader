@@ -138,7 +138,7 @@ impl ReaderScreen {
                 let cx = (r.x0 + r.x1) / 2.0;
                 let cy = (r.y0 + r.y1) / 2.0;
                 let dist = (vx - cx).powi(2) + (vy - cy).powi(2);
-                if best.as_ref().map_or(true, |(_, _, d)| dist < *d) {
+                if best.as_ref().is_none_or(|(_, _, d)| dist < *d) {
                     best = Some((word.clone(), *r, dist));
                 }
             }
@@ -163,7 +163,7 @@ impl ReaderScreen {
                 let cx = (r.x0 + r.x1) / 2.0;
                 let cy = (r.y0 + r.y1) / 2.0;
                 let dist = (vx - cx).powi(2) + (vy - cy).powi(2);
-                if best.as_ref().map_or(true, |(_, _, d)| dist < *d) {
+                if best.as_ref().is_none_or(|(_, _, d)| dist < *d) {
                     best = Some((*r, uri.clone(), dist));
                 }
             }
@@ -262,11 +262,21 @@ impl ReaderScreen {
             return Action::Keep;
         };
         let (lo, hi) = sel.span();
-        let text = self.page_words[lo..=hi]
-            .iter()
-            .map(|(w, _)| w.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
+        // A same-page re-render (render_pending) swaps `page_words` without
+        // a page turn; a stale span must not slice out of bounds. Empty
+        // text just skips the save.
+        let text = if hi < self.page_words.len() {
+            self.page_words[lo..=hi]
+                .iter()
+                .map(|(w, _)| w.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            String::new()
+        };
+        if text.is_empty() {
+            return Action::Keep;
+        }
         let page = self.backend.borrow().current_page();
         if crate::notes::add(&self.book_name(), page, &text) {
             let head: String = text.chars().take(48).collect();
@@ -522,6 +532,10 @@ impl Screen for ReaderScreen {
                     self.page_gray = Some(gray);
                     self.page_words = render_output.words;
                     self.page_links = render_output.links;
+                    // Re-render replaces the word layout; a pending
+                    // selection's span may reference indices that no
+                    // longer exist (same rule as page turns, :283).
+                    self.sel = None;
                     rendered_new = true;
                 }
                 None => {
@@ -539,6 +553,7 @@ impl Screen for ReaderScreen {
                         }
                         self.page_words = render_output.words;
                         self.page_links = render_output.links;
+                        self.sel = None;
                         return;
                     }
                     // Loading behind a valid cached page: the snapshot
@@ -726,13 +741,13 @@ impl Screen for ReaderScreen {
                         .backend
                         .borrow_mut()
                         .turn_page(-1, vw, vh, &self.settings);
-                    return self.handle_page_turn_result(res);
+                    self.handle_page_turn_result(res)
                 } else {
                     let res = self
                         .backend
                         .borrow_mut()
                         .turn_page(1, vw, vh, &self.settings);
-                    return self.handle_page_turn_result(res);
+                    self.handle_page_turn_result(res)
                 }
             }
             Gesture::LongPress { x, y } => {

@@ -287,16 +287,26 @@ impl MirrorScreen {
         }
         let t0 = now_ms();
         let mut buf: Vec<u8> = Vec::new();
+        let mut stage = "ok";
         let mut sink = |chunk: &[u8]| {
             buf.extend_from_slice(chunk);
             true
         };
         let mut r = self.conn.as_mut().and_then(|c| {
             c.request(method, path, &mut sink)
-                .map_err(|stage| stage)
+                .inspect_err(|&s| {
+                    // Capture the real failure stage for the log — before,
+                    // the first attempt reported a generic "request1".
+                    stage = match s {
+                        protocol::Stage::Connect => "connect",
+                        protocol::Stage::Send => "send",
+                        protocol::Stage::Status => "status",
+                        protocol::Stage::Headers => "headers",
+                        protocol::Stage::Body => "body",
+                    };
+                })
                 .ok()
         });
-        let mut stage = r.as_ref().map(|_| "ok").unwrap_or("request1");
         if r.is_none() {
             // Retrying is safe for GETs, and for POSTs because page turns
             // carry an idempotency key.
@@ -307,7 +317,7 @@ impl MirrorScreen {
             };
             r = self.conn.as_mut().and_then(|c| {
                 c.request(method, path, &mut sink)
-                    .map_err(|s| {
+                    .inspect_err(|&s| {
                         stage = match s {
                             protocol::Stage::Connect => "connect",
                             protocol::Stage::Send => "send",
@@ -315,7 +325,6 @@ impl MirrorScreen {
                             protocol::Stage::Headers => "headers",
                             protocol::Stage::Body => "body",
                         };
-                        s
                     })
                     .ok()
             });
@@ -392,7 +401,7 @@ impl MirrorScreen {
                 let every = self.conf.refresh_every.unwrap_or(60);
                 let full = force_full
                     || self.frame_count == 1
-                    || (every != 0 && self.frame_count % every == 0);
+                    || (every != 0 && self.frame_count.is_multiple_of(every));
                 if full {
                     Action::RedrawFull
                 } else {

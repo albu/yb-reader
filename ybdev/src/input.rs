@@ -491,7 +491,7 @@ impl Input {
                 },
             ];
             let n_fds = if pwr_fd >= 0 { 2 } else { 1 };
-            let ms = (remain.as_millis() as libc::c_int).min(40);
+            let ms = remain.as_millis().min(40) as libc::c_int;
             let rv = unsafe { libc::poll(pfds.as_mut_ptr(), n_fds, ms) };
             if rv < 0 {
                 let e = std::io::Error::last_os_error();
@@ -521,6 +521,18 @@ impl Input {
         }
     }
 
+    /// Read the complete input events out of a byte buffer. evdev delivers
+    /// whole events, but `[u8; N]` is only byte-aligned, so casting to
+    /// `*const InputEvent` (align_of 4 on armv7) is UB; copying each event
+    /// with `read_unaligned` keeps the count exact and the alignment sound.
+    fn events_from(buf: &[u8]) -> impl Iterator<Item = InputEvent> + '_ {
+        let sz = std::mem::size_of::<InputEvent>();
+        let count = buf.len() / sz;
+        (0..count).map(move |i| unsafe {
+            buf.as_ptr().add(i * sz).cast::<InputEvent>().read_unaligned()
+        })
+    }
+
     fn drain_pwr_events(&mut self) -> Option<Gesture> {
         let Some(pwr) = &mut self.pwr_f else {
             return None;
@@ -528,14 +540,9 @@ impl Input {
         let mut buf = [0u8; 256];
         let mut pwr_seen = false;
         let n = pwr.read(&mut buf).unwrap_or(0);
-        if n > 0 {
-            let sz = std::mem::size_of::<InputEvent>();
-            let events: &[InputEvent] =
-                unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const InputEvent, n / sz) };
-            for ev in events {
-                if ev.type_ == EV_KEY && ev.code == KEY_POWER && ev.value == 1 {
-                    pwr_seen = true;
-                }
+        for ev in Self::events_from(&buf[..n]) {
+            if ev.type_ == EV_KEY && ev.code == KEY_POWER && ev.value == 1 {
+                pwr_seen = true;
             }
         }
         if pwr_seen {
@@ -554,11 +561,8 @@ impl Input {
                 Ok(n) => n,
                 Err(_) => return result,
             };
-            let sz = std::mem::size_of::<InputEvent>();
-            let events: &[InputEvent] =
-                unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const InputEvent, n / sz) };
-            for ev in events {
-                if let Some(g) = self.handle_event(*ev) {
+            for ev in Self::events_from(&buf[..n]) {
+                if let Some(g) = self.handle_event(ev) {
                     result = Some(g);
                 }
             }

@@ -53,15 +53,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
-        match args[i].as_str() {
-            "--log" => {
-                if i + 1 < args.len() {
-                    log_path = args[i + 1].clone();
-                    i += 1;
-                }
+        if args[i].as_str() == "--log"
+            && i + 1 < args.len() {
+                log_path = args[i + 1].clone();
+                i += 1;
             }
-            _ => {}
-        }
         i += 1;
     }
     log::set_path(&log_path);
@@ -108,7 +104,8 @@ fn main() {
         }
     }
     .with_edge_overlay(Box::new(|| Box::new(CurtainScreen::new())))
-    .with_resume(Box::new(awake::on_resume));
+    .with_resume(Box::new(awake::on_resume))
+    .with_quit_check(Box::new(guard::pending));
     let (w, h) = app.dims();
 
     awake::spawn();
@@ -121,6 +118,11 @@ fn main() {
     // next (the framework on exit-42, the launcher in stock mode) must
     // not inherit a preventScreenSaver we set.
     wifi::keep_awake(false);
+    // TERM/INT: restore and exit 0 — boot.sh clears its crash counter on
+    // rc 0, and a shutdown cascade must not look like the crash fallback.
+    if guard::pending() {
+        guard::graceful_exit(0);
+    }
     // Takeover mode: leaving the app means "back to the stock Kindle" —
     // exit 42 is boot.sh's cue to remove the flag and start the
     // framework. In stock mode exiting returns to the library as before.

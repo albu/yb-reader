@@ -16,31 +16,23 @@ pub trait ImageSource: Read + Seek + Send {}
 impl<T: Read + Seek + Send> ImageSource for T {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum FontStyle {
+    #[default]
     Regular,
     Bold,
     Italic,
     BoldItalic,
 }
 
-impl Default for FontStyle {
-    fn default() -> Self {
-        FontStyle::Regular
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TextAlign {
     Left,
     Center,
     Right,
+    #[default]
     Justify,
-}
-
-impl Default for TextAlign {
-    fn default() -> Self {
-        TextAlign::Justify
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

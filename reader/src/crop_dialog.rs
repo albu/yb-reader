@@ -345,16 +345,42 @@ impl Screen for CropDialog {
 
         match g {
             Gesture::Tap { .. } => {
-                // Check floating palette buttons
+                // Floating palette buttons — hit exactly the painted
+                // rects (the old code measured fractions of the bar and
+                // fired actions on taps in the gaps, hundreds of px off
+                // at default width).
                 if vy >= bar_y
                     && vy <= bar_y + bar_h + pt(8.0)
                     && vx >= bar_x
                     && vx <= bar_x + bar_w
                 {
-                    if vy < bar_y + bar_h / 2 {
-                        // Row 1: Edge buttons
-                        let edge_btn_w = bar_w / 5;
-                        let idx = ((vx - bar_x) / edge_btn_w).clamp(0, 4) as usize;
+                    // Row 2: discrete action buttons (paint's geometry).
+                    let r2_y = bar_y + pt(23.0);
+                    let btn_h = pt(15.0);
+                    if Rect::new(bar_x + pt(8.0), r2_y, pt(24.0), btn_h).contains(vx, vy) {
+                        self.nudge(-0.01);
+                        return Action::Redraw;
+                    }
+                    if Rect::new(bar_x + pt(68.0), r2_y, pt(24.0), btn_h).contains(vx, vy) {
+                        self.nudge(0.01);
+                        return Action::Redraw;
+                    }
+                    if Rect::new(bar_x + pt(100.0), r2_y, pt(52.0), btn_h).contains(vx, vy) {
+                        self.settings.split.margin_left = 0.0;
+                        self.settings.split.margin_top = 0.0;
+                        self.settings.split.margin_right = 0.0;
+                        self.settings.split.margin_bottom = 0.0;
+                        return Action::Redraw;
+                    }
+                    if Rect::new(bar_x + bar_w - pt(68.0), r2_y, pt(60.0), btn_h).contains(vx, vy) {
+                        return self.apply_crop();
+                    }
+                    // Row 1: five equal edge buttons, indexed by column.
+                    let edge_y = bar_y + pt(4.0);
+                    let edge_btn_h = pt(16.0);
+                    if vy >= edge_y && vy < edge_y + edge_btn_h {
+                        let edge_btn_w = (bar_w - pt(16.0)) / 5;
+                        let idx = ((vx - (bar_x + pt(8.0))) / edge_btn_w).clamp(0, 4) as usize;
                         let edges = [
                             ActiveEdge::Top,
                             ActiveEdge::Bottom,
@@ -364,28 +390,6 @@ impl Screen for CropDialog {
                         ];
                         self.active_edge = edges[idx];
                         return Action::Redraw;
-                    } else {
-                        // Row 2: Actions
-                        let rel_x = vx - bar_x;
-                        if rel_x < bar_w * 3 / 10 {
-                            // Minus [-1%]
-                            self.nudge(-0.01);
-                            return Action::Redraw;
-                        } else if rel_x < bar_w * 5 / 10 {
-                            // Plus [+1%]
-                            self.nudge(0.01);
-                            return Action::Redraw;
-                        } else if rel_x < bar_w * 7 / 10 {
-                            // Reset
-                            self.settings.split.margin_left = 0.0;
-                            self.settings.split.margin_top = 0.0;
-                            self.settings.split.margin_right = 0.0;
-                            self.settings.split.margin_bottom = 0.0;
-                            return Action::Redraw;
-                        } else {
-                            // Apply Crop
-                            return self.apply_crop();
-                        }
                     }
                 }
 

@@ -1,5 +1,5 @@
 use ybdev::input::{Gesture, SwipeDir};
-use yui::painter::{pt, Painter, Rect};
+use yui::painter::{pt, Painter, PX, Rect};
 use yui::screen::{Action, Screen};
 
 pub enum FootnoteAction {
@@ -163,7 +163,7 @@ impl<F: FnMut(FootnoteAction) -> Action> Screen for FootnoteDialog<F> {
 
         // Title row
         let title_y = card_y + pt(18.0);
-        let title = p.truncate(11.5, &self.title, (card_w - pt(120.0)) as f32);
+        let title = p.truncate(11.5, &self.title, (card_w - pt(120.0)) as f32 / PX);
         p.text(card_x + pt(12.0), title_y, 11.5, 0, &title);
 
         // Scroll indicator if scrollable

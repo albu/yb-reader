@@ -78,6 +78,9 @@ pub fn wifi_ip() -> Option<String> {
         addr: libc::sockaddr_in,
         pad: [u8; 16],
     }
+    // Kernel `struct ifreq` is 40 bytes on armv7; the padded struct must
+    // be at least that or the ioctl payload is truncated.
+    const _: () = assert!(std::mem::size_of::<Ifr>() >= 40);
     let s = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
     if s < 0 {
         return None;

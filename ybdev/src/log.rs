@@ -9,13 +9,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static LOG_PATH: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn set_path(path: &str) {
-    *LOG_PATH.lock().unwrap() = Some(path.to_string());
+    *LOG_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.to_string());
 }
 
 pub fn path() -> String {
     LOG_PATH
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_else(|| "/mnt/us/extensions/mirror/plugin.log".to_string())
 }

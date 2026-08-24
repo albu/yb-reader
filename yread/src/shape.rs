@@ -155,7 +155,7 @@ fn shape_string_with_face(text: &str, rb_face: &rustybuzz::Face, size_pt: f32) -
     buffer.push_str(text);
     buffer.guess_segment_properties();
 
-    let output = rustybuzz::shape(&rb_face, &[], buffer);
+    let output = rustybuzz::shape(rb_face, &[], buffer);
 
     let infos = output.glyph_infos();
     let positions = output.glyph_positions();

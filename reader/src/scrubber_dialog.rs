@@ -56,7 +56,7 @@ fn step_rects(card: Rect) -> Vec<Rect> {
     let h = pt(32.0);
     let w = (card.w - pt(48.0) - pt(24.0)) / 4;
     (0..4)
-        .map(|i| Rect::new(card.x + pt(24.0) + i as i32 * (w + pt(8.0)), y, w, h))
+        .map(|i| Rect::new(card.x + pt(24.0) + i * (w + pt(8.0)), y, w, h))
         .collect()
 }
 

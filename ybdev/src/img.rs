@@ -1,5 +1,10 @@
 //! Image decoding for the mirror frames.
 
+/// ~40 MP: far above any sane photo, far below memory trouble. Applied to
+/// both decode paths — a "decode bomb" PNG header must fail the ceiling
+/// check instead of OOMing the RAM-scarce device.
+const MAX_PIXELS: u64 = 40_000_000;
+
 /// Decode a PNG into a w*h 8-bit grayscale buffer (any input color type).
 ///
 /// `Transformations::EXPAND` is required: without it the png crate hands back
@@ -25,6 +30,14 @@ pub fn decode_png_gray(data: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
     }
     let mut raw = vec![0u8; reader.output_buffer_size()];
     let info_out = reader.next_frame(&mut raw).ok()?;
+    // The IHDR check above matches the client's screen size, but an APNG
+    // first frame may be a sub-rectangle (fcTL) smaller than IHDR — the
+    // decoded `out` then covers far fewer samples than `w*h` and the loops
+    // below would index past its end. Validate the *decoded* frame, not
+    // just the header.
+    if info_out.width != w || info_out.height != h {
+        return None;
+    }
     let out = &raw[..info_out.buffer_size()];
     let ct = info_out.color_type;
     let bd = info_out.bit_depth as usize;
@@ -86,6 +99,11 @@ pub fn load_png_fitted(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
     }
     let (src_w, src_h) = (info.width as usize, info.height as usize);
     if src_w == 0 || src_h == 0 {
+        return None;
+    }
+    // Ceiling checked on the *header* dims before any allocation — the
+    // JPEG branch in load_image_fitted enforces the same limit.
+    if info.width as u64 * info.height as u64 > MAX_PIXELS {
         return None;
     }
     let mut raw = vec![0u8; reader.output_buffer_size()];
@@ -186,8 +204,6 @@ pub fn load_image_fitted(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>>
     if data.len() >= 8 && data[..8] == PNG_MAGIC {
         return load_png_fitted(data, dst_w, dst_h);
     }
-    /// ~40 MP: far above any sane photo, far below memory trouble.
-    const MAX_PIXELS: u64 = 40_000_000;
     let reader = image::ImageReader::new(std::io::Cursor::new(data))
         .with_guessed_format()
         .ok()?;
@@ -425,6 +441,28 @@ mod tests {
     fn rejects_size_mismatch() {
         let png = make_gray4_png(16, 8);
         assert!(decode_png_gray(&png, 1236, 1648).is_none());
+    }
+
+    /// APNG whose first frame (fcTL) is a sub-rectangle far smaller than
+    /// IHDR. The IHDR dims match the caller's screen, but the decoded
+    /// frame is tiny — the grayscale loops must not index past it. This
+    /// used to panic (remote DoS: ~1 KB PNG crashes the reader).
+    #[test]
+    fn rejects_apng_subrect_first_frame_without_panic() {
+        use png::{BitDepth, ColorType, Encoder};
+        let (w, h) = (16u32, 8u32);
+        let mut out = Vec::new();
+        {
+            let mut enc = Encoder::new(&mut out, w, h);
+            enc.set_color(ColorType::Grayscale);
+            enc.set_depth(BitDepth::Eight);
+            enc.set_animated(2, 0).unwrap();
+            let mut writer = enc.write_header().unwrap();
+            writer.set_frame_dimension(1, 1).unwrap();
+            writer.set_frame_position(0, 0).unwrap();
+            writer.write_image_data(&[7u8]).unwrap();
+        }
+        assert!(decode_png_gray(&out, w, h).is_none());
     }
 }
 

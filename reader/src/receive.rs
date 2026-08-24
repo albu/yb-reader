@@ -71,1043 +71,7 @@ const SYSTEM_FILES: [&str; 2] = ["My Clippings.txt", "JAILBROKEN.txt"];
 
 /// The web file manager: responsive mobile & desktop UI for browsing,
 /// uploading, previewing, moving, creating folders, and deleting books.
-const PAGE: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>yb-reader &mdash; Kindle File Manager</title>
-<style>
-:root {
-  --bg: #0d0e12;
-  --surface: #16181f;
-  --surface-hover: #1e212b;
-  --surface-active: #262a36;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-subtle: rgba(255, 255, 255, 0.04);
-  --text-main: #f3f4f6;
-  --text-muted: #9ca3af;
-  --text-dim: #6b7280;
-  --accent: #3b82f6;
-  --accent-glow: rgba(59, 130, 246, 0.18);
-  --accent-text: #60a5fa;
-  --danger: #ef4444;
-  --danger-bg: rgba(239, 68, 68, 0.12);
-  --success: #10b981;
-  --radius-lg: 14px;
-  --radius-md: 10px;
-  --radius-sm: 6px;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f8fafc;
-    --surface: #ffffff;
-    --surface-hover: #f1f5f9;
-    --surface-active: #e2e8f0;
-    --border: rgba(0, 0, 0, 0.08);
-    --border-subtle: rgba(0, 0, 0, 0.04);
-    --text-main: #0f172a;
-    --text-muted: #64748b;
-    --text-dim: #94a3b8;
-    --accent: #2563eb;
-    --accent-glow: rgba(37, 99, 235, 0.12);
-    --accent-text: #2563eb;
-    --danger: #dc2626;
-    --danger-bg: rgba(220, 38, 38, 0.08);
-    --success: #059669;
-  }
-}
-
-* { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Roboto, sans-serif; }
-body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webkit-font-smoothing: antialiased; padding: 24px 20px; }
-
-.app-container { max-width: 1040px; margin: 0 auto; }
-
-/* Top Navigation Bar */
-.navbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 18px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  margin-bottom: 20px;
-  backdrop-filter: blur(12px);
-  gap: 12px;
-}
-
-.brand { display: flex; align-items: center; gap: 12px; }
-.brand-title { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.3px; color: var(--text-main); }
-.device-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  background: var(--border-subtle);
-  border: 1px solid var(--border);
-  padding: 3px 9px;
-  border-radius: 20px;
-}
-.status-dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; box-shadow: 0 0 8px var(--success); }
-
-/* Center Pill Nav */
-.nav-switcher {
-  display: flex;
-  background: var(--bg);
-  padding: 3px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-}
-.nav-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 18px;
-  border-radius: 8px;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.nav-tab:hover { color: var(--text-main); }
-.nav-tab.active { background: var(--surface); color: var(--text-main); box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-
-/* Nav Stats */
-.nav-stats { display: flex; align-items: center; gap: 12px; }
-.storage-indicator {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-/* Hero Upload Dropzone */
-.dropzone {
-  border: 1.5px dashed var(--border);
-  background: var(--surface);
-  border-radius: var(--radius-lg);
-  padding: 32px 24px;
-  text-align: center;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  margin-bottom: 24px;
-  position: relative;
-}
-.dropzone:hover, .dropzone.dragover { border-color: var(--accent); background: var(--accent-glow); transform: translateY(-1px); }
-.drop-icon-wrap {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  background: var(--accent-glow);
-  color: var(--accent-text);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 10px;
-}
-.drop-title { font-size: 0.95rem; font-weight: 600; color: var(--text-main); margin-bottom: 4px; }
-.drop-title span { color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; }
-.drop-subtitle { font-size: 0.78rem; color: var(--text-dim); }
-
-/* Action & Search Bar */
-.action-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-.search-input-wrap { position: relative; flex: 1; min-width: 220px; }
-.search-input-wrap svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-dim); }
-.search-input { width: 100%; padding: 9px 12px 9px 36px; font-size: 0.88rem; border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--surface); color: var(--text-main); outline: none; transition: border-color 0.15s; }
-.search-input:focus { border-color: var(--accent); }
-
-.action-buttons { display: flex; align-items: center; gap: 8px; }
-.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: var(--radius-md); font-size: 0.85rem; font-weight: 600; border: 1px solid var(--border); background: var(--surface); color: var(--text-main); cursor: pointer; transition: all 0.15s; }
-.btn:hover { background: var(--surface-hover); border-color: rgba(255,255,255,0.15); }
-.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn-primary:hover { background: #2563eb; }
-
-/* Breadcrumbs bar */
-.breadcrumbs-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  margin-bottom: 14px;
-  font-size: 0.85rem;
-}
-.crumb { color: var(--text-muted); text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
-.crumb:hover { color: var(--accent-text); }
-.crumb.current { color: var(--text-main); font-weight: 600; cursor: default; }
-
-.section-label {
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  margin: 18px 0 8px 4px;
-}
-
-/* Folders Grid in Books */
-.folders-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 10px;
-  margin-bottom: 18px;
-}
-.folder-pill {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all 0.15s;
-  text-decoration: none;
-  color: inherit;
-}
-.folder-pill:hover {
-  background: var(--surface-hover);
-  border-color: rgba(255,255,255,0.18);
-  transform: translateY(-1px);
-}
-.folder-icon { color: #f59e0b; flex-shrink: 0; }
-.folder-name { font-size: 0.88rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* Books Table View */
-.books-table {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-}
-.book-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--border-subtle);
-  transition: background 0.15s;
-  gap: 12px;
-}
-.book-row:last-child { border-bottom: none; }
-.book-row:hover { background: var(--surface-hover); }
-
-.book-left {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-  flex: 1;
-}
-.format-badge {
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: var(--surface-active);
-  border: 1px solid var(--border);
-  color: var(--accent-text);
-  width: 48px;
-  text-align: center;
-  flex-shrink: 0;
-}
-.format-badge.pdf { color: #ef4444; }
-.format-badge.cbz { color: #a855f7; }
-
-.book-meta-box { min-width: 0; flex: 1; }
-.book-title { font-size: 0.92rem; font-weight: 600; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.book-size { font-size: 0.78rem; color: var(--text-dim); margin-top: 2px; }
-
-.book-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.icon-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text-muted);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.15s;
-  text-decoration: none;
-}
-.icon-btn:hover { color: var(--text-main); background: var(--surface-active); border-color: rgba(255,255,255,0.18); }
-.icon-btn.btn-delete:hover { color: var(--danger); background: var(--danger-bg); border-color: var(--danger); }
-
-/* Grid View for Screensavers */
-.screensavers-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 16px;
-}
-
-.poster-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  position: relative;
-  transition: all 0.2s ease;
-  display: flex;
-  flex-direction: column;
-}
-.poster-card:hover {
-  transform: translateY(-3px);
-  border-color: rgba(255,255,255,0.2);
-  box-shadow: 0 12px 24px rgba(0,0,0,0.25);
-}
-.poster-img-wrap {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 3 / 4;
-  background: #000;
-  overflow: hidden;
-  cursor: pointer;
-}
-.poster-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  transition: transform 0.3s ease;
-}
-.poster-card:hover .poster-img {
-  transform: scale(1.03);
-}
-.poster-overlay {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, transparent 60%, rgba(0,0,0,0.8) 100%);
-  opacity: 0.9;
-}
-.poster-body {
-  padding: 12px 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.poster-info { min-width: 0; flex: 1; }
-.poster-name {
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: var(--text-main);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.poster-meta { font-size: 0.75rem; color: var(--text-dim); margin-top: 2px; }
-
-/* Empty state */
-.empty-box {
-  text-align: center;
-  padding: 48px 20px;
-  color: var(--text-dim);
-  font-size: 0.9rem;
-  background: var(--surface);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-}
-
-/* Floating Upload HUD */
-.upload-hud {
-  position: fixed;
-  bottom: 24px;
-  right: 24px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 14px 18px;
-  box-shadow: 0 16px 36px rgba(0,0,0,0.3);
-  display: none;
-  align-items: center;
-  gap: 14px;
-  z-index: 100;
-  backdrop-filter: blur(12px);
-  min-width: 280px;
-}
-.hud-progress { flex: 1; }
-.hud-title {
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--text-main);
-  margin-bottom: 6px;
-  display: flex;
-  justify-content: space-between;
-}
-.hud-bar {
-  width: 100%;
-  height: 6px;
-  background: var(--surface-active);
-  border-radius: 3px;
-  overflow: hidden;
-}
-.hud-bar-fill {
-  height: 100%;
-  background: var(--accent);
-  width: 0%;
-  border-radius: 3px;
-  transition: width 0.15s ease-out;
-}
-
-/* Modals */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.65);
-  backdrop-filter: blur(6px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 999;
-  padding: 16px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.2s;
-}
-.modal-overlay.active { opacity: 1; pointer-events: auto; }
-.modal {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 24px;
-  width: 100%;
-  max-width: 440px;
-  box-shadow: 0 20px 40px rgba(0,0,0,0.4);
-  transform: scale(0.96);
-  transition: transform 0.2s;
-}
-.modal-overlay.active .modal { transform: scale(1); }
-.modal h2 { font-size: 1.15rem; margin-bottom: 12px; font-weight: 700; color: var(--text-main); }
-.modal p { font-size: 0.88rem; color: var(--text-muted); margin-bottom: 16px; }
-.modal input, .modal select {
-  width: 100%;
-  padding: 10px 12px;
-  font-size: 0.92rem;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text-main);
-  margin-bottom: 18px;
-  outline: none;
-}
-.modal input:focus, .modal select:focus { border-color: var(--accent); }
-.modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
-
-.preview-modal { max-width: 620px; text-align: center; padding: 18px; }
-.preview-modal img {
-  max-width: 100%;
-  max-height: 70vh;
-  object-fit: contain;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  margin-bottom: 14px;
-  background: #000;
-}
-
-/* Toast */
-.toast {
-  position: fixed;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%) translateY(20px);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text-main);
-  padding: 10px 18px;
-  border-radius: 20px;
-  font-size: 0.85rem;
-  font-weight: 500;
-  opacity: 0;
-  pointer-events: none;
-  transition: all 0.25s ease-out;
-  z-index: 1000;
-  box-shadow: 0 10px 25px rgba(0,0,0,0.3);
-}
-.toast.active { opacity: 1; transform: translateX(-50%) translateY(0); }
-.toast.success { border-color: var(--success); color: var(--success); }
-.toast.error { border-color: var(--danger); color: var(--danger); }
-
-.drag-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--accent-glow);
-  backdrop-filter: blur(4px);
-  border: 3px dashed var(--accent);
-  z-index: 998;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-  font-size: 1.2rem;
-  font-weight: 700;
-  color: var(--accent-text);
-}
-.drag-overlay.active { display: flex; }
-
-@media (max-width: 768px) {
-  body { padding: 14px 12px; }
-  .navbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 12px 14px;
-  }
-  .brand { order: 1; }
-  .nav-stats { order: 2; }
-  .storage-indicator { font-size: 0.78rem; padding: 4px 8px; gap: 5px; }
-  .nav-switcher {
-    order: 3;
-    width: 100%;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    box-sizing: border-box;
-    gap: 4px;
-  }
-  .nav-tab {
-    width: 100%;
-    justify-content: center;
-    padding: 7px 4px;
-    font-size: 0.8rem;
-    gap: 5px;
-    box-sizing: border-box;
-  }
-  .screensavers-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  .dropzone { padding: 22px 14px; }
-  .poster-body { padding: 10px 10px; }
-}
-</style>
-</head>
-<body>
-<div class="app-container">
-
-  <!-- Navigation Bar -->
-  <header class="navbar">
-    <div class="brand">
-      <div class="brand-title">yb-reader</div>
-      <div class="device-tag">
-        <div class="status-dot"></div>
-        <span>Kindle Paperwhite</span>
-      </div>
-    </div>
-
-    <nav class="nav-switcher">
-      <button class="nav-tab active" id="tab-books" onclick="setRoot('documents')">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10"/><path d="M6 10h10"/></svg>
-        Books
-      </button>
-      <button class="nav-tab" id="tab-screensavers" onclick="setRoot('screensavers')">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
-        Screensavers
-      </button>
-    </nav>
-
-    <div class="nav-stats">
-      <div class="storage-indicator" id="storage-badge">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg>
-        <span id="storage-text">Kindle Storage</span>
-      </div>
-    </div>
-  </header>
-
-  <!-- Hero Dropzone -->
-  <div class="dropzone" id="dropzone" onclick="f.click()">
-    <div class="drop-icon-wrap">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
-    </div>
-    <div class="drop-title" id="drop-title">Drag & drop books here, or <span>browse</span></div>
-    <div class="drop-subtitle" id="drop-subtitle">Supports EPUB, PDF, CBZ, FB2, TXT</div>
-  </div>
-
-  <!-- Action Bar -->
-  <div class="action-bar">
-    <div class="search-input-wrap">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-      <input type="text" id="search-input" class="search-input" placeholder="Filter books..." oninput="filterCards()">
-    </div>
-    <div class="action-buttons">
-      <button class="btn" id="new-folder-btn" onclick="openMkdir()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><line x1="12" y1="10" x2="12" y2="16"/><line x1="9" y1="13" x2="15" y2="13"/></svg>
-        New Folder
-      </button>
-    </div>
-  </div>
-
-  <!-- Breadcrumbs for Books -->
-  <div class="breadcrumbs-bar" id="breadcrumbs" style="display:none;"></div>
-
-  <!-- Content Container -->
-  <div id="content-container"></div>
-
-</div>
-
-<!-- Upload Progress HUD -->
-<div class="upload-hud" id="upload-hud">
-  <div class="hud-progress">
-    <div class="hud-title">
-      <span id="hud-title">Uploading...</span>
-      <span id="hud-pct">0%</span>
-    </div>
-    <div class="hud-bar"><div class="hud-bar-fill" id="hud-fill"></div></div>
-  </div>
-</div>
-
-<!-- Modal: New Folder -->
-<div class="modal-overlay" id="mkdir-modal">
-  <div class="modal">
-    <h2>New Folder</h2>
-    <input type="text" id="mkdir-name" placeholder="Folder name (e.g. Sci-Fi, Technical)">
-    <div class="modal-actions">
-      <button class="btn" onclick="closeModal('mkdir-modal')">Cancel</button>
-      <button class="btn btn-primary" onclick="submitMkdir()">Create</button>
-    </div>
-  </div>
-</div>
-
-<!-- Modal: Move File -->
-<div class="modal-overlay" id="move-modal">
-  <div class="modal">
-    <h2>Move Item</h2>
-    <p id="move-prompt"></p>
-    <select id="move-target"></select>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeModal('move-modal')">Cancel</button>
-      <button class="btn btn-primary" onclick="submitMove()">Move</button>
-    </div>
-  </div>
-</div>
-
-<!-- Modal: Delete Confirmation -->
-<div class="modal-overlay" id="delete-modal">
-  <div class="modal">
-    <h2>Delete Item?</h2>
-    <p id="delete-prompt"></p>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeModal('delete-modal')">Cancel</button>
-      <button class="btn" style="background:var(--danger);color:#fff;border-color:var(--danger)" onclick="submitDelete()">Delete</button>
-    </div>
-  </div>
-</div>
-
-<!-- Modal: Image Preview -->
-<div class="modal-overlay" id="preview-modal" onclick="closeModal('preview-modal')">
-  <div class="modal preview-modal" onclick="event.stopPropagation()">
-    <img id="preview-img" src="" alt="Preview">
-    <div style="font-weight:600;font-size:0.92rem;margin-bottom:8px" id="preview-title"></div>
-    <div class="modal-actions" style="justify-content:center">
-      <a class="btn" id="preview-dl" download>Download Image</a>
-      <button class="btn btn-primary" onclick="closeModal('preview-modal')">Close</button>
-    </div>
-  </div>
-</div>
-
-<div class="toast" id="toast"></div>
-<div class="drag-overlay" id="drag-overlay">Drop files anywhere to upload</div>
-
-<input type="file" id="f" multiple style="display:none">
-
-<script>
-let curDir = '';
-let root = 'documents';
-let allFolders = [];
-let itemToMove = null;
-let itemToDelete = null;
-
-const dz = document.getElementById('dropzone');
-const f = document.getElementById('f');
-const contentCont = document.getElementById('content-container');
-const breadcrumbs = document.getElementById('breadcrumbs');
-const searchInput = document.getElementById('search-input');
-const storageText = document.getElementById('storage-text');
-const newFolderBtn = document.getElementById('new-folder-btn');
-const dropTitle = document.getElementById('drop-title');
-const dropSubtitle = document.getElementById('drop-subtitle');
-const hud = document.getElementById('upload-hud');
-const hudTitle = document.getElementById('hud-title');
-const hudPct = document.getElementById('hud-pct');
-const hudFill = document.getElementById('hud-fill');
-const toastEl = document.getElementById('toast');
-const dragOverlay = document.getElementById('drag-overlay');
-
-function showToast(msg, type = '') {
-  toastEl.textContent = msg;
-  toastEl.className = 'toast active ' + type;
-  setTimeout(() => { toastEl.className = 'toast'; }, 3000);
-}
-
-function setRoot(r) {
-  root = r;
-  curDir = '';
-  document.getElementById('tab-books').classList.toggle('active', r === 'documents');
-  document.getElementById('tab-screensavers').classList.toggle('active', r === 'screensavers');
-  
-  if (r === 'screensavers') {
-    newFolderBtn.style.display = 'none';
-    breadcrumbs.style.display = 'none';
-    searchInput.placeholder = 'Filter screensavers...';
-    dropTitle.innerHTML = 'Drag & drop screensavers here, or <span>browse</span>';
-    dropSubtitle.textContent = 'Supports JPG, PNG · Optimized for 1236 × 1648 Paperwhite display';
-    f.accept = '.png,.jpg,.jpeg';
-  } else {
-    newFolderBtn.style.display = 'inline-flex';
-    searchInput.placeholder = 'Filter books...';
-    dropTitle.innerHTML = 'Drag & drop books here, or <span>browse</span>';
-    dropSubtitle.textContent = 'Supports EPUB, PDF, CBZ, FB2, TXT';
-    f.accept = '.epub,.pdf,.cbz,.fb2,.txt';
-  }
-  searchInput.value = '';
-  load(curDir);
-}
-
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
-async function load(dir = '') {
-  curDir = dir;
-  contentCont.innerHTML = '<div class="empty-box">Loading...</div>';
-  try {
-    const res = await fetch('/api/list?dir=' + encodeURIComponent(dir) + '&root=' + root);
-    if (!res.ok) throw new Error('Status ' + res.status);
-    const data = await res.json();
-    allFolders = data.all_folders || [];
-    
-    if (data.free_gb !== undefined) {
-      storageText.textContent = data.free_gb.toFixed(1) + ' GB Free';
-    }
-    
-    renderBreadcrumbs(data.current_dir);
-    renderContent(data);
-  } catch (e) {
-    contentCont.innerHTML = `<div class="empty-box">Failed to load: ${e.message}</div>`;
-  }
-}
-
-function renderBreadcrumbs(dirStr) {
-  if (root === 'screensavers') {
-    breadcrumbs.style.display = 'none';
-    return;
-  }
-  breadcrumbs.style.display = 'flex';
-  let html = `<span class="crumb ${!dirStr ? 'current' : ''}" onclick="load('')">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-    documents
-  </span>`;
-  if (dirStr) {
-    const parts = dirStr.split('/');
-    let accum = '';
-    for (let i = 0; i < parts.length; i++) {
-      accum += (i > 0 ? '/' : '') + parts[i];
-      const target = accum;
-      const isLast = (i === parts.length - 1);
-      html += `<span style="color:var(--text-dim)">/</span>`;
-      html += `<span class="crumb ${isLast ? 'current' : ''}" ${!isLast ? `onclick="load('${target.replace(/'/g, "\\'")}')"` : ''}>${escapeHtml(parts[i])}</span>`;
-    }
-  }
-  breadcrumbs.innerHTML = html;
-}
-
-function renderContent(data) {
-  const folders = data.folders || [];
-  const files = data.files || [];
-  
-  if (folders.length === 0 && files.length === 0) {
-    contentCont.innerHTML = `<div class="empty-box">No ${root === 'screensavers' ? 'screensavers' : 'books'} found in this directory.</div>`;
-    return;
-  }
-
-  let html = '';
-
-  // Screensavers Grid View
-  if (root === 'screensavers') {
-    html += `<div class="screensavers-grid" id="items-grid">`;
-    for (const file of files) {
-      const fileUrl = '/api/file?root=' + root + '&dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name);
-      html += `
-      <div class="poster-card item-card" data-name="${escapeHtml(file.name.toLowerCase())}">
-        <div class="poster-img-wrap" onclick="openPreview('${fileUrl.replace(/'/g, "\\'")}', '${escapeHtml(file.name).replace(/'/g, "\\'")}')">
-          <img class="poster-img" src="${fileUrl}" alt="${escapeHtml(file.name)}" loading="lazy">
-          <div class="poster-overlay"></div>
-        </div>
-        <div class="poster-body">
-          <div class="poster-info">
-            <div class="poster-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
-            <div class="poster-meta">${formatBytes(file.size)} · ${file.ext.toUpperCase()}</div>
-          </div>
-          <a class="icon-btn" href="${fileUrl}" download="${escapeHtml(file.name)}" title="Download">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
-          </a>
-          <button class="icon-btn btn-delete" onclick="openDelete('${escapeHtml(file.name).replace(/'/g, "\\'")}', false)" title="Delete">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-          </button>
-        </div>
-      </div>`;
-    }
-    html += `</div>`;
-    contentCont.innerHTML = html;
-    filterCards();
-    return;
-  }
-
-  // Books View: Folders + Table
-  if (folders.length > 0) {
-    html += `<div class="section-label">Folders (${folders.length})</div><div class="folders-grid">`;
-    for (const f of folders) {
-      const nextDir = curDir ? curDir + '/' + f : f;
-      html += `
-      <div class="folder-pill item-card" data-name="${escapeHtml(f.toLowerCase())}">
-        <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0" onclick="load('${nextDir.replace(/'/g, "\\'")}')">
-          <svg class="folder-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg>
-          <span class="folder-name">${escapeHtml(f)}</span>
-        </div>
-        <button class="icon-btn btn-delete" style="width:26px;height:26px" onclick="event.stopPropagation(); openDelete('${escapeHtml(f).replace(/'/g, "\\'")}', true)" title="Delete Folder">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-        </button>
-      </div>`;
-    }
-    html += `</div>`;
-  }
-
-  if (files.length > 0) {
-    html += `<div class="section-label">Books (${files.length})</div><div class="books-table" id="items-table">`;
-    for (const file of files) {
-      const fileUrl = '/api/file?root=' + root + '&dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name);
-      let badgeClass = '';
-      if (file.ext === 'pdf') badgeClass = 'pdf';
-      else if (file.ext === 'cbz') badgeClass = 'cbz';
-
-      html += `
-      <div class="book-row item-card" data-name="${escapeHtml(file.name.toLowerCase())}">
-        <div class="book-left">
-          <div class="format-badge ${badgeClass}">${file.ext.toUpperCase()}</div>
-          <div class="book-meta-box">
-            <div class="book-title" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
-            <div class="book-size">${formatBytes(file.size)}</div>
-          </div>
-        </div>
-        <div class="book-actions">
-          <a class="icon-btn" href="${fileUrl}" download="${escapeHtml(file.name)}" title="Download">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
-          </a>
-          <button class="icon-btn" onclick="openMove('${escapeHtml(file.name).replace(/'/g, "\\'")}')" title="Move to folder">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
-          </button>
-          <button class="icon-btn btn-delete" onclick="openDelete('${escapeHtml(file.name).replace(/'/g, "\\'")}', false)" title="Delete">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-          </button>
-        </div>
-      </div>`;
-    }
-    html += `</div>`;
-  }
-
-  contentCont.innerHTML = html;
-  filterCards();
-}
-
-function filterCards() {
-  const query = searchInput.value.trim().toLowerCase();
-  const items = document.querySelectorAll('.item-card');
-  items.forEach(el => {
-    const name = el.getAttribute('data-name') || '';
-    el.style.display = name.includes(query) ? '' : 'none';
-  });
-}
-
-function escapeHtml(s) {
-  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-/* Modals */
-function openModal(id) { document.getElementById(id).classList.add('active'); }
-function closeModal(id) { document.getElementById(id).classList.remove('active'); }
-
-function openMkdir() {
-  document.getElementById('mkdir-name').value = '';
-  openModal('mkdir-modal');
-  setTimeout(() => document.getElementById('mkdir-name').focus(), 50);
-}
-
-async function submitMkdir() {
-  const name = document.getElementById('mkdir-name').value.trim();
-  if (!name) return;
-  closeModal('mkdir-modal');
-  try {
-    const res = await fetch('/api/mkdir?dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(name) + '&root=' + root, { method: 'POST' });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to create folder');
-    }
-    showToast(`Created folder "${name}"`, 'success');
-    load(curDir);
-  } catch (e) {
-    showToast(e.message, 'error');
-  }
-}
-
-function openMove(fileName) {
-  itemToMove = fileName;
-  document.getElementById('move-prompt').textContent = `Select destination for "${fileName}":`;
-  const sel = document.getElementById('move-target');
-  sel.innerHTML = '';
-  const rootOpt = document.createElement('option');
-  rootOpt.value = '';
-  rootOpt.textContent = '📁 Root (documents)';
-  if (curDir === '') rootOpt.disabled = true;
-  sel.appendChild(rootOpt);
-
-  for (const f of allFolders) {
-    const opt = document.createElement('option');
-    opt.value = f;
-    opt.textContent = '📁 ' + f;
-    if (curDir === f) opt.disabled = true;
-    sel.appendChild(opt);
-  }
-  openModal('move-modal');
-}
-
-async function submitMove() {
-  const dst = document.getElementById('move-target').value;
-  if (itemToMove === null) return;
-  closeModal('move-modal');
-  try {
-    const res = await fetch('/api/move?src_dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(itemToMove) + '&dst_dir=' + encodeURIComponent(dst) + '&root=' + root, { method: 'POST' });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to move item');
-    }
-    showToast(`Moved "${itemToMove}"`, 'success');
-    load(curDir);
-  } catch (e) {
-    showToast(e.message, 'error');
-  }
-}
-
-function openDelete(name, isFolder) {
-  itemToDelete = { name, isFolder };
-  document.getElementById('delete-prompt').textContent = `Are you sure you want to delete ${isFolder ? 'folder' : ''} "${name}"? This cannot be undone.`;
-  openModal('delete-modal');
-}
-
-async function submitDelete() {
-  if (!itemToDelete) return;
-  const { name, isFolder } = itemToDelete;
-  closeModal('delete-modal');
-  try {
-    const res = await fetch('/api/delete?dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(name) + '&root=' + root, { method: 'POST' });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to delete item');
-    }
-    showToast(`Deleted "${name}"`, 'success');
-    load(curDir);
-  } catch (e) {
-    showToast(e.message, 'error');
-  }
-}
-
-function openPreview(url, name) {
-  document.getElementById('preview-img').src = url;
-  document.getElementById('preview-title').textContent = name;
-  const dl = document.getElementById('preview-dl');
-  dl.href = url;
-  dl.download = name;
-  openModal('preview-modal');
-}
-
-/* Upload & Drag Drop */
-let dragCounter = 0;
-window.addEventListener('dragenter', e => {
-  e.preventDefault();
-  dragCounter++;
-  if (e.dataTransfer.types.includes('Files')) dragOverlay.classList.add('active');
-});
-window.addEventListener('dragleave', e => {
-  e.preventDefault();
-  dragCounter--;
-  if (dragCounter <= 0) {
-    dragCounter = 0;
-    dragOverlay.classList.remove('active');
-  }
-});
-window.addEventListener('dragover', e => { e.preventDefault(); });
-window.addEventListener('drop', e => {
-  e.preventDefault();
-  dragCounter = 0;
-  dragOverlay.classList.remove('active');
-  if (e.dataTransfer.files.length) upload(e.dataTransfer.files);
-});
-
-dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dragover'); });
-dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
-dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('dragover'); });
-
-f.onchange = () => { if (f.files.length) upload(f.files); f.value = ''; };
-
-async function upload(files) {
-  hud.style.display = 'flex';
-  let successCount = 0;
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    hudTitle.textContent = `Uploading (${i + 1}/${files.length}): ${file.name}`;
-    hudPct.textContent = '0%';
-    hudFill.style.width = '0%';
-    try {
-      await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/upload?dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name) + '&root=' + root);
-        xhr.upload.onprogress = e => {
-          if (e.lengthComputable) {
-            const pct = Math.round(e.loaded / e.total * 100);
-            hudFill.style.width = pct + '%';
-            hudPct.textContent = pct + '%';
-          }
-        };
-        xhr.onload = () => { if (xhr.status === 200) resolve(); else reject(xhr.responseText || 'Upload failed'); };
-        xhr.onerror = () => reject('Network error');
-        xhr.send(file);
-      });
-      successCount++;
-    } catch (e) {
-      showToast(`Failed "${file.name}": ${e}`, 'error');
-    }
-  }
-  hudFill.style.width = '100%';
-  hudPct.textContent = '100%';
-  hudTitle.textContent = 'Upload complete';
-  if (successCount > 0) {
-    showToast(`Successfully uploaded ${successCount} file(s)`, 'success');
-  }
-  setTimeout(() => {
-    hud.style.display = 'none';
-    load(curDir);
-  }, 900);
-}
-
-load();
-</script>
-</body>
-</html>"#;
+const PAGE: &str = include_str!("receive_page.html");
 
 // ---- server -------------------------------------------------------------
 
@@ -1146,7 +110,12 @@ impl ReceiveServer {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
-                        handle_conn(stream, &last_t, &recv_t);
+                        // One thread per connection: a LAN client that
+                        // connects and stalls (headers up to 30 s, body up
+                        // to 30 min) must not block every other upload.
+                        let last = Arc::clone(&last_t);
+                        let recv = Arc::clone(&recv_t);
+                        std::thread::spawn(move || handle_conn(stream, &last, &recv));
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(200));
@@ -1177,7 +146,7 @@ impl ReceiveServer {
     pub fn status(&self) -> (usize, Option<String>) {
         (
             self.received.load(Ordering::Relaxed),
-            self.last.lock().unwrap().clone(),
+            self.last.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         )
     }
 
@@ -1206,8 +175,8 @@ fn track_rule(port: u16, open: bool) {
 fn firewall_port(port: u16, open: bool) {
     let port_str = port.to_string();
     let spec = [
-        "-i".as_ref(),
-        "wlan0".as_ref(),
+        "-i",
+        "wlan0",
         "-p",
         "tcp",
         "--dport",
@@ -1260,7 +229,8 @@ pub fn emergency_cleanup() {
     for p in ports {
         firewall_port(p, false);
     }
-    firewall_port(PORT, false);
+    // No unconditional `-D PORT`: a port we never opened must not have an
+    // unrelated pre-existing rule silently removed.
     if let Ok(rd) = std::fs::read_dir(save_dir()) {
         for e in rd.flatten() {
             if e.path().extension().and_then(|x| x.to_str()) == Some("part") {
@@ -1401,16 +371,34 @@ fn handle_conn(
 
     let mut content_length: Option<u64> = None;
     let mut expect_continue = false;
+    let mut dup_cl = false;
     for line in lines {
         let Some((k, v)) = line.split_once(':') else {
             continue;
         };
         let k = k.trim().to_ascii_lowercase();
         if k == "content-length" {
-            content_length = v.trim().parse().ok();
+            match (content_length, v.trim().parse().ok()) {
+                // Two Content-Length headers with different values are a
+                // request-smuggling tell: reject rather than "last wins".
+                (Some(a), Some(b)) if a != b => dup_cl = true,
+                (None, Some(b)) => content_length = Some(b),
+                _ => {}
+            }
         } else if k == "expect" && v.trim().eq_ignore_ascii_case("100-continue") {
             expect_continue = true;
         }
+    }
+
+    if dup_cl {
+        respond(
+            &mut stream,
+            400,
+            "Bad Request",
+            "text/plain",
+            "conflicting Content-Length",
+        );
+        return;
     }
 
     let (raw_path, query_str) = path.split_once('?').unwrap_or((path, ""));
@@ -1487,7 +475,7 @@ fn handle_conn(
                 }
             }
             folders.sort();
-            files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+            files.sort_by_key(|a| a.0.to_lowercase());
 
             let mut all_folders = Vec::new();
             collect_all_folders(&base_dir, std::path::Path::new(""), &mut all_folders);
@@ -1665,7 +653,7 @@ fn handle_conn(
                     500,
                     "Server Error",
                     "application/json",
-                    &format!("{{\"error\":\"{}\"}}", e),
+                    &format!("{{\"error\":\"{}\"}}", escape_json(&e.to_string())),
                 ),
             }
             return;
@@ -1728,6 +716,19 @@ fn handle_conn(
                 );
                 return;
             }
+            // Same protected set as /api/delete: moving Amazon's own files
+            // out of their expected top-level location breaks the stock
+            // system, so refuse rather than let a stray drag relocate them.
+            if src_rel.as_os_str().is_empty() && SYSTEM_FILES.contains(&name.as_str()) {
+                respond(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    "application/json",
+                    "{\"error\":\"protected file\"}",
+                );
+                return;
+            }
 
             let src_path = base_dir.join(src_rel).join(&name);
             let dst_dir = base_dir.join(&dst_rel);
@@ -1761,7 +762,7 @@ fn handle_conn(
                     500,
                     "Server Error",
                     "application/json",
-                    &format!("{{\"error\":\"{}\"}}", e),
+                    &format!("{{\"error\":\"{}\"}}", escape_json(&e.to_string())),
                 ),
             }
             return;
@@ -1802,6 +803,19 @@ fn handle_conn(
                 );
                 return;
             }
+            // Amazon's own files (clippings, jailbreak marker) are only
+            // hidden from the listing — this handler must refuse to
+            // destroy them outright, not just hide them.
+            if rel_path.as_os_str().is_empty() && SYSTEM_FILES.contains(&name.as_str()) {
+                respond(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    "application/json",
+                    "{\"error\":\"protected file\"}",
+                );
+                return;
+            }
             let target = base_dir.join(rel_path).join(&name);
             if !target.exists() {
                 respond(
@@ -1825,7 +839,7 @@ fn handle_conn(
                     500,
                     "Server Error",
                     "application/json",
-                    &format!("{{\"error\":\"{}\"}}", e),
+                    &format!("{{\"error\":\"{}\"}}", escape_json(&e.to_string())),
                 ),
             }
             return;
@@ -1923,7 +937,7 @@ fn handle_conn(
             match write_body(&mut stream, &body_prefix, len, &part_str, &final_str) {
                 Ok(()) => {
                     let msg = format!("{} ({:.1} MB)", name, len as f64 / 1048576.0);
-                    *last.lock().unwrap() = Some(msg.clone());
+                    *last.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
                     received.fetch_add(1, Ordering::Relaxed);
                     plog(&format!(
                         "receive: saved {} in {:.1}s",
@@ -2005,9 +1019,17 @@ fn write_body(
         if n == 0 {
             return Err("truncated upload".into());
         }
-        out.write_all(&chunk[..n])
+        // Cap the write to the declared Content-Length. Without the cap,
+        // `remaining -= n` underflows to u64::MAX, the loop never ends, and
+        // the MAX_BODY ceiling above is bypassed by a client that lies
+        // about the length while streaming gigabytes.
+        let take = (n as u64).min(remaining) as usize;
+        if take == 0 {
+            return Err("body exceeds declared Content-Length".into());
+        }
+        out.write_all(&chunk[..take])
             .map_err(|e| format!("write: {}", e))?;
-        remaining -= n as u64;
+        remaining -= take as u64;
     }
     out.sync_all().map_err(|e| format!("fsync: {}", e))?;
     drop(out);
@@ -2105,7 +1127,7 @@ impl ReceiveScreen {
     fn start_setup(&mut self) {
         self.stop.store(false, Ordering::Relaxed);
         self.phase = Phase::Starting;
-        *self.setup.lock().unwrap() = None;
+        *self.setup.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let stop = Arc::clone(&self.stop);
         let slot = Arc::clone(&self.setup);
         std::thread::spawn(move || {
@@ -2134,7 +1156,7 @@ impl ReceiveScreen {
                 let ssid = current_ssid();
                 Ok((srv, url, ssid))
             })();
-            *slot.lock().unwrap() = Some(r);
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         });
     }
 }
@@ -2168,7 +1190,7 @@ impl Screen for ReceiveScreen {
 
     fn on_tick(&mut self) -> Action {
         if matches!(self.phase, Phase::Starting) {
-            match self.setup.lock().unwrap().take() {
+            match self.setup.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(Ok((srv, url, ssid))) => {
                     self.qr = QrCode::new(url.as_bytes()).ok();
                     plog(&format!("receive: listening on {}", url));
@@ -2325,8 +1347,13 @@ impl Screen for ReceiveScreen {
 mod tests {
     use super::*;
 
+    /// The socket tests mutate process-global env (YB_SAVE_DIR / YB_SS_DIR)
+    /// and start real listeners, so they must not run concurrently.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn upload_roundtrip_and_extension_guard() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join("yb-receive-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2606,6 +1633,95 @@ mod tests {
         srv.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&ss_dir);
+    }
+
+    #[test]
+    fn lying_content_length_is_capped_not_underflowed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join("yb-receive-len-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("YB_SAVE_DIR", dir.to_str().unwrap());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut srv = ReceiveServer::start(Arc::clone(&stop)).expect("server");
+        let port = srv.port();
+
+        // Claim 1 byte, stream 100 KB. The body writer must cap the write
+        // to the declared length — before the fix `remaining -= n`
+        // underflowed (u64::MAX), the loop never ended, and the MAX_BODY
+        // ceiling was bypassable with a single connection.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        c.write_all(
+            b"POST /upload?name=onebyte.epub HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n",
+        )
+        .unwrap();
+        // The 100-continue round-trip makes the header phase provably
+        // complete, so the 1 declared byte must be satisfied by the
+        // stream-read path — where the (old) `remaining -= n` underflowed.
+        let mut interim = [0u8; 64];
+        let n = c.read(&mut interim).unwrap();
+        assert!(
+            String::from_utf8_lossy(&interim[..n]).starts_with("HTTP/1.1 100"),
+            "no 100-continue: {}",
+            String::from_utf8_lossy(&interim[..n])
+        );
+        c.write_all(&[0x42; 100 * 1024]).unwrap();
+        let mut resp = Vec::new();
+        // The declared body is satisfied and the excess is discarded with
+        // the connection; closing a socket with unread data makes the peer
+        // see RST, so accept either the response or a reset. The invariant
+        // under test is the bounded write, asserted on disk below.
+        let _ = c.read_to_end(&mut resp);
+        assert!(
+            resp.is_empty() || resp.starts_with(b"HTTP/1.1 200"),
+            "declared-1-body upload: {}",
+            String::from_utf8_lossy(&resp)
+        );
+        // Exactly the declared byte is persisted; the excess is discarded
+        // with the connection.
+        assert_eq!(std::fs::read(dir.join("onebyte.epub")).unwrap(), b"\x42");
+
+        srv.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn amazon_system_files_are_protected_from_delete_and_move() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join("yb-receive-sysfiles-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("YB_SAVE_DIR", dir.to_str().unwrap());
+        std::fs::write(dir.join("My Clippings.txt"), b"keep me").unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut srv = ReceiveServer::start(Arc::clone(&stop)).expect("server");
+        let port = srv.port();
+
+        let delete = format!(
+            "POST /api/delete?dir=&name=My%20Clippings.txt HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n"
+        );
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(delete.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(resp.starts_with(b"HTTP/1.1 400"), "delete: {}", String::from_utf8_lossy(&resp));
+        assert_eq!(std::fs::read(dir.join("My Clippings.txt")).unwrap(), b"keep me");
+
+        let mv = format!(
+            "POST /api/move?src_dir=&name=My%20Clippings.txt&dst_dir=Old HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n"
+        );
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(mv.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(resp.starts_with(b"HTTP/1.1 400"), "move: {}", String::from_utf8_lossy(&resp));
+        assert_eq!(std::fs::read(dir.join("My Clippings.txt")).unwrap(), b"keep me");
+
+        srv.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

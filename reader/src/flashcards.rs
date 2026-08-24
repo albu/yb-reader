@@ -151,7 +151,9 @@ impl FlashcardDeck {
         }
         // Atomic + fsync'd swap (ybdev::atomic): truncation here would
         // reset every card.
-        let _ = ybdev::atomic::write(FLASHCARDS_PATH, buf.as_bytes());
+        if !ybdev::atomic::write(FLASHCARDS_PATH, buf.as_bytes()) {
+            ybdev::log::plog("flashcards: failed to save deck");
+        }
     }
 
     pub fn add_word(&mut self, word: &str) {
@@ -510,7 +512,7 @@ impl Screen for FlashcardsScreen {
                 let btn_w = (w - pt(36.0) - (spacing * 3)) / 4;
 
                 for i in 0..4 {
-                    let bx = pt(18.0) + i as i32 * (btn_w + spacing);
+                    let bx = pt(18.0) + i * (btn_w + spacing);
                     let brect = Rect::new(bx, btn_y, btn_w, btn_h);
                     if brect.contains(px, py) {
                         let cur_word = self.due_queue[self.current_idx].clone();

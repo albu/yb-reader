@@ -24,11 +24,15 @@
 //! (suspend kills the association; an up-but-scanning radio drains).
 
 use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ybdev::log::plog;
 use ybdev::sysinfo;
 
 use crate::wifi;
+
+/// One heal at a time: a wedged wifid must not stack heal threads.
+static HEAL_BUSY: AtomicBool = AtomicBool::new(false);
 
 /// Pure decision, host-testable: a screen's live reason, USB power, or
 /// the Wi-Fi link being up (reachable ⇒ awake — a sleeping device
@@ -127,6 +131,9 @@ pub fn spawn() {
 /// framework owns the radio and our policy must not fight it. Off the
 /// UI thread — boot's first paint must not wait on lipc round-trips.
 pub fn boot_restore() {
+    // Reload the persisted manual-off latch before any policy reads it:
+    // the atomic starts false in a fresh process.
+    ybdev::wifi::hydrate_user_off();
     if !ybdev::sysinfo::takeover()
         || ybdev::wifi::user_off()
         || !ybdev::wifi::wifi_wanted_on_wake()
@@ -171,7 +178,7 @@ fn loop_fn() {
         crate::usbmode::tick();
         prev_vbus = vbus;
         tick = tick.wrapping_add(1);
-        if tick % 6 != 0 {
+        if !tick.is_multiple_of(6) {
             continue;
         }
         let want = desired_awake(
@@ -191,8 +198,20 @@ fn loop_fn() {
             && !ybdev::wifi::user_off()
             && wifi::wifi_state() != Some(true)
         {
-            plog("awake: wifi down during active session, healing");
-            wifi::turn_on_wifi();
+            // The heal runs on its own thread: turn_on_wifi can block up
+            // to 20 s, and a wedged wifid must not stall the policy
+            // thread's next keep_awake re-assertion (that is the lost-hold
+            // scenario this loop exists to prevent). The latch stops
+            // re-taps from stacking heals.
+            if !HEAL_BUSY.swap(true, Ordering::SeqCst) {
+                plog("awake: wifi down during active session, healing");
+                let _ = std::thread::Builder::new()
+                    .name("wifi-heal".to_string())
+                    .spawn(move || {
+                        wifi::turn_on_wifi();
+                        HEAL_BUSY.store(false, Ordering::SeqCst);
+                    });
+            }
         }
     }
 }

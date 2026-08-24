@@ -36,6 +36,14 @@ const REFRESH_PRESETS: [(&str, usize); 4] =
 pub struct SystemScreen {
     w: i32,
     h: i32,
+    /// Cached Wi-Fi state: a `lipc-get-prop` round trip per draw would
+    /// stall every repaint for ~1 s. Refreshed on entry and after the
+    /// toggle tap.
+    wifi_on: Option<bool>,
+    /// Cached screensaver count: scanning the image dirs per draw is a
+    /// wasteful flash walk. Refreshed on entry (the manager screen re-
+    /// entering re-scans).
+    ss_count: usize,
 }
 
 fn draw_box_text(p: &mut Painter, r: Rect, size_pt: f32, color: u8, text: &str) {
@@ -47,7 +55,12 @@ fn draw_box_text(p: &mut Painter, r: Rect, size_pt: f32, color: u8, text: &str) 
 
 impl SystemScreen {
     pub fn new() -> SystemScreen {
-        SystemScreen { w: 1236, h: 1648 }
+        SystemScreen {
+            w: 1236,
+            h: 1648,
+            wifi_on: None,
+            ss_count: 0,
+        }
     }
 
     fn draw_card(p: &mut Painter, r: Rect, title: &str, value: &str, sub: &str, armed: bool) {
@@ -104,6 +117,10 @@ impl Default for SystemScreen {
 
 impl Screen for SystemScreen {
     fn on_enter(&mut self) -> Action {
+        // Snapshot the slow facts (lipc round trip, dir scans) once per
+        // entry, not on every draw.
+        self.wifi_on = crate::wifi::wifi_state();
+        self.ss_count = crate::screensavers::scan().len();
         Action::RedrawFull
     }
 
@@ -155,7 +172,7 @@ impl Screen for SystemScreen {
         };
         SystemScreen::draw_card(p, Rect::new(pad, top, cw, ch), "BOOT MODE", bv, bs, os_boot);
 
-        let wifi_on = crate::wifi::wifi_state() == Some(true);
+        let wifi_on = self.wifi_on == Some(true);
         let (wv, ws) = if wifi_on {
             (
                 "On",
@@ -193,7 +210,7 @@ impl Screen for SystemScreen {
 
         // Screensaver rotation manager — copy images over USB transfer
         // mode / web manager, then pick which ones rotate (screensavers.rs).
-        let (sv, ss) = match crate::screensavers::scan().len() {
+        let (sv, ss) = match self.ss_count {
             0 => ("None yet", "Copy images, tap to manage"),
             n => (&*format!("{n} images"), "Tap to manage the rotation"),
         };
@@ -275,7 +292,7 @@ impl Screen for SystemScreen {
 
                 let r_wifi = Rect::new(pad, top + ch + gap, cw, ch);
                 if r_wifi.contains(x, y) {
-                    if crate::wifi::wifi_state() == Some(true) {
+                    if self.wifi_on == Some(true) {
                         // Pure lipc — a raw `ifconfig wlan0 down` leaves
                         // the interface administratively down and
                         // `wifid enable 1` can never bring it back
@@ -287,9 +304,11 @@ impl Screen for SystemScreen {
                             .args(["-i", "com.lab126.cmd", "wirelessEnable", "0"])
                             .status();
                         ybdev::wifi::user_turned_off();
+                        self.wifi_on = Some(false);
                     } else {
                         ybdev::wifi::user_turned_on();
                         crate::wifi::turn_on_wifi();
+                        self.wifi_on = Some(true);
                     }
                     return Action::Redraw;
                 }
@@ -387,7 +406,7 @@ impl Screen for SystemScreen {
 
                 Action::Keep
             }
-            Gesture::Swipe { dir, .. } if matches!(dir, SwipeDir::North | SwipeDir::South) => {
+            Gesture::Swipe { dir: SwipeDir::North | SwipeDir::South, .. } => {
                 Action::Pop
             }
             Gesture::TwoFingerTap => Action::Pop,

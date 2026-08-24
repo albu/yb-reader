@@ -1,6 +1,6 @@
 use mupdf::Outline;
 use ybdev::input::{Gesture, SwipeDir};
-use yui::painter::{pt, Painter, Rect};
+use yui::painter::{pt, Painter, PX, Rect};
 use yui::screen::{Action, Screen};
 
 #[derive(Debug, Clone)]
@@ -429,7 +429,7 @@ impl<F: FnMut(TocAction) -> Action> Screen for TocDialog<F> {
                 }
             }
 
-            let max_w = (w - text_x - pt(70.0) - if expandable { pt(34.0) } else { 0 }) as f32;
+            let max_w = (w - text_x - pt(70.0) - if expandable { pt(34.0) } else { 0 }) as f32 / PX;
             let title = p.truncate(9.5, &item.title, max_w);
 
             // Current chapter: filled square in the indent gutter — ● has

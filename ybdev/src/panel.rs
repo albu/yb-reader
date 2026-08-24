@@ -126,7 +126,7 @@ impl Panel {
             // Try to undo the MTK padding/doubling: the panel is square-ish
             // portrait; if height is exactly 2x and width has padding, use
             // the PW5 logical size as the drawable area.
-            if h % 2 == 0 && w >= 1236 {
+            if h.is_multiple_of(2) && w >= 1236 {
                 (1236, h / 2, h)
             } else {
                 (w, h, h)
@@ -195,22 +195,26 @@ impl Panel {
 
     /// Copy `data` (w*h grayscale bytes) into the framebuffer at (x, y).
     pub fn blit(&mut self, x: u32, y: u32, w: u32, h: u32, data: &[u8]) {
-        if data.len() < (w * h) as usize {
+        // usize math throughout: `w * h` in u32 wraps on a >4k×>1M or
+        // padded buffer, under-checking `data.len()` and slicing past the
+        // source below.
+        let (w, h) = (w as usize, h as usize);
+        if data.len() < w * h {
             return;
         }
         let stride = self.stride as usize;
         for row in 0..h {
-            let sy = (y + row) as usize;
+            let sy = (y as usize) + row;
             if sy >= self.height as usize {
                 break;
             }
             let sx = x as usize;
-            if sx + w as usize > stride {
+            if sx + w > stride {
                 continue;
             }
             let dst = sy * stride + sx;
-            let src = row as usize * w as usize;
-            self.buf_mut()[dst..dst + w as usize].copy_from_slice(&data[src..src + w as usize]);
+            let src = row * w;
+            self.buf_mut()[dst..dst + w].copy_from_slice(&data[src..src + w]);
         }
     }
 

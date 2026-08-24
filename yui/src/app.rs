@@ -33,6 +33,10 @@ pub struct App {
     /// Called with the suspend duration when the loop detects a
     /// resume-from-suspend (wall-clock gap over the poll budget).
     resume: Option<Box<dyn Fn(std::time::Duration)>>,
+    /// Polled every loop iteration: returning true winds the app down.
+    /// Lets the app observe async-signal-safe flags (a TERM/INT handoff)
+    /// from normal context instead of inside a signal handler.
+    quit_check: Option<Box<dyn Fn() -> bool>>,
 }
 
 /// A wall-clock gap this much larger than the poll budget means the SoC
@@ -67,6 +71,7 @@ impl App {
             orientation: Orientation::Portrait,
             overlay: None,
             resume: None,
+            quit_check: None,
         })
     }
 
@@ -79,6 +84,12 @@ impl App {
     /// Install the resume-from-suspend hook (gap duration handed over).
     pub fn with_resume(mut self, f: Box<dyn Fn(std::time::Duration)>) -> App {
         self.resume = Some(f);
+        self
+    }
+
+    /// Polled every loop iteration; returning true winds the app down.
+    pub fn with_quit_check(mut self, f: Box<dyn Fn() -> bool>) -> App {
+        self.quit_check = Some(f);
         self
     }
 
@@ -99,6 +110,12 @@ impl App {
         // exists to enforce.
         let mut last_input = std::time::SystemTime::now();
         while !self.stack.is_empty() {
+            // A TERM/INT flag (async-signal-safe store in a signal
+            // handler) winds the loop down here, so the app's restore
+            // runs from normal context — never inside a signal frame.
+            if self.quit_check.as_ref().is_some_and(|f| f()) {
+                break;
+            }
             let interval = self
                 .stack
                 .last()
@@ -164,11 +181,9 @@ impl App {
                     .unwrap_or(false)
                 && !ybdev::sysinfo::vbus()
                 && !ybdev::sysinfo::wifi_up()
-            {
-                if !self.apply(Action::Push(Box::new(crate::widgets::SleepScreen::new()))) {
+                && !self.apply(Action::Push(Box::new(crate::widgets::SleepScreen::new()))) {
                     break;
                 }
-            }
         }
         self.panel.refresh_full();
     }

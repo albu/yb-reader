@@ -5,3 +5,21 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+
+# Release profile for the device binary — the only place a few settings
+# must be explicit so host debug behavior and on-device release behavior
+# don't silently diverge:
+#   - overflow-checks = true: host debug builds panic on integer overflow
+#     while release (default: off) silently wrapped on the 32-bit armv7
+#     target. The known 32-bit overflow sites are fixed; any remaining one
+#     should crash loudly (recoverable via boot.sh) rather than corrupt a
+#     page render / dictionary lookup.
+#   - lto + codegen-units + strip: the device goal is "a few MB instead of
+#     a hundred"; thin LTO and a single CGU shrink the static binary.
+#   - panic stays "unwind" (the default): the parsers rely on
+#     catch_unwind, so "abort" must not be selected here.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+overflow-checks = true

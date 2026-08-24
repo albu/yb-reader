@@ -7,7 +7,6 @@
 //! dir), the web manager, or scp.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use ybdev::input::{Gesture, SwipeDir};
 use yui::painter::{pt, Painter, Rect};
@@ -42,7 +41,7 @@ pub struct ScreensaversScreen {
     per_page: usize,
 }
 
-fn is_image(p: &PathBuf) -> bool {
+fn is_image(p: &std::path::Path) -> bool {
     // Dotfiles rejected: macOS drops `._name.jpg` AppleDouble sidecars
     // (4 kB Finder metadata) on every FAT-volume copy — same
     // discipline as the library scan and the yui picker.
@@ -110,7 +109,9 @@ fn save_disabled(disabled: &HashSet<String>) {
     let path = disabled_path();
     let mut names: Vec<&str> = disabled.iter().map(String::as_str).collect();
     names.sort();
-    let _ = std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap());
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let _ = std::fs::write(&path, names.join("\n") + "\n");
 }
 

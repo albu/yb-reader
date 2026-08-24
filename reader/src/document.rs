@@ -9,6 +9,17 @@ use ybdev::log::plog;
 use ybdev::sysinfo;
 
 /// Wrapper around `mupdf::Document` to send across threads safely.
+///
+/// SAFETY: the mupdf crate (v0.7) deliberately keeps `Document` !Send —
+/// it holds a raw `*mut fz_document`, and its thread model is a
+/// per-thread `fz_context` cloned from a shared base (`fz_clone_context`),
+/// with the document refcounted (`fz_keep`) so it outlives the creating
+/// context. Soundness depends on a single invariant: a `SendDoc` is
+/// opened on the worker thread, moved to the main thread, and thereafter
+/// touched on the main thread only — never accessed from two threads
+/// simultaneously (MuPDF builds without FZ_ENABLE_MUTEX, so concurrent
+/// rendering would be a data race). Do NOT add Sync; keep every access
+/// single-threaded.
 pub struct SendDoc(pub Document);
 unsafe impl Send for SendDoc {}
 

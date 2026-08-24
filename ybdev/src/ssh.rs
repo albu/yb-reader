@@ -45,7 +45,7 @@ fn pids() -> impl Iterator<Item = i32> {
             // makes the toggle lie "on" forever (bug found on device,
             // 2026-08-17).
             let alive = fs::read_to_string(e.path().join("status"))
-                .map(|st| !st.lines().any(|l| l.starts_with("State:\tZ")))
+                .map(|st| !st.lines().any(|l| l.starts_with("State:") && l.contains('Z')))
                 .unwrap_or(false);
             alive.then(|| s.parse::<i32>().ok())?
         })

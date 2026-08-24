@@ -3,6 +3,7 @@
 //! formats incoming Assistant turns into crisp book-like pages, and renders
 //! headings, code blocks, markdown tables, bullet lists, and live tool status badges.
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::protocol::{self, Conn};
@@ -18,6 +19,31 @@ pub const AI_STREAM_PORT: u16 = 8768;
 const CONF_PATH: &str = "/mnt/us/extensions/mirror/mirror.conf";
 
 const PAD_PT: f32 = 18.0;
+
+/// One Wi-Fi bring-up per entry (on_enter spawns it off the UI thread).
+static ON_ENTER_WIFI_BUSY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// One shared (id, label, off_x, width) table per control-sheet row — the
+/// single source of truth for both `draw_sheet` and `hit_sheet`. The two
+/// used to drift (row-2 painted at pt(164) but hit from pt(170), etc.), so
+/// a tap landed on the neighbour. Taps must only register inside a drawn
+/// button, and any geometry change has exactly one place to make it.
+const SOURCE_BTNS: [(&str, &str, f32, f32); 3] = [
+    ("auto", "Auto (Latest)", 44.0, 56.0),
+    ("antigravity", "Antigravity", 104.0, 62.0),
+    ("claude", "Claude Code", 170.0, 62.0),
+];
+const TURN_BTNS: [(&str, &str, f32, f32); 3] = [
+    ("prev", "< Prev Turn", 44.0, 56.0),
+    ("next", "Next Turn >", 104.0, 56.0),
+    ("live", "Live Latest", 164.0, 58.0),
+];
+const ACT_BTNS: [(&str, &str, f32, f32); 3] = [
+    ("poll", "Poll Now", 44.0, 48.0),
+    ("clear", "Clear Ghosting", 96.0, 68.0),
+    ("done", "Done", 168.0, 42.0),
+];
 const HEADER_TOP_PT: f32 = 24.0;
 const HEADER_H_PT: f32 = 36.0;
 const FOOTER_H_PT: f32 = 28.0;
@@ -308,6 +334,9 @@ pub struct AiStreamScreen {
     pub turn_idx: Option<i32>,
     cmd_tx: Option<std::sync::mpsc::Sender<PollerCmd>>,
     msg_rx: Option<std::sync::mpsc::Receiver<PollerMsg>>,
+    /// The poller thread, joined on Drop so a re-entered screen never
+    /// leaves two pollers briefly coexisting.
+    poller: Option<std::thread::JoinHandle<()>>,
 }
 
 impl AiStreamScreen {
@@ -322,7 +351,7 @@ impl AiStreamScreen {
             let (host, port) = Self::load_config().unwrap_or((None, AI_STREAM_PORT));
             let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
             let (msg_tx, msg_rx) = std::sync::mpsc::channel();
-            let _ = spawn_poller_thread(host, port, cmd_rx, msg_tx);
+            let poller = spawn_poller_thread(host, port, cmd_rx, msg_tx);
 
             let mut s = AiStreamScreen {
                 turn: Turn::default(),
@@ -336,6 +365,7 @@ impl AiStreamScreen {
                 turn_idx: None,
                 cmd_tx: Some(cmd_tx),
                 msg_rx: Some(msg_rx),
+                poller: Some(poller),
             };
             s.repaginate();
             s
@@ -357,6 +387,7 @@ impl AiStreamScreen {
             turn_idx: None,
             cmd_tx: None,
             msg_rx: None,
+            poller: None,
         };
         s.repaginate();
         s
@@ -465,6 +496,13 @@ fn layout_blocks(
     cur_items: &mut Vec<RenderItem>,
     pages: &mut Vec<PageLayout>,
 ) {
+    // Lists and alerts recurse once per markdown nesting level; the input
+    // is attacker-controlled (any LAN server can answer the AI stream), so
+    // a few hundred KB of `> > > > …` must not exhaust the stack. Past the
+    // ceiling the nesting is dropped instead of laid out.
+    if depth > 64 {
+        return;
+    }
     for block in blocks {
         match block {
             DocBlock::Heading { level, spans } => {
@@ -584,7 +622,7 @@ fn layout_blocks(
                                         number_str: None,
                                     });
                                 }
-                                layout_blocks(&[first_block.clone()], depth + 1, pad, content_w, bottom_bound, p2_top, cur_y, cur_items, pages);
+                                layout_blocks(std::slice::from_ref(first_block), depth + 1, pad, content_w, bottom_bound, p2_top, cur_y, cur_items, pages);
                             }
                         }
 
@@ -804,14 +842,8 @@ impl AiStreamScreen {
         p.text(pad, y1 + pt(10.0), 6.5, DIM, "SOURCE");
         let btn_h = pt(15.0);
 
-        let sources = [
-            ("auto", "Auto (Latest)", pt(44.0), pt(56.0)),
-            ("antigravity", "Antigravity", pt(104.0), pt(62.0)),
-            ("claude", "Claude Code", pt(170.0), pt(62.0)),
-        ];
-
-        for (id, label, off_x, bw) in sources {
-            let r = Rect::new(pad + off_x, y1, bw, btn_h);
+        for (id, label, off_x, bw) in SOURCE_BTNS {
+            let r = Rect::new(pad + pt(off_x), y1, pt(bw), btn_h);
             let is_sel = self.source_mode == id;
             if is_sel {
                 p.rect(r, INK);
@@ -826,14 +858,8 @@ impl AiStreamScreen {
         let y2 = sheet_y + pt(48.0);
         p.text(pad, y2 + pt(10.0), 6.5, DIM, "TURNS");
         
-        let turn_btns = [
-            ("< Prev Turn", pt(44.0), pt(56.0)),
-            ("Next Turn >", pt(104.0), pt(56.0)),
-            ("Live Latest", pt(164.0), pt(58.0)),
-        ];
-
-        for (idx, (label, off_x, bw)) in turn_btns.iter().enumerate() {
-            let r = Rect::new(pad + *off_x, y2, *bw, btn_h);
+        for (idx, (_, label, off_x, bw)) in TURN_BTNS.iter().enumerate() {
+            let r = Rect::new(pad + pt(*off_x), y2, pt(*bw), btn_h);
             let is_live_active = idx == 2 && self.turn_idx.is_none();
             if is_live_active {
                 p.rect(r, 240);
@@ -848,14 +874,8 @@ impl AiStreamScreen {
         let y3 = sheet_y + pt(80.0);
         p.text(pad, y3 + pt(10.0), 6.5, DIM, "ACTIONS");
         
-        let act_btns = [
-            ("Poll Now", pt(44.0), pt(48.0)),
-            ("Clear Ghosting", pt(96.0), pt(68.0)),
-            ("Done", pt(168.0), pt(42.0)),
-        ];
-
-        for (label, off_x, bw) in act_btns {
-            let r = Rect::new(pad + off_x, y3, bw, btn_h);
+        for (_, label, off_x, bw) in ACT_BTNS {
+            let r = Rect::new(pad + pt(off_x), y3, pt(bw), btn_h);
             p.rect_outline_t(r, 1, BORDER);
             p.text(r.x + pt(6.0), r.y + pt(10.5), 7.0, INK, label);
         }
@@ -865,48 +885,46 @@ impl AiStreamScreen {
         let pad = pt(PAD_PT);
         let sheet_h = pt(118.0);
         let sheet_y = self.h - sheet_h;
+        let btn_h = pt(15.0);
 
         if y < sheet_y {
             self.sheet_open = false;
             return Action::Redraw;
         }
 
-        let y1 = sheet_y + pt(10.0);
-        let y2 = sheet_y + pt(44.0);
-        let y3 = sheet_y + pt(76.0);
+        // Same row geometry draw_sheet paints (the hit code used to run on
+        // its own set of coordinates and fell through to neighbours).
+        let y1 = sheet_y + pt(15.0);
+        let y2 = sheet_y + pt(48.0);
+        let y3 = sheet_y + pt(80.0);
 
-        // Row 1: Source (y1 .. y2)
-        if y >= y1 && y < y2 {
-            if x < pad + pt(90.0) {
-                return self.set_source("auto");
-            } else if x < pad + pt(170.0) {
-                return self.set_source("antigravity");
-            } else {
-                return self.set_source("claude");
+        for (id, _, off_x, bw) in SOURCE_BTNS {
+            if Rect::new(pad + pt(off_x), y1, pt(bw), btn_h).contains(x, y) {
+                return self.set_source(id);
             }
         }
-
-        // Row 2: Turn History (y2 .. y3)
-        if y >= y2 && y < y3 {
-            if x < pad + pt(105.0) {
-                return self.step_turn(-1);
-            } else if x < pad + pt(170.0) {
-                return self.step_turn(1);
-            } else {
-                return self.go_live();
+        for (id, _, off_x, bw) in TURN_BTNS {
+            if Rect::new(pad + pt(off_x), y2, pt(bw), btn_h).contains(x, y) {
+                return match id {
+                    "prev" => self.step_turn(-1),
+                    "next" => self.step_turn(1),
+                    _ => self.go_live(),
+                };
             }
         }
-
-        // Row 3: Actions (y3 .. bottom)
-        if y >= y3 {
-            if x < pad + pt(95.0) {
-                self.poll_now();
-                return Action::Redraw;
-            } else if x < pad + pt(175.0) {
-                return Action::RedrawFull;
-            } else {
-                self.sheet_open = false;
-                return Action::Redraw;
+        for (id, _, off_x, bw) in ACT_BTNS {
+            if Rect::new(pad + pt(off_x), y3, pt(bw), btn_h).contains(x, y) {
+                return match id {
+                    "poll" => {
+                        self.poll_now();
+                        Action::Redraw
+                    }
+                    "clear" => Action::RedrawFull,
+                    _ => {
+                        self.sheet_open = false;
+                        Action::Redraw
+                    }
+                };
             }
         }
 
@@ -925,9 +943,19 @@ impl Screen for AiStreamScreen {
 
     fn on_enter(&mut self) -> Action {
         crate::awake::screen_wants_awake(true);
-        std::thread::spawn(|| {
-            crate::wifi::turn_on_wifi();
-        });
+        // Bring Wi-Fi up off the UI thread, once per entry (a latch stops
+        // rapid re-entries from stacking heal threads), and skip it when
+        // the radio is already up.
+        if !ybdev::sysinfo::wifi_up()
+            && !ON_ENTER_WIFI_BUSY.swap(true, Ordering::SeqCst)
+        {
+            let _ = std::thread::Builder::new()
+                .name("ai-wifi".to_string())
+                .spawn(move || {
+                    crate::wifi::turn_on_wifi();
+                    ON_ENTER_WIFI_BUSY.store(false, Ordering::SeqCst);
+                });
+        }
         self.poll_now();
         Action::RedrawFull
     }
@@ -941,7 +969,14 @@ impl Screen for AiStreamScreen {
     }
 
     fn tick_interval(&self) -> Duration {
-        Duration::from_millis(500)
+        // A live connection or a running turn needs the responsive 500 ms
+        // drain; a screen that is neither (offline/idle) wakes 4× less
+        // often instead of ticking pointlessly.
+        if self.connected || self.turn.status == "running" {
+            Duration::from_millis(500)
+        } else {
+            Duration::from_secs(2)
+        }
     }
 
     fn on_tick(&mut self) -> Action {
@@ -1256,6 +1291,13 @@ impl Drop for AiStreamScreen {
     fn drop(&mut self) {
         if let Some(tx) = self.cmd_tx.take() {
             let _ = tx.send(PollerCmd::Stop);
+        }
+        // Join so the next screen entry can't spawn a second poller while
+        // this one is still winding down. The poller checks cmd_rx at
+        // least every ~1.4 s, so the join is fast unless a request is
+        // mid-flight (bounded by REQUEST_TIMEOUT).
+        if let Some(h) = self.poller.take() {
+            let _ = h.join();
         }
     }
 }

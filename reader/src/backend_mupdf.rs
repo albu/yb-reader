@@ -215,6 +215,16 @@ impl ReaderBackend for PdfBackend {
         };
 
         let gray = render_page(doc.as_ref(), self.page_no, self.sub_idx, settings, vw, vh);
+        if gray.is_none() {
+            // A None here is a mupdf failure (load_page / to_pixmap), not
+            // an empty page — the latter renders as a white buffer. A
+            // corrupt PDF must be distinguishable from a blank one in the
+            // log instead of silently showing a blank page.
+            ybdev::log::plog(&format!(
+                "render: page {} sub {} produced no pixmap (mupdf failure)",
+                self.page_no, self.sub_idx
+            ));
+        }
         self.sub_box_count = settings.split.sub_boxes().len().max(1);
 
         let mut words = Vec::new();

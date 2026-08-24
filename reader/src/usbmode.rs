@@ -243,11 +243,10 @@ pub fn tick() {
             st.healed = false;
         }
     } else {
-        if ms_modules_loaded_live() {
-            if remove_modules() {
+        if ms_modules_loaded_live()
+            && remove_modules() {
                 plog("usb: mass-storage modules came back — removed again");
             }
-        }
         let udcs = bound_udcs();
         let bound = !udcs.is_empty();
         let mounted = mount_spec().is_some();

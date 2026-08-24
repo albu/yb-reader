@@ -2,7 +2,9 @@
 //! Background Whitening, Night Mode, and Layout).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum SplitPreset {
+    #[default]
     FitPage,
     Horizontal2, // 2-split: Top half -> Bottom half (Landscape)
     Horizontal3, // 3-split: Top -> Mid -> Bottom (Landscape)
@@ -10,11 +12,6 @@ pub enum SplitPreset {
     Grid4,       // 4-split: 2 columns x 2 rows (Landscape)
 }
 
-impl Default for SplitPreset {
-    fn default() -> Self {
-        SplitPreset::FitPage
-    }
-}
 
 impl SplitPreset {
     #[allow(dead_code)]
@@ -30,18 +27,15 @@ impl SplitPreset {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ContrastMode {
+    #[default]
     Normal,       // Default 1:1 grayscale
     BoldText,     // Darkens anti-aliased font edges by ~25%
     HighContrast, // Strong S-curve for crisp punchy text
     ScanClean,    // Aggressive black boost + paper whitening for scans
 }
 
-impl Default for ContrastMode {
-    fn default() -> Self {
-        ContrastMode::Normal
-    }
-}
 
 impl ContrastMode {
     #[allow(dead_code)]
@@ -345,7 +339,7 @@ impl ReaderSettings {
                 ContrastMode::ScanClean => {
                     // Aggressive thresholding for scans
                     if val < 190.0 {
-                        val = val * 0.6;
+                        val *= 0.6;
                     } else {
                         val = 255.0;
                     }

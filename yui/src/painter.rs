@@ -325,6 +325,7 @@ impl<'a> Painter<'a> {
     /// buffer at (x, y). The reader's page cache is stride==width while the
     /// framebuffer is stride 1248 for 1236 visible px — the copy is per-row.
     pub fn blit_gray(&mut self, x: i32, y: i32, w: i32, h: i32, src: &[u8], src_stride: usize) {
+        let mut dropped = 0;
         for row in 0..h {
             let dy = y + row;
             if dy < 0 || dy >= self.h {
@@ -341,7 +342,25 @@ impl<'a> Painter<'a> {
             let s = row as usize * src_stride + skip;
             if s + count <= src.len() && dst + count <= self.canvas.len() {
                 self.canvas[dst..dst + count].copy_from_slice(&src[s..s + count]);
+            } else {
+                dropped += 1;
             }
+        }
+        // A dropped row means the source buffer didn't match the requested
+        // w×h (a stale snapshot from before an orientation flip, or a
+        // backend bug). Silent before, it showed as a garbage stripe.
+        if dropped > 0 {
+            ybdev::log::plog(&format!(
+                "painter: blit_gray dropped {} of {} rows ({}x{} @{},{} — src {}B stride {})",
+                dropped,
+                h,
+                w,
+                h,
+                x,
+                y,
+                src.len(),
+                src_stride
+            ));
         }
     }
 }

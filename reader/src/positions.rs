@@ -31,7 +31,11 @@ pub fn global_refresh_interval() -> usize {
 }
 
 pub fn set_global_refresh_interval(val: usize) {
-    let _ = std::fs::write(global_store_path(), format!("{}\n", val));
+    // Atomic + fsync'd: the other stores route through ybdev::atomic; a
+    // plain in-place write could leave a torn value after a crash.
+    if !ybdev::atomic::write(global_store_path(), format!("{}\n", val).as_bytes()) {
+        ybdev::log::plog("positions: failed to save refresh interval");
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -252,7 +256,9 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
         .collect();
     lines.sort();
     // Atomic + fsync'd swap — contract and rationale in ybdev::atomic.
-    let _ = ybdev::atomic::write(path, (lines.join("\n") + "\n").as_bytes());
+    if !ybdev::atomic::write(path, (lines.join("\n") + "\n").as_bytes()) {
+        ybdev::log::plog(&format!("positions: failed to save progress store {}", path));
+    }
 }
 
 /// Saved pos for a book (page 0, sub 0 when never opened).

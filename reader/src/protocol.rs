@@ -128,17 +128,18 @@ impl Conn {
         path: &str,
         sink: &mut dyn FnMut(&[u8]) -> bool,
     ) -> Result<Resp, Stage> {
-        if self.stream.is_none() {
-            if !self.open() {
+        if self.stream.is_none()
+            && !self.open() {
                 return Err(Stage::Connect);
             }
-        }
         let req = format!(
             "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
             method, path, self.host, self.port
         );
         {
-            let s = self.stream.as_mut().unwrap();
+            let Some(s) = self.stream.as_mut() else {
+                return Err(Stage::Connect);
+            };
             if s.write_all(req.as_bytes()).is_err() {
                 self.close();
                 return Err(Stage::Send);
@@ -230,7 +231,11 @@ impl Conn {
                     self.close();
                     return Err(Stage::Body);
                 }
-                match self.stream.as_mut().unwrap().read(&mut chunk[..want]) {
+                let Some(s) = self.stream.as_mut() else {
+                    self.close();
+                    return Err(Stage::Body);
+                };
+                match s.read(&mut chunk[..want]) {
                     Ok(0) => {
                         self.close();
                         return Err(Stage::Body);
@@ -288,18 +293,23 @@ impl Conn {
                     "request budget exhausted",
                 ));
             }
-            let _ = self
-                .stream
-                .as_mut()
-                .unwrap()
-                .set_read_timeout(Some((d - now).min(REQUEST_TIMEOUT)));
+            let Some(s) = self.stream.as_mut() else {
+                return Ok(());
+            };
+            let _ = s.set_read_timeout(Some((d - now).min(REQUEST_TIMEOUT)));
         }
         Ok(())
     }
 
     fn refill(&mut self) -> std::io::Result<()> {
         self.budget_gate()?;
-        let n = self.stream.as_mut().unwrap().read(&mut self.buf)?;
+        let Some(s) = self.stream.as_mut() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "no connection",
+            ));
+        };
+        let n = s.read(&mut self.buf)?;
         if n == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -367,7 +377,7 @@ pub fn discover(timeout: Duration) -> Option<(String, u16)> {
                     let text = String::from_utf8_lossy(&buf[..n]);
                     let port = text
                         .strip_prefix("ybmirror")
-                        .and_then(|rest| rest.trim().split_whitespace().next())
+                        .and_then(|rest| rest.split_whitespace().next())
                         .and_then(|p| p.parse::<u16>().ok())
                         .unwrap_or(DEFAULT_PORT);
                     return Some((src.ip().to_string(), port));

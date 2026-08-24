@@ -50,6 +50,16 @@ pub struct YreadBackend {
     err: Option<String>,
 }
 
+/// Pack a (chapter, char offset) into the single `sub_idx` field the
+/// positions store persists. The low 1M bits hold the char offset; a
+/// chapter longer than that cannot be represented — clamp to the low bits
+/// so a giant chapter degrades to "near its end" instead of silently
+/// colliding with the next chapter's low bits on restore (restoring into
+/// the wrong chapter was the old silent behavior).
+pub fn pack_yread_sub(chapter: usize, char_offset: usize) -> usize {
+    chapter * 1_000_000 + char_offset.min(999_999)
+}
+
 impl YreadBackend {
     pub fn new(
         path: PathBuf,
@@ -184,7 +194,7 @@ impl YreadBackend {
         let global_p =
             self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
         self.page_no = global_p;
-        self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
+        self.sub_idx = pack_yread_sub(self.ychap_idx, self.y_char_offset);
     }
 
     fn yread_land_at_sub(&mut self, sub: usize, vw: u32, vh: u32, settings: &ReaderSettings) {
@@ -202,7 +212,7 @@ impl YreadBackend {
         let book_arc = Arc::clone(yb);
         let fonts = Arc::clone(worker_fonts);
         let shape_cache = Arc::clone(&self.ycache);
-        let cfg = cfg.clone();
+        let cfg = *cfg;
         let cur = self.ychap_idx;
         let n = book_arc.chapters.len();
 
@@ -331,9 +341,7 @@ impl YreadBackend {
                         self.yreflow = false;
                         plog("yread: reflow swap (async, UI never froze)");
                     }
-                    if !self.ychap_cache.contains_key(&ch_idx) {
-                        self.ychap_cache.insert(ch_idx, (pt, layouts));
-                    }
+                    self.ychap_cache.entry(ch_idx).or_insert((pt, layouts));
                     if ch_idx == self.ychap_idx {
                         current_arrived = true;
                         plog(&format!(
@@ -486,7 +494,7 @@ impl ReaderBackend for YreadBackend {
                 let global_p =
                     self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
                 self.page_no = global_p;
-                self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
+                self.sub_idx = pack_yread_sub(self.ychap_idx, self.y_char_offset);
                 PageTurnResult::Changed { redraw_full: false }
             } else {
                 let total_ch = self.ybook.as_ref().map(|b| b.chapters.len()).unwrap_or(0);
@@ -508,7 +516,7 @@ impl ReaderBackend for YreadBackend {
                 let global_p =
                     self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
                 self.page_no = global_p;
-                self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
+                self.sub_idx = pack_yread_sub(self.ychap_idx, self.y_char_offset);
                 PageTurnResult::Changed { redraw_full: false }
             } else if self.ychap_idx > 0 {
                 self.yread_land_at(self.ychap_idx - 1, usize::MAX, vw, vh, settings);
@@ -653,7 +661,7 @@ impl ReaderBackend for YreadBackend {
         let global_p =
             self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
         self.page_no = global_p;
-        self.sub_idx = self.ychap_idx * 1_000_000 + (self.y_char_offset % 1_000_000);
+        self.sub_idx = pack_yread_sub(self.ychap_idx, self.y_char_offset);
 
         let t0 = std::time::Instant::now();
         let mut gray = vec![255u8; (vw * vh) as usize];

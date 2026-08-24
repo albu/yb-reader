@@ -14,6 +14,11 @@ use crate::model::{
     MAX_ENTRY_BYTES, MAX_NEST_DEPTH,
 };
 
+/// Ceiling for one embedded `<binary>` image (base64 text before decode).
+/// Legit FB2 covers sit at a couple of MB; a crafted base64 blob must not
+/// accumulate unboundedly on the RAM-scarce device.
+const MAX_BINARY_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParserState {
     None,
@@ -461,13 +466,17 @@ impl<R: BufRead> Fb2Parser<R> {
             }
             "binary" => {
                 if let Some(id) = self.binary_id.take() {
-                    let clean_base64: String = self
-                        .binary_buf
-                        .chars()
-                        .filter(|c| !c.is_whitespace())
-                        .collect();
-                    if let Ok(decoded) = BASE64_STANDARD.decode(clean_base64) {
-                        self.book.add_image(id, decoded);
+                    // The cap is enforced at accumulation; decode only
+                    // what stayed within it.
+                    if self.binary_buf.len() <= MAX_BINARY_BYTES {
+                        let clean_base64: String = self
+                            .binary_buf
+                            .chars()
+                            .filter(|c| !c.is_whitespace())
+                            .collect();
+                        if let Ok(decoded) = BASE64_STANDARD.decode(clean_base64) {
+                            self.book.add_image(id, decoded);
+                        }
                     }
                 }
                 self.pop_state();
@@ -493,7 +502,12 @@ impl<R: BufRead> Fb2Parser<R> {
                 self.book.meta.language.push_str(raw_text.trim());
             }
             ParserState::InBinary => {
-                self.binary_buf.push_str(raw_text);
+                // Base64 accumulates at ~4/3x the decoded size, plus the
+                // decoded Vec on top; cap it so a crafted `<binary>` can't
+                // grow the buffer without bound.
+                if self.binary_buf.len() + raw_text.len() <= MAX_BINARY_BYTES {
+                    self.binary_buf.push_str(raw_text);
+                }
             }
             _ => {
                 // Only collect text when actively inside a paragraph, title, or note
@@ -592,8 +606,11 @@ pub fn parse_fb2(data: &[u8]) -> Result<Book, String> {
     }
 }
 
-/// Parse an FB2 / FB2.ZIP file from disk, streaming — no whole-file read
-/// (a 4MB novel never materializes as a Vec).
+/// Parse an FB2 / FB2.ZIP file from disk, streaming for the plain-FB2
+/// path (no whole-file read — a 4MB novel never materializes as a Vec).
+/// The zip path reads the matching entry bounded by [`MAX_ENTRY_BYTES`]:
+/// a bomb entry must fail the parse, not OOM the device (same discipline
+/// as [`parse_fb2`]).
 pub fn parse_fb2_path(path: &std::path::Path) -> Result<Book, String> {
     let mut magic = [0u8; 4];
     let is_zip = match std::fs::File::open(path) {
@@ -608,7 +625,13 @@ pub fn parse_fb2_path(path: &std::path::Path) -> Result<Book, String> {
                 .by_index(i)
                 .map_err(|e| format!("Zip file error: {:?}", e))?;
             if file.name().ends_with(".fb2") || file.name().ends_with(".xml") {
-                let parser = Fb2Parser::new(std::io::BufReader::new(file));
+                let entry_name = file.name().to_string();
+                let xml_data = read_capped(file, MAX_ENTRY_BYTES)
+                    .map_err(|e| format!("Read zip entry error: {:?}", e))?;
+                if over_cap(xml_data.len(), MAX_ENTRY_BYTES) {
+                    return Err(format!("Zip entry '{}' too large", entry_name));
+                }
+                let parser = Fb2Parser::new(Cursor::new(xml_data));
                 return parser.parse();
             }
         }

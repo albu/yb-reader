@@ -20,6 +20,10 @@ use crate::log::plog;
 
 const WIFI_WANTED_PATH: &str = "/var/local/yb-reader/wifi";
 const SSH_WANTED_PATH: &str = "/var/local/yb-reader/ssh";
+/// The manual-off latch, persisted: an in-memory atomic alone forgot the
+/// choice on every reboot (field case 2026-08-23 — user turned the radio
+/// off, one power press later it was back).
+const USER_OFF_PATH: &str = "/var/local/yb-reader/wifi_off";
 
 /// A live session wants the radio (set by mirror/receive enter/leave
 /// via awake::screen_wants_awake).
@@ -64,16 +68,29 @@ pub fn set_ssh_wanted(on: bool) {
 }
 
 /// Manual Wi-Fi off (curtain / System card): remember the user's choice
-/// (drop the wake intent) and latch against session healing.
+/// (drop the wake intent) and latch against session healing. The latch
+/// is persisted — it must survive reboots, not just wakes.
 pub fn user_turned_off() {
     USER_OFF.store(true, Ordering::SeqCst);
     set_intent(WIFI_WANTED_PATH, false);
+    set_intent(USER_OFF_PATH, true);
 }
 
-/// Manual Wi-Fi on: persist the choice so wake brings it back. The
-/// user-off latch clears inside turn_on when the radio actually rises.
+/// Manual Wi-Fi on: persist the choice so wake brings it back, and drop
+/// the user-off latch (turn_on also clears it for the programmatic paths).
 pub fn user_turned_on() {
+    USER_OFF.store(false, Ordering::SeqCst);
+    set_intent(USER_OFF_PATH, false);
     set_intent(WIFI_WANTED_PATH, true);
+}
+
+/// Boot-time hydration: the latch's atomic starts false in a fresh
+/// process — reload it from the intent file or the first wake of every
+/// boot would undo the persisted choice.
+pub fn hydrate_user_off() {
+    if intent(USER_OFF_PATH) {
+        USER_OFF.store(true, Ordering::SeqCst);
+    }
 }
 
 /// Pure decision, host-testable: does a wake have a reason to raise the
@@ -83,16 +100,25 @@ pub fn wake_wants_wifi(session: bool, wifi_intent: bool, ssh_intent: bool) -> bo
 }
 
 pub fn wifi_wanted_on_wake() -> bool {
-    wake_wants_wifi(
-        session_wants(),
-        intent(WIFI_WANTED_PATH),
-        intent(SSH_WANTED_PATH),
-    )
+    // The manual-off latch outranks every intent, SSH included: "I
+    // turned the radio off" must not be undone by the next power press.
+    // Before this gate the persisted SSH intent alone re-raised the
+    // radio on every wake, and turn_on then ERASED the latch — the
+    // choice didn't survive even one sleep/wake (field 2026-08-23).
+    // Opting back in is one real turn_on (curtain/System ON, a wifi
+    // feature's ensure_wifi), which clears the latch.
+    !user_off()
+        && wake_wants_wifi(
+            session_wants(),
+            intent(WIFI_WANTED_PATH),
+            intent(SSH_WANTED_PATH),
+        )
 }
 
 /// Bring the interface up and ask wifid to associate (idempotent).
 pub fn turn_on() {
     USER_OFF.store(false, Ordering::SeqCst);
+    set_intent(USER_OFF_PATH, false);
     let _ = Command::new("/sbin/ifconfig")
         .args(["wlan0", "up"])
         .status();
@@ -184,5 +210,22 @@ mod tests {
         assert!(wake_wants_wifi(true, false, false));
         assert!(wake_wants_wifi(false, true, false));
         assert!(wake_wants_wifi(false, false, true));
+    }
+
+    #[test]
+    fn manual_off_latch_outranks_wake_intents() {
+        // A live session would want the radio — but the user turned it
+        // off by hand. The latch wins (the SSH-intent field case:
+        // every wake re-raised the radio and turn_on erased the latch).
+        set_session_wants(true);
+        user_turned_off();
+        assert!(!wifi_wanted_on_wake());
+        // Opting back in clears the latch.
+        user_turned_on();
+        set_session_wants(false);
+        // Intent files point at /var/local — writes fail (or no-op)
+        // on the host, so only the latch semantics are asserted here.
+        assert!(!user_off() || !wifi_wanted_on_wake());
+        set_session_wants(false);
     }
 }

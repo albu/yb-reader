@@ -13,7 +13,7 @@ pub struct Font {
 
 impl Font {
     pub fn load() -> Result<Font, String> {
-        let font = DFont::from_bytes(NOTO.to_vec(), FontSettings::default())
+        let font = DFont::from_bytes(NOTO, FontSettings::default())
             .map_err(|e| format!("font parse: {}", e))?;
         Ok(Font { font })
     }
@@ -58,13 +58,13 @@ impl Font {
         let mut pen_x = x as f32;
         for ch in text.chars() {
             let (metrics, cov) = self.font.rasterize(ch, size);
-            let gx = pen_x.round() as i32 + metrics.xmin as i32;
+            let gx = pen_x.round() as i32 + metrics.xmin;
             // fontdue's ymin is the bitmap's BOTTOM relative to the
             // baseline (negative = descender below it: 'A'=0, 'a'=-1,
             // 'g'/'y'=-7 at 26px). Top row = baseline - ymin - height;
             // the old `y - height + ymin` flipped the sign and floated
             // descenders ~14px above the line.
-            let gy = y - metrics.ymin as i32 - metrics.height as i32;
+            let gy = y - metrics.ymin - metrics.height as i32;
             if gx >= 0 && gy >= 0 {
                 for row in 0..metrics.height {
                     let by = gy + row as i32;

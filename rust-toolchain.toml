@@ -1,3 +1,4 @@
 [toolchain]
-channel = "stable"
-
+# Pinned for reproducible builds: the exact stable that produced the
+# current binaries. `rustup` auto-installs it if absent.
+channel = "1.96.0"

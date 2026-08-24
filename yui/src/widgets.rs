@@ -228,6 +228,12 @@ fn batt_stats() -> String {
     )
 }
 
+impl Default for SleepScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SleepScreen {
     pub fn new() -> SleepScreen {
         let fl = ybdev::frontlight::Frontlight::open().ok();

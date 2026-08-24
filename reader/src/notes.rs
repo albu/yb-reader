@@ -55,10 +55,12 @@ pub fn save(book: &str, v: &[Highlight]) {
     for h in v {
         s.push_str(&format!("{}\t{}\t{}\n", h.page, h.ts, h.text));
     }
-    let p = path_for(book);
-    let tmp = format!("{}.tmp", p);
-    if std::fs::write(&tmp, &s).is_ok() {
-        let _ = std::fs::rename(&tmp, &p);
+    // Atomic + fsync'd swap: a crash mid-highlight must cost at most the
+    // previous save, never a truncated store. `add()`/`remove()` only
+    // report dedup; a failed write is logged here (it was silently
+    // dropped before, while the underline still got drawn).
+    if !ybdev::atomic::write(path_for(book), s.as_bytes()) {
+        ybdev::log::plog(&format!("notes: failed to save highlights for {}", book));
     }
 }
 

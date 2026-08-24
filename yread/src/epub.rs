@@ -300,14 +300,22 @@ impl<R: Read + Seek> EpubParser<R> {
     }
 
     fn parse_xhtml_item(&mut self, href: &str) -> Result<(), String> {
-        let xhtml_content = match self.read_file_to_string(href) {
-            Ok(c) => c,
-            Err(_) => return Ok(()), // Skip missing spine files gracefully
-        };
-
         let chap_idx = self.book.chapters.len() + 1;
         let mut chapter = Chapter::new(format!("ch_{}", chap_idx), format!("Chapter {}", chap_idx));
         chapter.href = href.to_string();
+
+        let xhtml_content = match self.read_file_to_string(href) {
+            Ok(c) => c,
+            Err(_e) => {
+                // A missing/non-UTF-8 spine item must still land a
+                // placeholder chapter: TOC entries resolve chapters by
+                // href, and skipping one silently shifts every later
+                // item's index — a blank page beats an unreadable book
+                // (same contract as the parse_failed branch below).
+                self.book.chapters.push(chapter);
+                return Ok(());
+            }
+        };
 
         let mut reader = Reader::from_str(&xhtml_content);
         reader.config_mut().trim_text(false);
@@ -442,7 +450,7 @@ impl<R: Read + Seek> EpubParser<R> {
                         });
                         current_style.align = block_align;
                     } else if n.len() == 2
-                        && n[0].to_ascii_lowercase() == b'h'
+                        && n[0].eq_ignore_ascii_case(&b'h')
                         && (n[1] >= b'1' && n[1] <= b'6')
                         || n.eq_ignore_ascii_case(b"figcaption")
                     {
@@ -596,7 +604,7 @@ impl<R: Read + Seek> EpubParser<R> {
                             });
                         }
                     } else if n.len() == 2
-                        && n[0].to_ascii_lowercase() == b'h'
+                        && n[0].eq_ignore_ascii_case(&b'h')
                         && (n[1] >= b'1' && n[1] <= b'6')
                         || n.eq_ignore_ascii_case(b"figcaption")
                     {

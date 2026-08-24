@@ -17,10 +17,12 @@ const MAGIC: &[u8; 8] = b"YBVOC01\0";
 static DB: OnceLock<Option<VocabDb>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum AnnotationStyle {
     /// Small superscript definition directly above the word
     Interlinear,
     /// Clean 1-2 line footer list at the bottom of the page
+    #[default]
     Margin,
     /// Subtle dotted underline under words on the frontier; tap to expand
     DottedUnderline,
@@ -28,11 +30,6 @@ pub enum AnnotationStyle {
     Off,
 }
 
-impl Default for AnnotationStyle {
-    fn default() -> Self {
-        AnnotationStyle::Margin
-    }
-}
 
 /// An entry looked up from the lexical database.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +85,13 @@ impl VocabDb {
             return None;
         }
 
+        // Each record is a fixed 20-byte index entry. Clamp `count` to the
+        // index region so `16 + mid * 20` in the binary search can never
+        // overflow on 32-bit (`usize` = u32 on armv7) and land back inside
+        // the buffer — a corrupt/edited vocab.bin must degrade to fewer
+        // entries, never silently wrong definitions.
+        let count = count.min((strings_offset.saturating_sub(16)) / 20);
+
         Some(VocabDb {
             data,
             count,
@@ -109,7 +113,7 @@ impl VocabDb {
         // search candidate lemmas to populate or find definitions.
         if entry
             .as_ref()
-            .map_or(true, |e| e.gloss_en.is_empty() || e.gloss_ru.is_empty())
+            .is_none_or(|e| e.gloss_en.is_empty() || e.gloss_ru.is_empty())
         {
             for lemma in generate_lemmas(&clean) {
                 if let Some(lem_entry) = self.lookup_exact(&lemma) {

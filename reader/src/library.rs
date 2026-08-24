@@ -82,7 +82,21 @@ pub fn book_meta(path: &Path) -> Option<(String, String)> {
     match ext.as_str() {
         "epub" => {
             // Metadata-only: container.xml + OPF, never a spine document.
-            if let Ok(meta) = yread::epub::EpubParser::open_metadata(path) {
+            // Same contract as the FB2 branch below: a malformed archive
+            // can panic inside the parser, so the scan must catch it and
+            // fall back to filename-only metadata instead of unwinding
+            // out of HomeScreen.
+            let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                yread::epub::EpubParser::open_metadata(path)
+            }))
+            .unwrap_or_else(|p| {
+                ybdev::log::plog(&format!(
+                    "epub meta parse panicked: {}",
+                    crate::backend::panic_message(&p)
+                ));
+                Err(String::new())
+            });
+            if let Ok(meta) = parsed {
                 let title = sanitize(&meta.title);
                 if usable_title(&title) {
                     let author = sanitize(&meta.authors.join(", "));

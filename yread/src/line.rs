@@ -173,7 +173,7 @@ pub fn break_paragraph_lines_streaming(
         let run_size = base_font_size * run.style.size_mult;
         let mut byte_offset = run.start;
 
-        for part in run_text.split_inclusive(|c: char| c == ' ' || c == '\n') {
+        for part in run_text.split_inclusive([' ', '\n']) {
             let trailing_nl = part.ends_with('\n');
             let has_trailing_space = part.ends_with(' ') || trailing_nl;
             let word_str = if has_trailing_space {

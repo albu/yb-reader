@@ -29,6 +29,12 @@ fn near(a: f32, b: f32) -> bool {
 }
 
 /// Compute a safe filesystem cache key from book filename.
+///
+/// The sanitized characters alone lose identity: "a b.epub" and "a_b.epub"
+/// (or two distinct CJK titles) map to the same string and would serve
+/// each other's cached page. An FNV identity hash of the original name
+/// breaks the collision — the filename keeps readability, the hash
+/// guarantees uniqueness.
 pub fn book_cache_key(book_name: &str) -> String {
     let mut s = String::new();
     for c in book_name.chars() {
@@ -41,7 +47,7 @@ pub fn book_cache_key(book_name: &str) -> String {
     if s.is_empty() {
         s = "default".to_string();
     }
-    s
+    format!("{}_{:016x}", s, ybdev::img::fnv1a(book_name.as_bytes()))
 }
 
 pub fn cache_file_path_at(dir: &str, book_name: &str, page_no: usize, sub_idx: usize) -> PathBuf {
@@ -232,7 +238,7 @@ pub fn prune_cache_dir(dir: &str) {
 
     if files.len() > MAX_CACHED_FILES {
         // Sort descending by modification time (newest first)
-        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files.sort_by_key(|b| std::cmp::Reverse(b.1));
         // Remove excess older files
         for (path, _) in &files[MAX_CACHED_FILES..] {
             let _ = fs::remove_file(path);
