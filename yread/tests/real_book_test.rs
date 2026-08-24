@@ -28,7 +28,7 @@ fn test_render_real_sample_book() {
     let book = parse_epub(&data).expect("parse sample epub");
     let parse_time = t1.elapsed();
 
-    println!("=== SAMPLE EPUB Parse Info ===");
+    println!("=== Sample Book EPUB Parse Info ===");
     println!("File size: {} MB", data.len() / (1024 * 1024));
     println!("File read time: {:?}", read_time);
     println!("Book parse time: {:?}", parse_time);

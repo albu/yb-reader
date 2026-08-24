@@ -360,8 +360,7 @@ mod tests {
     use crate::split::{SplitConfig, SplitPreset};
     use mupdf::TextPageFlags;
 
-    const PDF: &str =
-        "/tmp/sample_book.pdf";
+    const PDF: &str = "/tmp/sample_book.pdf";
 
     #[test]
     fn test_render_subbox_portrait() {
@@ -713,7 +712,7 @@ mod lab {
 
     // Host-only render lab: set YB_LAB=1, cargo test lab -- --nocapture.
     // Compares font-weight CSS strategies, @font-face, and text AA on
-    // the real Publisher epub; writes /tmp/lab_*.raw for PNG wrapping.
+    // the real epub; writes /tmp/lab_*.raw for PNG wrapping.
     #[test]
     fn lab_css_variants() {
         if std::env::var("YB_LAB").is_err() {

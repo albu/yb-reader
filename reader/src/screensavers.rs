@@ -24,7 +24,14 @@ const DIM: u8 = 110;
 const INK: u8 = 0;
 
 /// Same dirs, same order, as yui's picker — this screen manages what
-/// that code draws. The Mac path is the host-side dev fixture.
+/// that code draws. Device builds carry only the on-device dirs; debug
+/// builds add a host-side dev fixture dir.
+#[cfg(not(debug_assertions))]
+const DIRS: [&str; 2] = [
+    "/mnt/us/screensavers",
+    "/mnt/us/extensions/reader/screensavers",
+];
+#[cfg(debug_assertions)]
 const DIRS: [&str; 3] = [
     "/mnt/us/screensavers",
     "/mnt/us/extensions/reader/screensavers",

@@ -1059,7 +1059,7 @@ mod save_guard_tests {
         // Parse landed: ready flips true, but the landing chapter is
         // still in the background paginator and total_pages() is the
         // placeholder 1. save_progress must refuse in this window —
-        // entering SAMPLE and exiting during "Laying out…" used to record
+        // entering a book and exiting during "Laying out…" used to record
         // "page 0 of 1" over a real reading position.
         let book = yread::txt::parse_txt_bytes(b"one\n\ntwo\n", "T").unwrap();
         b.ybook = Some(Arc::new(book));

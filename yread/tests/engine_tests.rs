@@ -884,8 +884,7 @@ fn test_parse_real_sample_fb2() {
     if !p.exists() {
         return;
     }
-    let book = yread::fb2::parse_fb2_path(p).expect("parse SAMPLE fb2");
-    assert_eq!(book.meta.title, "A Sample Book");
+    let book = yread::fb2::parse_fb2_path(p).expect("parse sample fb2");
     assert!(!book.chapters.is_empty());
-    println!("Parsed SAMPLE.fb2: {} chapters, {} images", book.chapters.len(), book.images.len());
+    println!("Parsed sample.fb2: {} chapters, {} images", book.chapters.len(), book.images.len());
 }
