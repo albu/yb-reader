@@ -395,31 +395,31 @@ pub fn detect_even_odd_margins(doc: &Document, cur_page: usize) -> Option<(f32, 
         return None;
     }
 
-    let mut min_even_l = f32::MAX;
-    let mut min_even_r = f32::MAX;
+    let mut min_outer = f32::MAX;
+    let mut min_inner = f32::MAX;
     let mut min_t = f32::MAX;
     let mut min_b = f32::MAX;
 
     for (ml, mt, mr, mb) in &even_samples {
-        min_even_l = min_even_l.min(*ml);
-        min_even_r = min_even_r.min(*mr);
+        min_outer = min_outer.min(*ml);
+        min_inner = min_inner.min(*mr);
         min_t = min_t.min(*mt);
         min_b = min_b.min(*mb);
     }
 
     for (ml, mt, mr, mb) in &odd_samples {
-        // Odd page's left corresponds to even page's right; odd page's right corresponds to even page's left
-        min_even_r = min_even_r.min(*ml);
-        min_even_l = min_even_l.min(*mr);
+        // On odd pages: Left is inner margin (spine), Right is outer margin
+        min_inner = min_inner.min(*ml);
+        min_outer = min_outer.min(*mr);
         min_t = min_t.min(*mt);
         min_b = min_b.min(*mb);
     }
 
-    if min_even_l == f32::MAX {
-        min_even_l = min_even_r;
+    if min_outer == f32::MAX {
+        min_outer = min_inner;
     }
-    if min_even_r == f32::MAX {
-        min_even_r = min_even_l;
+    if min_inner == f32::MAX {
+        min_inner = min_outer;
     }
     if min_t == f32::MAX {
         min_t = 0.0;
@@ -428,7 +428,7 @@ pub fn detect_even_odd_margins(doc: &Document, cur_page: usize) -> Option<(f32, 
         min_b = 0.0;
     }
 
-    Some((min_even_l, min_t, min_even_r, min_b))
+    Some((min_outer, min_t, min_inner, min_b))
 }
 
 /// Rasterize (page, sub_idx) to visual-sized grayscale over the shared
