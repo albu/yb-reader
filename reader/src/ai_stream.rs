@@ -176,12 +176,14 @@ pub enum PollerMsg {
 fn spawn_poller_thread(
     initial_host: Option<String>,
     port: u16,
+    secret: Option<String>,
     cmd_rx: std::sync::mpsc::Receiver<PollerCmd>,
     msg_tx: std::sync::mpsc::Sender<PollerMsg>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut host = initial_host;
         let mut conn: Option<Conn> = None;
+        let secret = secret;
         let mut last_rev: u64 = 0;
         let mut current_turn_idx: Option<i32> = None;
         let mut fail_count: u32 = 0;
@@ -199,6 +201,7 @@ fn spawn_poller_thread(
                 Ok(PollerCmd::SetSource(mode)) => {
                     if let Some(h) = &host {
                         let mut temp_conn = Conn::new(h, port);
+                        temp_conn.set_secret(secret.clone());
                         let path = format!("/source?set={}", mode);
                         let _ = temp_conn.request("POST", &path, &mut |_| true);
                         current_turn_idx = None;
@@ -218,6 +221,7 @@ fn spawn_poller_thread(
                     };
                     if let Some(h) = &host {
                         let mut temp_conn = Conn::new(h, port);
+                        temp_conn.set_secret(secret.clone());
                         let path = format!("/turn?idx={}", target_idx);
                         let mut body = Vec::new();
                         if let Ok(resp) = temp_conn.request("GET", &path, &mut |chunk| {
@@ -283,6 +287,7 @@ fn spawn_poller_thread(
 
             if !ok {
                 let mut fresh_conn = Conn::new(&current_host, port);
+                fresh_conn.set_secret(secret.clone());
                 body.clear();
                 if let Ok(resp) = fresh_conn.request("GET", "/live", &mut |chunk| {
                     body.extend_from_slice(chunk);
@@ -351,7 +356,13 @@ impl AiStreamScreen {
             let (host, port) = Self::load_config().unwrap_or((None, AI_STREAM_PORT));
             let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
             let (msg_tx, msg_rx) = std::sync::mpsc::channel();
-            let poller = spawn_poller_thread(host, port, cmd_rx, msg_tx);
+            let poller = spawn_poller_thread(
+                host,
+                port,
+                ybdev::config::read(CONF_PATH).secret,
+                cmd_rx,
+                msg_tx,
+            );
 
             let mut s = AiStreamScreen {
                 turn: Turn::default(),

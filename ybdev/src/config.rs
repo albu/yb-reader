@@ -8,6 +8,11 @@ pub struct ServerConf {
     /// Read-mode page-turn keys: "arrows" (default), "space"
     /// (Space / Shift+Space) or "pages" (PageDown / PageUp).
     pub turn_keys: Option<String>,
+    /// Optional shared credential (`SECRET=`): sent as `X-YB-Secret` on
+    /// every mirror / ai_stream request. Only means something once the
+    /// server requires the header; absent keeps the wire identical to
+    /// the unauthenticated protocol.
+    pub secret: Option<String>,
 }
 
 pub fn read(path: &str) -> ServerConf {
@@ -30,6 +35,11 @@ pub fn read(path: &str) -> ServerConf {
             let v = rest.trim();
             if !v.is_empty() {
                 conf.turn_keys = Some(v.to_string());
+            }
+        } else if let Some(rest) = t.strip_prefix("SECRET=") {
+            let v = rest.trim();
+            if !v.is_empty() {
+                conf.secret = Some(v.to_string());
             }
         }
     }
@@ -177,6 +187,32 @@ mod tests {
         assert_eq!(conf.server.as_deref(), Some("http://192.168.1.9:8765"));
         assert_eq!(conf.turn_keys.as_deref(), Some("pages"));
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn secret_is_read_and_survives_both_writers() {
+        let path = std::env::temp_dir().join(format!("mirror_conf_sec_{}.txt", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = fs::remove_file(path);
+        fs::write(
+            path,
+            "SERVER=http://192.0.2.1:8765\nSECRET=s3cret\nTURN_KEYS=pages\n",
+        )
+        .unwrap();
+        assert_eq!(read(path).secret.as_deref(), Some("s3cret"));
+
+        // Neither writer owns SECRET: both must preserve it.
+        write_turn_keys(path, "arrows");
+        write_server(path, "http://192.168.1.9:8765");
+        let conf = read(path);
+        assert_eq!(conf.secret.as_deref(), Some("s3cret"));
+        assert_eq!(conf.turn_keys.as_deref(), Some("arrows"));
+        assert_eq!(conf.server.as_deref(), Some("http://192.168.1.9:8765"));
+
+        // Empty / missing line means no credential.
+        fs::write(path, "SERVER=http://x:1\nSECRET=\n").unwrap();
+        assert!(read(path).secret.is_none());
         let _ = fs::remove_file(path);
     }
 

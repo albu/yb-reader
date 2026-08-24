@@ -56,6 +56,10 @@ pub struct Conn {
     deadline: Option<std::time::Instant>,
     /// Budget applied per request; defaults to REQUEST_BUDGET.
     budget: Duration,
+    /// Shared credential (`mirror.conf` SECRET=) sent as `X-YB-Secret`
+    /// on every request when set. None = wire-identical to the
+    /// unauthenticated protocol.
+    secret: Option<String>,
 }
 
 impl Conn {
@@ -69,7 +73,15 @@ impl Conn {
             fill_len: 0,
             deadline: None,
             budget: REQUEST_BUDGET,
+            secret: None,
         }
+    }
+
+    /// Attach the shared credential (mirror.conf `SECRET=`); every
+    /// subsequent request carries it as an `X-YB-Secret` header. The
+    /// server opts in by requiring that header — see SECURITY.md.
+    pub fn set_secret(&mut self, secret: Option<String>) {
+        self.secret = secret;
     }
 
     /// Override the per-request wall-clock budget (tests shrink it).
@@ -132,10 +144,16 @@ impl Conn {
             && !self.open() {
                 return Err(Stage::Connect);
             }
-        let req = format!(
-            "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
-            method, path, self.host, self.port
-        );
+        let req = match &self.secret {
+            Some(sec) => format!(
+                "{} {} HTTP/1.1\r\nHost: {}:{}\r\nX-YB-Secret: {}\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
+                method, path, self.host, self.port, sec
+            ),
+            None => format!(
+                "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
+                method, path, self.host, self.port
+            ),
+        };
         {
             let Some(s) = self.stream.as_mut() else {
                 return Err(Stage::Connect);
@@ -449,6 +467,41 @@ mod tests {
         let r = c.request("GET", "/frame.png", &mut sink).unwrap();
         assert_eq!(r.status, 200);
         assert_eq!(got, body);
+    }
+
+    #[test]
+    fn secret_header_sent_when_configured_and_absent_when_not() {
+        use std::io::Write as _;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            // Two sequential connections: configured client first, then
+            // the unconfigured one.
+            for _ in 0..2 {
+                let (mut s, _) = l.accept().unwrap();
+                let mut buf = vec![0u8; 2048];
+                let n = std::io::Read::read(&mut s, &mut buf).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+                let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        let mut sink = |_: &[u8]| true;
+
+        let mut with = Conn::new(&addr.ip().to_string(), addr.port());
+        with.set_secret(Some("hunter2".into()));
+        assert!(with.open());
+        with.request("GET", "/frame", &mut sink).unwrap();
+
+        let mut without = Conn::new(&addr.ip().to_string(), addr.port());
+        assert!(without.open());
+        without.request("GET", "/frame", &mut sink).unwrap();
+
+        let r1 = rx.recv().unwrap();
+        let r2 = rx.recv().unwrap();
+        assert!(r1.contains("X-YB-Secret: hunter2"), "{r1}");
+        assert!(!r2.contains("X-YB-Secret"), "{r2}");
     }
 
     #[test]

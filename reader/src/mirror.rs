@@ -223,6 +223,7 @@ impl MirrorScreen {
             let (host, port) = config::parse_server(&s);
             if let Some(host) = host {
                 let mut conn = Conn::new(&host, port);
+                conn.set_secret(self.conf.secret.clone());
                 if conn.open() {
                     self.conn = Some(conn);
                     self.host = Some(host);
@@ -236,6 +237,7 @@ impl MirrorScreen {
         match protocol::discover(Duration::from_secs(1)) {
             Some((ip, port)) => {
                 let mut conn = Conn::new(&ip, port);
+                conn.set_secret(self.conf.secret.clone());
                 if conn.open() {
                     let server = format!("http://{}:{}", ip, port);
                     self.conn = Some(conn);
@@ -264,6 +266,7 @@ impl MirrorScreen {
             return false;
         };
         let mut conn = Conn::new(&host, self.port);
+        conn.set_secret(self.conf.secret.clone());
         if !conn.open() {
             return false;
         }
@@ -538,6 +541,7 @@ impl MirrorScreen {
             // tear the connection down while its reply is in flight).
             if let Some(host) = self.host.clone() {
                 let mut conn = Conn::new(&host, self.port);
+                conn.set_secret(self.conf.secret.clone());
                 if conn.open() {
                     ok = conn
                         .request("GET", "/ping", &mut sink)
