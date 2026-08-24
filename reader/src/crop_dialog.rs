@@ -117,14 +117,6 @@ impl CropDialog {
             }
         }
     }
-
-    fn reset_crop(&mut self) {
-        self.settings.split.margin_left = 0.0;
-        self.settings.split.margin_top = 0.0;
-        self.settings.split.margin_right = 0.0;
-        self.settings.split.margin_bottom = 0.0;
-        self.settings.split.mirror_even_odd = false;
-    }
 }
 
 impl Screen for CropDialog {
@@ -336,7 +328,7 @@ impl Screen for CropDialog {
         p.hline_t(panel_y, 0, w, 2, 0);
         p.rect(Rect::new(0, panel_y + 2, w, panel_h - 2), 255);
 
-        let pad = pt(8.0);
+        let pad = pt(6.0);
         let avail_w = w - 2 * pad;
 
         // Row 1 (y = panel_y + pt(5.0), h = pt(22.0)): Mode & Page Flip Switchers
@@ -344,7 +336,7 @@ impl Screen for CropDialog {
         let r1_h = pt(22.0);
 
         // Mode: Unified
-        let mode_uni_btn = Rect::new(pad, r1_y, pt(64.0), r1_h);
+        let mode_uni_btn = Rect::new(pad, r1_y, pt(50.0), r1_h);
         if !s.mirror_even_odd {
             p.rect(mode_uni_btn, 0);
             p.text_center_in(
@@ -368,7 +360,7 @@ impl Screen for CropDialog {
         }
 
         // Mode: Odd/Even
-        let mode_oe_btn = Rect::new(pad + pt(68.0), r1_y, pt(74.0), r1_h);
+        let mode_oe_btn = Rect::new(pad + pt(53.0), r1_y, pt(56.0), r1_h);
         if s.mirror_even_odd {
             p.rect(mode_oe_btn, 0);
             p.text_center_in(
@@ -392,9 +384,9 @@ impl Screen for CropDialog {
         }
 
         // Page preview switchers (dynamically sized to fill remaining width)
-        let nav_w = (avail_w - pt(152.0) - pt(6.0)) / 2;
-        let btn1_x = pad + pt(152.0);
-        let btn2_x = btn1_x + nav_w + pt(6.0);
+        let nav_w = (avail_w - pt(113.0) - pt(4.0)) / 2;
+        let btn1_x = pad + pt(113.0);
+        let btn2_x = btn1_x + nav_w + pt(4.0);
 
         if s.mirror_even_odd {
             let (odd_pno, even_pno) = if (self.view_page_no + 1) % 2 == 1 {
@@ -478,16 +470,16 @@ impl Screen for CropDialog {
         let r2_y = panel_y + pt(32.0);
         let r2_h = pt(22.0);
         let edges = [
-            (ActiveEdge::Top, "Top Edge"),
-            (ActiveEdge::Bottom, "Bottom Edge"),
-            (ActiveEdge::Left, "Left Edge"),
-            (ActiveEdge::Right, "Right Edge"),
-            (ActiveEdge::All, "All 4 Margins"),
+            (ActiveEdge::Top, "Top"),
+            (ActiveEdge::Bottom, "Bottom"),
+            (ActiveEdge::Left, "Left"),
+            (ActiveEdge::Right, "Right"),
+            (ActiveEdge::All, "All 4"),
         ];
-        let edge_btn_w = (avail_w - pt(16.0)) / 5;
+        let edge_btn_w = (avail_w - pt(12.0)) / 5;
 
         for (i, (edge, lbl)) in edges.iter().enumerate() {
-            let bx = pad + i as i32 * (edge_btn_w + pt(4.0));
+            let bx = pad + i as i32 * (edge_btn_w + pt(3.0));
             let br = Rect::new(bx, r2_y, edge_btn_w, r2_h);
             if self.active_edge == *edge {
                 p.rect(br, 0);
@@ -503,12 +495,12 @@ impl Screen for CropDialog {
         let r3_h = pt(26.0);
 
         // Minus button
-        let m_btn = Rect::new(pad, r3_y, pt(34.0), r3_h);
+        let m_btn = Rect::new(pad, r3_y, pt(26.0), r3_h);
         p.rect_outline_t(m_btn, 1, 0);
         p.text_center_in(m_btn.x, m_btn.x + m_btn.w, r3_y + pt(17.5), 9.0, 0, "-");
 
         // Percentage display box
-        let pct_box = Rect::new(pad + pt(38.0), r3_y, pt(42.0), r3_h);
+        let pct_box = Rect::new(pad + pt(29.0), r3_y, pt(32.0), r3_h);
         p.rect_outline_t(pct_box, 1, 140);
         let pct = match self.active_edge {
             ActiveEdge::Top => (s.margin_top * 100.0).round() as i32,
@@ -540,12 +532,12 @@ impl Screen for CropDialog {
         );
 
         // Plus button
-        let p_btn = Rect::new(pad + pt(84.0), r3_y, pt(34.0), r3_h);
+        let p_btn = Rect::new(pad + pt(64.0), r3_y, pt(26.0), r3_h);
         p.rect_outline_t(p_btn, 1, 0);
         p.text_center_in(p_btn.x, p_btn.x + p_btn.w, r3_y + pt(17.5), 9.0, 0, "+");
 
         // Auto-Crop button
-        let auto_btn = Rect::new(pad + pt(126.0), r3_y, pt(88.0), r3_h);
+        let auto_btn = Rect::new(pad + pt(94.0), r3_y, pt(72.0), r3_h);
         p.rect_outline_t(auto_btn, 1, 0);
         p.text_center_in(
             auto_btn.x,
@@ -556,20 +548,8 @@ impl Screen for CropDialog {
             "[ Auto-Crop ]",
         );
 
-        // Reset button
-        let res_btn = Rect::new(w - pad - pt(146.0), r3_y, pt(66.0), r3_h);
-        p.rect_outline_t(res_btn, 1, 100);
-        p.text_center_in(
-            res_btn.x,
-            res_btn.x + res_btn.w,
-            r3_y + pt(17.5),
-            7.5,
-            0,
-            "Reset",
-        );
-
         // Apply button
-        let apply_btn = Rect::new(w - pad - pt(74.0), r3_y, pt(74.0), r3_h);
+        let apply_btn = Rect::new(w - pad - pt(60.0), r3_y, pt(60.0), r3_h);
         p.rect(apply_btn, 0);
         p.text_center_in(
             apply_btn.x,
@@ -596,7 +576,7 @@ impl Screen for CropDialog {
         let top_h = pt(26.0);
         let panel_h = pt(92.0);
         let panel_y = h - panel_h;
-        let pad = pt(8.0);
+        let pad = pt(6.0);
         let avail_w = w - 2 * pad;
 
         match g {
@@ -613,8 +593,8 @@ impl Screen for CropDialog {
                     let r1_y = panel_y + pt(5.0);
                     let r1_h = pt(22.0);
                     if vy >= r1_y && vy < r1_y + r1_h + pt(4.0) {
-                        let mode_uni_btn = Rect::new(pad, r1_y, pt(64.0), r1_h);
-                        let mode_oe_btn = Rect::new(pad + pt(68.0), r1_y, pt(74.0), r1_h);
+                        let mode_uni_btn = Rect::new(pad, r1_y, pt(50.0), r1_h);
+                        let mode_oe_btn = Rect::new(pad + pt(53.0), r1_y, pt(56.0), r1_h);
                         if mode_uni_btn.contains(vx, vy) {
                             self.settings.split.mirror_even_odd = false;
                             return Action::Redraw;
@@ -624,9 +604,9 @@ impl Screen for CropDialog {
                             return Action::Redraw;
                         }
 
-                        let nav_w = (avail_w - pt(152.0) - pt(6.0)) / 2;
-                        let btn1_x = pad + pt(152.0);
-                        let btn2_x = btn1_x + nav_w + pt(6.0);
+                        let nav_w = (avail_w - pt(113.0) - pt(4.0)) / 2;
+                        let btn1_x = pad + pt(113.0);
+                        let btn2_x = btn1_x + nav_w + pt(4.0);
 
                         if self.settings.split.mirror_even_odd {
                             let (odd_pno, even_pno) = if (self.view_page_no + 1) % 2 == 1 {
@@ -668,8 +648,8 @@ impl Screen for CropDialog {
                     let r2_y = panel_y + pt(32.0);
                     let r2_h = pt(22.0);
                     if vy >= r2_y && vy < r2_y + r2_h + pt(4.0) {
-                        let edge_btn_w = (avail_w - pt(16.0)) / 5;
-                        let idx = ((vx - pad) / (edge_btn_w + pt(4.0))).clamp(0, 4) as usize;
+                        let edge_btn_w = (avail_w - pt(12.0)) / 5;
+                        let idx = ((vx - pad) / (edge_btn_w + pt(3.0))).clamp(0, 4) as usize;
                         let edges = [
                             ActiveEdge::Top,
                             ActiveEdge::Bottom,
@@ -685,11 +665,10 @@ impl Screen for CropDialog {
                     let r3_y = panel_y + pt(59.0);
                     let r3_h = pt(26.0);
                     if vy >= r3_y {
-                        let m_btn = Rect::new(pad, r3_y, pt(34.0), r3_h);
-                        let p_btn = Rect::new(pad + pt(84.0), r3_y, pt(34.0), r3_h);
-                        let auto_btn = Rect::new(pad + pt(126.0), r3_y, pt(88.0), r3_h);
-                        let res_btn = Rect::new(w - pad - pt(146.0), r3_y, pt(66.0), r3_h);
-                        let apply_btn = Rect::new(w - pad - pt(74.0), r3_y, pt(74.0), r3_h);
+                        let m_btn = Rect::new(pad, r3_y, pt(26.0), r3_h);
+                        let p_btn = Rect::new(pad + pt(64.0), r3_y, pt(26.0), r3_h);
+                        let auto_btn = Rect::new(pad + pt(94.0), r3_y, pt(72.0), r3_h);
+                        let apply_btn = Rect::new(w - pad - pt(60.0), r3_y, pt(60.0), r3_h);
 
                         if m_btn.contains(vx, vy) {
                             self.nudge(-0.01);
@@ -701,10 +680,6 @@ impl Screen for CropDialog {
                         }
                         if auto_btn.contains(vx, vy) {
                             self.run_auto_crop();
-                            return Action::Redraw;
-                        }
-                        if res_btn.contains(vx, vy) {
-                            self.reset_crop();
                             return Action::Redraw;
                         }
                         if apply_btn.contains(vx, vy) {
@@ -982,5 +957,45 @@ mod tests {
             enc.write_header().unwrap().write_image_data(&gray).unwrap();
         }
         println!("Rendered crop studio and reader previews to {}", out_dir);
+    }
+
+    #[test]
+    fn test_crop_studio_buttons_geometry_never_overlap() {
+        let (w, _h) = (1236, 1648);
+        let pad = pt(6.0);
+        let avail_w = w - 2 * pad;
+
+        // Row 1: Mode buttons
+        let mode_uni = Rect::new(pad, 0, pt(50.0), pt(22.0));
+        let mode_oe = Rect::new(pad + pt(53.0), 0, pt(56.0), pt(22.0));
+        assert!(mode_uni.x + mode_uni.w < mode_oe.x);
+
+        let nav_w = (avail_w - pt(113.0) - pt(4.0)) / 2;
+        let btn1 = Rect::new(pad + pt(113.0), 0, nav_w, pt(22.0));
+        let btn2 = Rect::new(pad + pt(113.0) + nav_w + pt(4.0), 0, nav_w, pt(22.0));
+        assert!(mode_oe.x + mode_oe.w < btn1.x);
+        assert!(btn1.x + btn1.w < btn2.x);
+        assert!(btn2.x + btn2.w <= w - pad);
+
+        // Row 2: 5 tabs
+        let edge_btn_w = (avail_w - pt(12.0)) / 5;
+        for i in 0..4 {
+            let bx1 = pad + i as i32 * (edge_btn_w + pt(3.0));
+            let bx2 = pad + (i + 1) as i32 * (edge_btn_w + pt(3.0));
+            assert!(bx1 + edge_btn_w < bx2);
+        }
+
+        // Row 3: Nudge + Auto + Apply
+        let m_btn = Rect::new(pad, 0, pt(26.0), pt(26.0));
+        let pct_box = Rect::new(pad + pt(29.0), 0, pt(32.0), pt(26.0));
+        let p_btn = Rect::new(pad + pt(64.0), 0, pt(26.0), pt(26.0));
+        let auto_btn = Rect::new(pad + pt(94.0), 0, pt(72.0), pt(26.0));
+        let apply_btn = Rect::new(w - pad - pt(60.0), 0, pt(60.0), pt(26.0));
+
+        assert!(m_btn.x + m_btn.w < pct_box.x);
+        assert!(pct_box.x + pct_box.w < p_btn.x);
+        assert!(p_btn.x + p_btn.w < auto_btn.x);
+        assert!(auto_btn.x + auto_btn.w < apply_btn.x);
+        assert!(apply_btn.x + apply_btn.w <= w - pad);
     }
 }
