@@ -10,7 +10,7 @@ use quick_xml::Reader;
 use std::io::{BufRead, Cursor, Read};
 
 use crate::model::{
-    over_cap, push_capped, read_capped, Block, Book, Chapter, FontStyle, Run, Style, TextAlign,
+    push_capped, Block, Book, Chapter, FontStyle, Run, Style, TextAlign,
     MAX_ENTRY_BYTES, MAX_NEST_DEPTH,
 };
 
@@ -45,6 +45,11 @@ pub struct Fb2Parser<R: BufRead> {
     state_stack: Vec<ParserState>,
     binary_id: Option<String>,
     binary_buf: String,
+    /// Set when `<binary>` accumulation hit [`MAX_BINARY_BYTES`]: the
+    /// image is dropped whole at close (a base64 tail cut mid-stream can
+    /// still decode into a corrupt partial image) and its id reported in
+    /// `Book::capped_binaries`.
+    binary_capped: bool,
     author_first: String,
     author_last: String,
     in_title: bool,
@@ -77,6 +82,7 @@ impl<R: BufRead> Fb2Parser<R> {
             state_stack: Vec::new(),
             binary_id: None,
             binary_buf: String::new(),
+            binary_capped: false,
             author_first: String::new(),
             author_last: String::new(),
             in_title: false,
@@ -352,6 +358,7 @@ impl<R: BufRead> Fb2Parser<R> {
             "binary" => {
                 self.binary_id = None;
                 self.binary_buf.clear();
+                self.binary_capped = false;
                 for attr in e.attributes().flatten() {
                     let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
                     if k == "id" {
@@ -471,9 +478,11 @@ impl<R: BufRead> Fb2Parser<R> {
             }
             "binary" => {
                 if let Some(id) = self.binary_id.take() {
-                    // The cap is enforced at accumulation; decode only
-                    // what stayed within it.
-                    if self.binary_buf.len() <= MAX_BINARY_BYTES {
+                    // Over-ceiling images are dropped whole and reported —
+                    // never decoded from a truncated buffer.
+                    if self.binary_capped {
+                        self.book.capped_binaries.push(id);
+                    } else {
                         let clean_base64: String = self
                             .binary_buf
                             .chars()
@@ -512,6 +521,8 @@ impl<R: BufRead> Fb2Parser<R> {
                 // grow the buffer without bound.
                 if self.binary_buf.len() + raw_text.len() <= MAX_BINARY_BYTES {
                     self.binary_buf.push_str(raw_text);
+                } else {
+                    self.binary_capped = true;
                 }
             }
             _ => {
@@ -591,17 +602,8 @@ pub fn parse_fb2(data: &[u8]) -> Result<Book, String> {
                 .by_index(i)
                 .map_err(|e| format!("Zip file error: {:?}", e))?;
             if file.name().ends_with(".fb2") || file.name().ends_with(".xml") {
-                // Cap decompression on the actual stream (read_capped), not
-                // the declared size: a bomb entry must fail the parse, not
-                // OOM the device.
                 let entry_name = file.name().to_string();
-                let xml_data = read_capped(file, MAX_ENTRY_BYTES)
-                    .map_err(|e| format!("Read zip entry error: {:?}", e))?;
-                if over_cap(xml_data.len(), MAX_ENTRY_BYTES) {
-                    return Err(format!("Zip entry '{}' too large", entry_name));
-                }
-                let parser = Fb2Parser::new(Cursor::new(xml_data));
-                return parser.parse();
+                return parse_zip_entry(&entry_name, file);
             }
         }
         Err("No .fb2 file found in zip archive".to_string())
@@ -611,11 +613,46 @@ pub fn parse_fb2(data: &[u8]) -> Result<Book, String> {
     }
 }
 
+/// Counts bytes pulled through a reader so [`MAX_ENTRY_BYTES`] can be
+/// enforced on the stream itself.
+struct CountingRead<R> {
+    inner: R,
+    total: std::rc::Rc<std::cell::Cell<u64>>,
+}
+
+impl<R: std::io::Read> std::io::Read for CountingRead<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.total.set(self.total.get() + n as u64);
+        Ok(n)
+    }
+}
+
+/// Stream one zip entry through the parser under the [`MAX_ENTRY_BYTES`]
+/// ceiling. `Take` bounds what is ever read; the counter turns an
+/// over-cap entry into a clear "too large" error. Nothing is
+/// materialized: the previous read_capped approach held up to the whole
+/// cap in memory beside the parsed Book before rejecting it.
+fn parse_zip_entry<R: std::io::Read>(entry_name: &str, entry: R) -> Result<Book, String> {
+    // The count must survive `parse` consuming its reader — hence Rc<Cell>.
+    let total = std::rc::Rc::new(std::cell::Cell::new(0u64));
+    let counted = CountingRead {
+        inner: entry,
+        total: std::rc::Rc::clone(&total),
+    };
+    let result =
+        Fb2Parser::new(std::io::BufReader::new(counted.take(MAX_ENTRY_BYTES + 1))).parse();
+    if total.get() > MAX_ENTRY_BYTES {
+        return Err(format!("Zip entry '{}' too large", entry_name));
+    }
+    result
+}
+
 /// Parse an FB2 / FB2.ZIP file from disk, streaming for the plain-FB2
 /// path (no whole-file read — a 4MB novel never materializes as a Vec).
-/// The zip path reads the matching entry bounded by [`MAX_ENTRY_BYTES`]:
-/// a bomb entry must fail the parse, not OOM the device (same discipline
-/// as [`parse_fb2`]).
+/// The zip path streams the matching entry bounded by [`MAX_ENTRY_BYTES`]
+/// (see [`parse_zip_entry`]): a bomb entry must fail the parse, not OOM
+/// the device.
 pub fn parse_fb2_path(path: &std::path::Path) -> Result<Book, String> {
     let mut magic = [0u8; 4];
     let is_zip = match std::fs::File::open(path) {
@@ -631,13 +668,7 @@ pub fn parse_fb2_path(path: &std::path::Path) -> Result<Book, String> {
                 .map_err(|e| format!("Zip file error: {:?}", e))?;
             if file.name().ends_with(".fb2") || file.name().ends_with(".xml") {
                 let entry_name = file.name().to_string();
-                let xml_data = read_capped(file, MAX_ENTRY_BYTES)
-                    .map_err(|e| format!("Read zip entry error: {:?}", e))?;
-                if over_cap(xml_data.len(), MAX_ENTRY_BYTES) {
-                    return Err(format!("Zip entry '{}' too large", entry_name));
-                }
-                let parser = Fb2Parser::new(Cursor::new(xml_data));
-                return parser.parse();
+                return parse_zip_entry(&entry_name, file);
             }
         }
         Err("No .fb2 file found in zip archive".to_string())
@@ -724,5 +755,51 @@ aGVsbG8gd29ybGQ=
         } else {
             panic!("Expected footnote ref in paragraph");
         }
+    }
+
+    /// An over-ceiling `<binary>` is dropped WHOLE and reported in
+    /// `Book::capped_binaries` — never decoded from a truncated buffer
+    /// (a base64 tail cut mid-stream can still decode into a corrupt
+    /// partial image). A within-ceiling binary must keep decoding.
+    #[test]
+    fn oversized_binary_dropped_whole_and_reported() {
+        let payload = "QUFB".repeat(MAX_BINARY_BYTES / 3 + 64);
+        let xml = format!(
+            "<?xml version=\"1.0\"?>\
+             <FictionBook xmlns=\"http://www.gribuser.ru/xml/fictionbook/2.0\">\
+             <body><section><p>hi</p></section></body>\
+             <binary id=\"big.jpg\">{payload}</binary>\
+             <binary id=\"tiny.png\">aGVsbG8=</binary>\
+             </FictionBook>"
+        );
+        let book = parse_fb2(xml.as_bytes()).expect("parse fb2");
+        assert!(!book.images.contains_key("big.jpg"), "over-ceiling image must not be stored");
+        assert_eq!(book.capped_binaries, vec!["big.jpg".to_string()]);
+        assert_eq!(
+            book.images.get("tiny.png").map(|v| v.as_slice()),
+            Some(b"hello".as_ref())
+        );
+    }
+
+    /// A zip entry that decompresses past [`MAX_ENTRY_BYTES`] must fail
+    /// with "too large" — streamed under a Take, never materialized.
+    #[test]
+    fn over_cap_zip_entry_fails_without_materializing() {
+        use std::io::Write;
+        let mut zip_bytes = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut zip_bytes);
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            w.start_file("book.fb2", opts).expect("start entry");
+            // One byte past the ceiling, highly compressible so the test
+            // stays cheap in RAM.
+            let chunk = vec![b'a'; 1 << 20];
+            for _ in 0..(MAX_ENTRY_BYTES / 1_000_000 + 2) {
+                w.write_all(&chunk).expect("write entry");
+            }
+            w.finish().expect("finish zip");
+        }
+        let err = parse_fb2(&zip_bytes.into_inner()).expect_err("must reject over-cap entry");
+        assert!(err.contains("too large"), "error: {err}");
     }
 }

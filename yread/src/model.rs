@@ -288,6 +288,10 @@ pub struct Book {
     pub image_sizes: HashMap<String, (u32, u32)>,
     /// Footnotes/notes keyed by target ID -> note text
     pub footnotes: HashMap<String, String>,
+    /// fb2 `<binary>` ids dropped for exceeding the per-image ceiling
+    /// (fb2::MAX_BINARY_BYTES). Surfaced so the caller's log can say why
+    /// embedded art went missing instead of silently not rendering.
+    pub capped_binaries: Vec<String>,
     /// On-demand image source (file-backed epubs).
     pub lazy_images: std::sync::Arc<LazyImages>,
 }
@@ -308,6 +312,7 @@ impl std::fmt::Debug for Book {
             .field("images", &self.images.len())
             .field("image_sizes", &self.image_sizes.len())
             .field("footnotes", &self.footnotes.len())
+            .field("capped_binaries", &self.capped_binaries.len())
             .field("lazy_images", &self.lazy_images)
             .finish()
     }

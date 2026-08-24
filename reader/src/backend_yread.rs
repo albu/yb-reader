@@ -93,6 +93,24 @@ impl YreadBackend {
                     ))
                 });
             plog(&format!("yread parse: {}ms", t0.elapsed().as_millis()));
+            if let Ok(book) = &res {
+                // Over-ceiling embedded images were dropped by the parser;
+                // missing art must have a reason in the log.
+                if !book.capped_binaries.is_empty() {
+                    let ids: Vec<String> = book
+                        .capped_binaries
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect();
+                    plog(&format!(
+                        "yread: dropped {} over-size image(s): {}{}",
+                        book.capped_binaries.len(),
+                        ids.join(", "),
+                        if book.capped_binaries.len() > 8 { ", …" } else { "" }
+                    ));
+                }
+            }
             let _ = tx.send(res);
         });
 
