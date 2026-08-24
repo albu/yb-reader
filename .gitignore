@@ -3,3 +3,7 @@
 .DS_Store
 
 packages/yb-reader/bin/reader
+
+# compiled tooling binaries (rebuilt from their .c sources)
+/tools/ruler
+/tools/inject
