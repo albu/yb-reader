@@ -207,6 +207,138 @@ pub fn links_from_page(page: &mupdf::Page, g: &LayoutGeom) -> Vec<(RectF, String
     out
 }
 
+/// Auto-detect content margins for a single PDF page based on text & ink bounding box.
+/// Returns `(margin_left, margin_top, margin_right, margin_bottom)` as fractions in 0.0..0.40.
+pub fn detect_page_margins(page: &mupdf::Page, pad_pt: f32) -> Option<(f32, f32, f32, f32)> {
+    let bounds = page.bounds().ok()?;
+    let pw = bounds.x1 - bounds.x0;
+    let ph = bounds.y1 - bounds.y0;
+    if pw <= 1.0 || ph <= 1.0 {
+        return None;
+    }
+
+    let tp = page.to_text_page(mupdf::TextPageFlags::empty()).ok()?;
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    let mut found = false;
+
+    for block in tp.blocks() {
+        for line in block.lines() {
+            for ch in line.chars() {
+                if let Some(c) = ch.char() {
+                    if !c.is_whitespace() {
+                        found = true;
+                        let q = ch.quad();
+                        min_x = min_x.min(q.ul.x).min(q.ll.x);
+                        min_y = min_y.min(q.ul.y).min(q.ur.y);
+                        max_x = max_x.max(q.ur.x).max(q.lr.x);
+                        max_y = max_y.max(q.ll.y).max(q.lr.y);
+                    }
+                }
+            }
+        }
+    }
+
+    // If text page was empty (e.g. scanned page or vector diagram), scan downscaled pixmap
+    if !found {
+        let mut m = Matrix::IDENTITY;
+        let scale = 300.0 / pw.max(ph);
+        m.scale(scale, scale);
+        if let Ok(pm) = page.to_pixmap(&m, &Colorspace::device_gray(), false, true) {
+            let pm_w = pm.width() as usize;
+            let pm_h = pm.height() as usize;
+            let samples = pm.samples();
+            let mut p_min_x = pm_w;
+            let mut p_max_x = 0;
+            let mut p_min_y = pm_h;
+            let mut p_max_y = 0;
+            let mut ink_found = false;
+
+            for y in 0..pm_h {
+                for x in 0..pm_w {
+                    let val = samples[y * pm.stride() as usize + x];
+                    if val < 235 {
+                        ink_found = true;
+                        p_min_x = p_min_x.min(x);
+                        p_max_x = p_max_x.max(x);
+                        p_min_y = p_min_y.min(y);
+                        p_max_y = p_max_y.max(y);
+                    }
+                }
+            }
+            if ink_found && p_max_x > p_min_x && p_max_y > p_min_y {
+                let ml = ((p_min_x as f32 / pm_w as f32) - 0.02).clamp(0.0, 0.40);
+                let mr = (1.0 - (p_max_x as f32 / pm_w as f32) - 0.02).clamp(0.0, 0.40);
+                let mt = ((p_min_y as f32 / pm_h as f32) - 0.02).clamp(0.0, 0.40);
+                let mb = (1.0 - (p_max_y as f32 / pm_h as f32) - 0.02).clamp(0.0, 0.40);
+                return Some((ml, mt, mr, mb));
+            }
+        }
+        return None;
+    }
+
+    if max_x > min_x && max_y > min_y {
+        let ml = ((min_x - pad_pt - bounds.x0) / pw).clamp(0.0, 0.40);
+        let mr = ((bounds.x1 - (max_x + pad_pt)) / pw).clamp(0.0, 0.40);
+        let mt = ((min_y - pad_pt - bounds.y0) / ph).clamp(0.0, 0.40);
+        let mb = ((bounds.y1 - (max_y + pad_pt)) / ph).clamp(0.0, 0.40);
+        Some((ml, mt, mr, mb))
+    } else {
+        None
+    }
+}
+
+/// Compute safe, book-wide auto-crop margins by sampling pages around `cur_page`.
+/// Protects facing-page (odd/even) asymmetrical margins from text clipping.
+pub fn detect_book_margins(doc: &Document, cur_page: usize) -> Option<(f32, f32, f32, f32)> {
+    let total = doc.page_count().ok()?.max(0) as usize;
+    if total == 0 {
+        return None;
+    }
+
+    let mut samples = Vec::new();
+    let mut indices = vec![cur_page];
+    if cur_page + 1 < total {
+        indices.push(cur_page + 1);
+    }
+    if cur_page > 0 {
+        indices.push(cur_page - 1);
+    }
+    if total > 5 {
+        indices.push(total / 4);
+        indices.push(total / 2);
+    }
+
+    for pno in indices {
+        if let Ok(page) = doc.load_page(pno as i32) {
+            if let Some(m) = detect_page_margins(&page, 8.0) {
+                samples.push(m);
+            }
+        }
+    }
+
+    if samples.is_empty() {
+        return None;
+    }
+
+    let mut min_l = f32::MAX;
+    let mut min_r = f32::MAX;
+    let mut min_t = f32::MAX;
+    let mut min_b = f32::MAX;
+
+    for (ml, mt, mr, mb) in samples {
+        min_l = min_l.min(ml);
+        min_r = min_r.min(mr);
+        min_t = min_t.min(mt);
+        min_b = min_b.min(mb);
+    }
+
+    let lr_safe = min_l.min(min_r);
+    Some((lr_safe, min_t, lr_safe, min_b))
+}
+
 /// Rasterize (page, sub_idx) to visual-sized grayscale over the shared
 /// [`LayoutGeom`] math. Loads the page itself — for callers that only
 /// need ink (crop preview, tests). The backend uses [`render_page_on`]
@@ -539,6 +671,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_autocrop_detect_margins() {
+        let path = std::env::temp_dir().join("yb_autocrop_test.pdf");
+        std::fs::write(&path, cropbox_pdf()).expect("write test pdf");
+        let doc = Document::open(path.to_str().unwrap()).expect("open test pdf");
+        let page = doc.load_page(0).expect("load page");
+        let margins = detect_page_margins(&page, 8.0);
+        assert!(margins.is_some());
+        let (ml, mt, mr, mb) = margins.unwrap();
+        assert!(ml > 0.0);
+        assert!(mt > 0.0);
+        let book_margins = detect_book_margins(&doc, 0);
+        assert!(book_margins.is_some());
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A minimal one-page PDF whose CropBox sits at a real offset from

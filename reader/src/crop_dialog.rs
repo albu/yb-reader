@@ -320,12 +320,12 @@ impl Screen for CropDialog {
             }
         }
 
-        // Row 2: Precision Nudge [-1%] [+1%] | [Reset] | [Done]
+        // Row 2: Precision Nudge [-1%] [+1%] | [Auto] | [Reset] | [Apply]
         let r2_y = bar_y + pt(23.0);
         let btn_h = pt(15.0);
 
         // Minus button
-        let m_btn = Rect::new(bar_x + pt(8.0), r2_y, pt(24.0), btn_h);
+        let m_btn = Rect::new(bar_x + pt(6.0), r2_y, pt(20.0), btn_h);
         p.rect_outline_t(m_btn, 1, 0);
         p.text_center_in(m_btn.x, m_btn.x + m_btn.w, r2_y + pt(10.5), 8.0, 0, "-");
 
@@ -339,8 +339,8 @@ impl Screen for CropDialog {
         };
         let pct_str = format!("{}%", pct);
         p.text_center_in(
-            bar_x + pt(34.0),
-            bar_x + pt(66.0),
+            bar_x + pt(28.0),
+            bar_x + pt(52.0),
             r2_y + pt(10.5),
             7.0,
             0,
@@ -348,12 +348,24 @@ impl Screen for CropDialog {
         );
 
         // Plus button
-        let p_btn = Rect::new(bar_x + pt(68.0), r2_y, pt(24.0), btn_h);
+        let p_btn = Rect::new(bar_x + pt(54.0), r2_y, pt(20.0), btn_h);
         p.rect_outline_t(p_btn, 1, 0);
         p.text_center_in(p_btn.x, p_btn.x + p_btn.w, r2_y + pt(10.5), 8.0, 0, "+");
 
+        // Auto button
+        let auto_btn = Rect::new(bar_x + pt(78.0), r2_y, pt(42.0), btn_h);
+        p.rect_outline_t(auto_btn, 1, 0);
+        p.text_center_in(
+            auto_btn.x,
+            auto_btn.x + auto_btn.w,
+            r2_y + pt(10.5),
+            7.0,
+            0,
+            "Auto",
+        );
+
         // Reset button
-        let res_btn = Rect::new(bar_x + pt(100.0), r2_y, pt(52.0), btn_h);
+        let res_btn = Rect::new(bar_x + pt(124.0), r2_y, pt(42.0), btn_h);
         p.rect_outline_t(res_btn, 1, 100);
         p.text_center_in(
             res_btn.x,
@@ -365,7 +377,7 @@ impl Screen for CropDialog {
         );
 
         // Done button
-        let done_btn = Rect::new(bar_x + bar_w - pt(68.0), r2_y, pt(60.0), btn_h);
+        let done_btn = Rect::new(bar_x + bar_w - pt(64.0), r2_y, pt(58.0), btn_h);
         p.rect(done_btn, 0);
         p.text_center_in(
             done_btn.x,
@@ -373,37 +385,29 @@ impl Screen for CropDialog {
             r2_y + pt(10.5),
             7.5,
             255,
-            "Apply Crop",
+            "Apply",
         );
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
         let (w, h) = self.dims;
-
-        // Corner-back exits WITHOUT applying: edits so far live only in
-        // this dialog's copy and are recorded solely by apply_crop().
         if g.corner_back_in(w as u32, h as u32) {
             return Action::Pop;
         }
-
         let (vx, vy) = match g {
             Gesture::Tap { x, y } | Gesture::LongPress { x, y } | Gesture::Drag { x, y } => {
                 (x as i32, y as i32)
             }
-            _ => (0, 0),
+            _ => return Action::Keep,
         };
 
-        let bar_h = pt(42.0);
+        let bar_h = pt(44.0);
         let bar_w = (w - pt(32.0)).min(pt(280.0));
         let bar_x = (w - bar_w) / 2;
         let bar_y = h - bar_h - pt(16.0);
 
         match g {
             Gesture::Tap { .. } => {
-                // Floating palette buttons — hit exactly the painted
-                // rects (the old code measured fractions of the bar and
-                // fired actions on taps in the gaps, hundreds of px off
-                // at default width).
                 if vy >= bar_y
                     && vy <= bar_y + bar_h + pt(8.0)
                     && vx >= bar_x
@@ -412,22 +416,36 @@ impl Screen for CropDialog {
                     // Row 2: discrete action buttons (paint's geometry).
                     let r2_y = bar_y + pt(23.0);
                     let btn_h = pt(15.0);
-                    if Rect::new(bar_x + pt(8.0), r2_y, pt(24.0), btn_h).contains(vx, vy) {
+                    if Rect::new(bar_x + pt(6.0), r2_y, pt(20.0), btn_h).contains(vx, vy) {
                         self.nudge(-0.01);
                         return Action::Redraw;
                     }
-                    if Rect::new(bar_x + pt(68.0), r2_y, pt(24.0), btn_h).contains(vx, vy) {
+                    if Rect::new(bar_x + pt(54.0), r2_y, pt(20.0), btn_h).contains(vx, vy) {
                         self.nudge(0.01);
                         return Action::Redraw;
                     }
-                    if Rect::new(bar_x + pt(100.0), r2_y, pt(52.0), btn_h).contains(vx, vy) {
+                    if Rect::new(bar_x + pt(78.0), r2_y, pt(42.0), btn_h).contains(vx, vy) {
+                        if let Some(doc) = &self.doc {
+                            if let Ok(page) = doc.load_page(self.page_no as i32) {
+                                if let Some((ml, mt, mr, mb)) = crate::render::detect_page_margins(&page, 8.0) {
+                                    self.settings.split.margin_left = ml;
+                                    self.settings.split.margin_top = mt;
+                                    self.settings.split.margin_right = mr;
+                                    self.settings.split.margin_bottom = mb;
+                                    return Action::Redraw;
+                                }
+                            }
+                        }
+                        return Action::Keep;
+                    }
+                    if Rect::new(bar_x + pt(124.0), r2_y, pt(42.0), btn_h).contains(vx, vy) {
                         self.settings.split.margin_left = 0.0;
                         self.settings.split.margin_top = 0.0;
                         self.settings.split.margin_right = 0.0;
                         self.settings.split.margin_bottom = 0.0;
                         return Action::Redraw;
                     }
-                    if Rect::new(bar_x + bar_w - pt(68.0), r2_y, pt(60.0), btn_h).contains(vx, vy) {
+                    if Rect::new(bar_x + bar_w - pt(64.0), r2_y, pt(58.0), btn_h).contains(vx, vy) {
                         return self.apply_crop();
                     }
                     // Row 1: five equal edge buttons, indexed by column.

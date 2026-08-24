@@ -212,9 +212,21 @@ impl Screen for QuickSettingsSheet {
             }
             y += pt(ROW_H_PT) + pt(4.0);
 
-            // Row 2: Interactive Margin Crop Guides
+            // Row 2: Auto Crop & Interactive Margin Crop Guides
             p.text(pad, y + pt(15.0), 8.5, 0, "CROP");
-            let crop_btn = Rect::new(w - pad - pt(188.0), y, pt(188.0), pt(BTN_H_PT));
+            let auto_btn = Rect::new(w - pad - pt(208.0), y, pt(84.0), pt(BTN_H_PT));
+            let crop_btn = Rect::new(w - pad - pt(120.0), y, pt(120.0), pt(BTN_H_PT));
+
+            p.rect_outline_t(auto_btn, 1, 0);
+            p.text_center_in(
+                auto_btn.x,
+                auto_btn.x + auto_btn.w,
+                y + pt(15.0),
+                7.5,
+                0,
+                "[ Auto ]",
+            );
+
             p.rect_outline_t(crop_btn, 1, 0);
             p.text_center_in(
                 crop_btn.x,
@@ -222,7 +234,7 @@ impl Screen for QuickSettingsSheet {
                 y + pt(15.0),
                 7.5,
                 0,
-                "[ Adjust Crop Guides ]",
+                "[ Crop Guides ]",
             );
             y += pt(ROW_H_PT) + pt(4.0);
         }
@@ -376,8 +388,20 @@ impl Screen for QuickSettingsSheet {
             }
             y += pt(ROW_H_PT) + pt(4.0);
 
-            // Row 2: Adjust Crop Guides button
-            let crop_btn = Rect::new(w - pad - pt(188.0), y, pt(188.0), pt(BTN_H_PT));
+            // Row 2: Auto Crop & Adjust Crop Guides button
+            let auto_btn = Rect::new(w - pad - pt(208.0), y, pt(84.0), pt(BTN_H_PT));
+            let crop_btn = Rect::new(w - pad - pt(120.0), y, pt(120.0), pt(BTN_H_PT));
+            if auto_btn.contains(vx, vy) {
+                if let Some(doc) = &self.doc {
+                    if let Some((ml, mt, mr, mb)) = crate::render::detect_book_margins(doc.as_ref(), self.page_no) {
+                        self.settings.split.margin_left = ml;
+                        self.settings.split.margin_top = mt;
+                        self.settings.split.margin_right = mr;
+                        self.settings.split.margin_bottom = mb;
+                        return self.apply_change();
+                    }
+                }
+            }
             if crop_btn.contains(vx, vy) {
                 let book = self.book.clone();
                 let page = self.page_no;
