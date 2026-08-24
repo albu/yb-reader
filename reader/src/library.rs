@@ -175,9 +175,11 @@ fn stat(p: &Path) -> (u64, u64) {
     }
 }
 
-type Cache = HashMap<String, (u64, u64, Option<(String, String)>)>;
+type BookMeta = Option<(String, String)>;
+type CacheEntry = (String, u64, u64, BookMeta);
+type Cache = HashMap<String, (u64, u64, BookMeta)>;
 
-fn parse_line(line: &str) -> Option<(String, u64, u64, Option<(String, String)>)> {
+fn parse_line(line: &str) -> Option<CacheEntry> {
     let mut it = line.splitn(5, '\t');
     let name = it.next()?.to_string();
     let mtime: u64 = it.next()?.trim().parse().ok()?;
@@ -195,7 +197,7 @@ fn parse_line(line: &str) -> Option<(String, u64, u64, Option<(String, String)>)
     Some((name, mtime, size, meta))
 }
 
-fn fmt_line(name: &str, mtime: u64, size: u64, meta: &Option<(String, String)>) -> String {
+fn fmt_line(name: &str, mtime: u64, size: u64, meta: &BookMeta) -> String {
     let (t, a) = meta.clone().unwrap_or_default();
     format!("{}\t{}\t{}\t{}\t{}", name, mtime, size, t, a)
 }

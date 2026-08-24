@@ -20,8 +20,15 @@ use ybdev::sysinfo;
 /// simultaneously (MuPDF builds without FZ_ENABLE_MUTEX, so concurrent
 /// rendering would be a data race). Do NOT add Sync; keep every access
 /// single-threaded.
-pub struct SendDoc(pub Document);
+pub struct SendDoc(Document);
 unsafe impl Send for SendDoc {}
+
+impl SendDoc {
+    /// Unwrap the document on the destination thread.
+    pub fn into_inner(self) -> Document {
+        self.0
+    }
+}
 
 /// Result returned from background PDF loading.
 pub struct BookReady {

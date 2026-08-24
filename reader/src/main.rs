@@ -88,11 +88,9 @@ fn main() {
     let input = match Input::open(&touch) {
         Ok(i) => i,
         Err(e) => {
-            log::plog(&format!("no input: {} — running without touch", e));
-            // Keep the app alive; menus just won't respond.
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(3600));
-            }
+            log::plog(&format!("fatal: cannot open touch input {touch}: {e}"));
+            eprintln!("yb-reader: no input device: {e}");
+            guard::graceful_exit(1);
         }
     };
 

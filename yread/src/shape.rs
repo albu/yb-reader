@@ -23,13 +23,23 @@ pub struct ShapedWord {
     pub glyphs: Vec<ShapedGlyph>,
 }
 
-fn hash_word(word: &str, style: FontStyle, size_scaled: u16) -> u64 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ShapeKind {
+    Style(FontStyle),
+    Code,
+}
+
+fn hash_word(word: &str, kind: ShapeKind, size_scaled: u16) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
     for &b in word.as_bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
-    h ^= style as u64;
+    let kind_id = match kind {
+        ShapeKind::Style(s) => s as u64,
+        ShapeKind::Code => 4,
+    };
+    h ^= kind_id;
     h = h.wrapping_mul(0x100000001b3);
     h ^= size_scaled as u64;
     h = h.wrapping_mul(0x100000001b3);
@@ -37,7 +47,7 @@ fn hash_word(word: &str, style: FontStyle, size_scaled: u16) -> u64 {
 }
 
 pub struct ShapeCache {
-    cache: HashMap<u64, (String, FontStyle, u16, Arc<ShapedWord>)>,
+    cache: HashMap<u64, (String, ShapeKind, u16, Arc<ShapedWord>)>,
     hyphen_advance: HashMap<(FontStyle, u16), f32>,
     space_advance: HashMap<(FontStyle, u16), f32>,
 }
@@ -65,11 +75,12 @@ impl ShapeCache {
         size_pt: f32,
         fonts: &FontSystem,
     ) -> Arc<ShapedWord> {
+        let kind = ShapeKind::Style(style);
         let size_scaled = (size_pt * 10.0).round() as u16;
-        let h = hash_word(word, style, size_scaled);
+        let h = hash_word(word, kind, size_scaled);
 
-        if let Some((w, s, sz, shaped)) = self.cache.get(&h) {
-            if *sz == size_scaled && *s == style && w == word {
+        if let Some((w, k, sz, shaped)) = self.cache.get(&h) {
+            if *sz == size_scaled && *k == kind && w == word {
                 return Arc::clone(shaped);
             }
         }
@@ -84,7 +95,7 @@ impl ShapeCache {
         }
         self.cache.insert(
             h,
-            (word.to_string(), style, size_scaled, Arc::clone(&shaped)),
+            (word.to_string(), kind, size_scaled, Arc::clone(&shaped)),
         );
         shaped
     }
@@ -96,11 +107,12 @@ impl ShapeCache {
         size_pt: f32,
         fonts: &FontSystem,
     ) -> Arc<ShapedWord> {
+        let kind = ShapeKind::Code;
         let size_scaled = (size_pt * 10.0).round() as u16;
-        let h = hash_word(word, FontStyle::Regular, size_scaled ^ 0x79b9);
+        let h = hash_word(word, kind, size_scaled);
 
-        if let Some((w, _s, sz, shaped)) = self.cache.get(&h) {
-            if *sz == size_scaled && w == word {
+        if let Some((w, k, sz, shaped)) = self.cache.get(&h) {
+            if *sz == size_scaled && *k == kind && w == word {
                 return Arc::clone(shaped);
             }
         }
@@ -112,12 +124,7 @@ impl ShapeCache {
         }
         self.cache.insert(
             h,
-            (
-                word.to_string(),
-                FontStyle::Regular,
-                size_scaled,
-                Arc::clone(&shaped),
-            ),
+            (word.to_string(), kind, size_scaled, Arc::clone(&shaped)),
         );
         shaped
     }
@@ -184,5 +191,29 @@ fn shape_string_with_face(text: &str, rb_face: &rustybuzz::Face, size_pt: f32) -
     ShapedWord {
         advance: total_advance,
         glyphs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shape_word_and_code_word_are_cached_independently() {
+        let fonts = FontSystem::default();
+        let mut cache = ShapeCache::new();
+
+        let regular = cache.shape_word("fn", FontStyle::Regular, 10.0, &fonts);
+        let code = cache.shape_code_word("fn", 10.0, &fonts);
+
+        // Noto Sans and Literata have distinct glyph metrics / glyph IDs
+        assert_ne!(regular.glyphs[0].glyph_id, code.glyphs[0].glyph_id);
+
+        // Fetching again from cache returns the respective independent shapes
+        let regular_cached = cache.shape_word("fn", FontStyle::Regular, 10.0, &fonts);
+        let code_cached = cache.shape_code_word("fn", 10.0, &fonts);
+
+        assert_eq!(regular.glyphs[0].glyph_id, regular_cached.glyphs[0].glyph_id);
+        assert_eq!(code.glyphs[0].glyph_id, code_cached.glyphs[0].glyph_id);
     }
 }

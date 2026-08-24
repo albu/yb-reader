@@ -12,20 +12,6 @@ pub enum SplitPreset {
     Grid4,       // 4-split: 2 columns x 2 rows (Landscape)
 }
 
-
-impl SplitPreset {
-    #[allow(dead_code)]
-    pub fn name(&self) -> &'static str {
-        match self {
-            SplitPreset::FitPage => "Fit Page",
-            SplitPreset::Horizontal2 => "2-Split Landscape (Top/Bottom)",
-            SplitPreset::Horizontal3 => "3-Split Landscape (Top/Mid/Bottom)",
-            SplitPreset::Vertical2 => "2-Column Portrait (Left/Right)",
-            SplitPreset::Grid4 => "4-Grid Landscape (2x2)",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[derive(Default)]
 pub enum ContrastMode {
@@ -34,19 +20,6 @@ pub enum ContrastMode {
     BoldText,     // Darkens anti-aliased font edges by ~25%
     HighContrast, // Strong S-curve for crisp punchy text
     ScanClean,    // Aggressive black boost + paper whitening for scans
-}
-
-
-impl ContrastMode {
-    #[allow(dead_code)]
-    pub fn name(&self) -> &'static str {
-        match self {
-            ContrastMode::Normal => "Normal",
-            ContrastMode::BoldText => "Bold / Darkened",
-            ContrastMode::HighContrast => "High Contrast",
-            ContrastMode::ScanClean => "Ultra Clean (Scans)",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -316,7 +289,7 @@ impl ReaderSettings {
     /// Precomputes a 256-byte Lookup Table (LUT) for instant O(1) contrast & inversion.
     pub fn build_lut(&self) -> [u8; 256] {
         let mut lut = [0u8; 256];
-        for i in 0..256 {
+        for (i, slot) in lut.iter_mut().enumerate() {
             let mut val = i as f32;
 
             // Apply contrast mode
@@ -358,7 +331,7 @@ impl ReaderSettings {
                 out = 255 - out;
             }
 
-            lut[i] = out;
+            *slot = out;
         }
         lut
     }
@@ -373,66 +346,6 @@ impl ReaderSettings {
             *b = lut[*b as usize];
         }
     }
-}
-
-/// Auto-detect white margin bounding box in a grayscale pixmap.
-/// Returns (margin_left, margin_top, margin_right, margin_bottom) as fractions (0.0..0.45).
-#[allow(dead_code)]
-pub fn detect_margins(
-    samples: &[u8],
-    width: usize,
-    height: usize,
-    stride: usize,
-    white_threshold: u8,
-) -> (f32, f32, f32, f32) {
-    if width == 0 || height == 0 || samples.is_empty() {
-        return (0.0, 0.0, 0.0, 0.0);
-    }
-
-    let mut min_x = width;
-    let mut max_x = 0;
-    let mut min_y = height;
-    let mut max_y = 0;
-
-    let step = 4;
-    for y in (0..height).step_by(step) {
-        let row_start = y * stride;
-        for x in (0..width).step_by(step) {
-            if row_start + x < samples.len() && samples[row_start + x] < white_threshold {
-                if x < min_x {
-                    min_x = x;
-                }
-                if x > max_x {
-                    max_x = x;
-                }
-                if y < min_y {
-                    min_y = y;
-                }
-                if y > max_y {
-                    max_y = y;
-                }
-            }
-        }
-    }
-
-    if min_x > max_x || min_y > max_y {
-        return (0.0, 0.0, 0.0, 0.0);
-    }
-
-    let pad_x = (width as f32 * 0.01) as usize;
-    let pad_y = (height as f32 * 0.01) as usize;
-
-    let crop_x0 = min_x.saturating_sub(pad_x);
-    let crop_y0 = min_y.saturating_sub(pad_y);
-    let crop_x1 = (max_x + pad_x).min(width);
-    let crop_y1 = (max_y + pad_y).min(height);
-
-    let m_left = (crop_x0 as f32 / width as f32).clamp(0.0, 0.40);
-    let m_top = (crop_y0 as f32 / height as f32).clamp(0.0, 0.40);
-    let m_right = ((width - crop_x1) as f32 / width as f32).clamp(0.0, 0.40);
-    let m_bottom = ((height - crop_y1) as f32 / height as f32).clamp(0.0, 0.40);
-
-    (m_left, m_top, m_right, m_bottom)
 }
 
 #[cfg(test)]
@@ -461,23 +374,6 @@ mod tests {
         assert_eq!(g4.total_steps(10), 40);
         assert_eq!(g4.step_to_page_sub(7), (1, 3));
         assert_eq!(g4.page_sub_to_step(1, 3), 7);
-    }
-
-    #[test]
-    fn test_margin_detector() {
-        let w = 100;
-        let h = 100;
-        let mut buf = vec![255u8; w * h];
-        for y in 30..70 {
-            for x in 20..80 {
-                buf[y * w + x] = 0;
-            }
-        }
-        let (ml, mt, mr, mb) = detect_margins(&buf, w, h, w, 240);
-        assert!(ml >= 0.15 && ml <= 0.25);
-        assert!(mt >= 0.25 && mt <= 0.35);
-        assert!(mr >= 0.15 && mr <= 0.25);
-        assert!(mb >= 0.25 && mb <= 0.35);
     }
 
     #[test]

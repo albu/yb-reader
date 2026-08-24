@@ -227,7 +227,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
             if let Some(s) = p.settings {
                 let sc = s.split;
                 format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}",
                     k,
                     p.page,
                     p.total,
@@ -245,7 +245,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
                     s.white_cutoff,
                     if s.invert { "1" } else { "0" },
                     s.margin_pad,
-                    format!("{:.1}", s.line_spacing),
+                    s.line_spacing,
                 )
             } else if p.sub_idx > 0 {
                 format!("{}\t{}\t{}\t{}\t{}", k, p.page, p.total, p.ts, p.sub_idx)

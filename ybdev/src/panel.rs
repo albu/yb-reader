@@ -178,7 +178,7 @@ impl Panel {
             stride,
             bpp,
             fb,
-            map: map as *mut u8,
+            map,
             map_len,
             marker: 0,
         })

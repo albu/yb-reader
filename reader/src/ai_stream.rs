@@ -580,10 +580,9 @@ fn layout_blocks(
             }
 
             DocBlock::List { is_ordered, start_num, items } => {
-                let mut num = *start_num;
                 let line_h = pt(BODY_SIZE_PT + 5.0);
 
-                for item in items {
+                for (num, item) in (*start_num..).zip(items) {
                     let indent_px = pad + (depth as i32) * pt(14.0);
                     let prefix_w = if *is_ordered { pt(18.0) } else { pt(12.0) };
 
@@ -655,7 +654,6 @@ fn layout_blocks(
                             layout_blocks(rest_blocks, depth + 1, pad, content_w, bottom_bound, p2_top, cur_y, cur_items, pages);
                         }
                     }
-                    num += 1;
                     *cur_y += pt(2.0);
                 }
                 *cur_y += pt(4.0);
@@ -1993,7 +1991,7 @@ mod tests {
         let md = "### Root Cause & Fix\n\nLooking at your photo, two specific issues occurred:\n\n1. **Missing Parent Item Titles in Nested Lists**:\n   - In Markdown structures like:\n     ```markdown\n     1. **Continuation Line Bullets Fixed**:\n        - Previously, wrapped lines...\n     ```\n     When the parser encountered the nested list (- Previously...), it previously overwrote the parent item's text buffer (1. Continuation Line Bullets Fixed:), causing the parent title to disappear completely and turning all child items into flat bullets.\n   - **Fixed**: Implemented an explicit item_text_stack that commits parent item headers with their proper number (1., 2., 3.) before descending into child lists, preserving the full tree hierarchy and indentation.\n\n2. **Heading & Typography Hierarchy**:\n   - Headings now render with bold weight (+1px stem stroke), distinct font scaling (14pt / 12pt / 10.5pt), and balanced vertical margins.\n   - List numbers (1., 2.) are rendered in bold next to the first line, with continuation lines aligned flush underneath.\n\n";
         
         let json_payload = format!(
-            "{{\"id\":\"turn_104\",\"assistant\":\"Antigravity\",\"prompt\":\"it got worse: photo.jpg\",\"timestamp\":\"21:15\",\"status\":\"idle\",\"tool_status\":null,\"revision\":8,\"raw_markdown\":\"{}\"}}",
+            "{{\"id\":\"turn_104\",\"assistant\":\"Antigravity\",\"prompt\":\"Nested lists with embedded code blocks appear flattened in output\",\"timestamp\":\"21:15\",\"status\":\"idle\",\"tool_status\":null,\"revision\":8,\"raw_markdown\":\"{}\"}}",
             md.replace("\n", "\\n").replace("\"", "\\\"")
         );
 

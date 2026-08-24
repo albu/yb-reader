@@ -50,14 +50,50 @@ pub struct YreadBackend {
     err: Option<String>,
 }
 
-/// Pack a (chapter, char offset) into the single `sub_idx` field the
-/// positions store persists. The low 1M bits hold the char offset; a
-/// chapter longer than that cannot be represented — clamp to the low bits
-/// so a giant chapter degrades to "near its end" instead of silently
-/// colliding with the next chapter's low bits on restore (restoring into
-/// the wrong chapter was the old silent behavior).
+/// Structured (chapter, character offset) pair packed into the single `sub_idx`
+/// integer stored in the positions file for cross-session continuity.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct YreadSub {
+    pub chapter: usize,
+    pub char_offset: usize,
+}
+
+impl YreadSub {
+    pub const MAX_CHAR_OFFSET: usize = 999_999;
+    pub const MULTIPLIER: usize = 1_000_000;
+
+    pub const fn new(chapter: usize, char_offset: usize) -> Self {
+        Self {
+            chapter,
+            char_offset: if char_offset > Self::MAX_CHAR_OFFSET {
+                Self::MAX_CHAR_OFFSET
+            } else {
+                char_offset
+            },
+        }
+    }
+
+    /// Pack into a single usize persisted in positions.txt.
+    pub const fn pack(self) -> usize {
+        self.chapter * Self::MULTIPLIER + self.char_offset
+    }
+
+    /// Unpack from a single usize loaded from positions.txt.
+    pub const fn unpack(raw: usize) -> Self {
+        Self {
+            chapter: raw / Self::MULTIPLIER,
+            char_offset: raw % Self::MULTIPLIER,
+        }
+    }
+}
+
 pub fn pack_yread_sub(chapter: usize, char_offset: usize) -> usize {
-    chapter * 1_000_000 + char_offset.min(999_999)
+    YreadSub::new(chapter, char_offset).pack()
+}
+
+pub fn unpack_yread_sub(raw: usize) -> (usize, usize) {
+    let sub = YreadSub::unpack(raw);
+    (sub.chapter, sub.char_offset)
 }
 
 impl YreadBackend {
@@ -172,10 +208,6 @@ impl YreadBackend {
         }
     }
 
-    fn decode_yread_sub(sub: usize) -> (usize, usize) {
-        (sub / 1_000_000, sub % 1_000_000)
-    }
-
     fn yread_land_at(
         &mut self,
         chapter: usize,
@@ -216,7 +248,7 @@ impl YreadBackend {
     }
 
     fn yread_land_at_sub(&mut self, sub: usize, vw: u32, vh: u32, settings: &ReaderSettings) {
-        let (ch, chr) = Self::decode_yread_sub(sub);
+        let (ch, chr) = unpack_yread_sub(sub);
         self.yread_land_at(ch, chr, vw, vh, settings);
     }
 
@@ -1045,5 +1077,18 @@ mod save_guard_tests {
         let b = bare_backend();
         assert!(!b.is_ready());
         assert!(!b.is_paginated());
+    }
+
+    #[test]
+    fn yread_sub_packing_and_unpacking_roundtrip() {
+        let sub = YreadSub::new(42, 12345);
+        let packed = sub.pack();
+        assert_eq!(packed, 42_012_345);
+        assert_eq!(YreadSub::unpack(packed), sub);
+
+        // Clamping overflow beyond 999_999:
+        let clamped = YreadSub::new(7, 2_000_000);
+        assert_eq!(clamped.char_offset, YreadSub::MAX_CHAR_OFFSET);
+        assert_eq!(clamped.pack(), 7_999_999);
     }
 }

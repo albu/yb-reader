@@ -837,7 +837,7 @@ mod tests {
         // Tapping the ribbon (top-right, left of the battery) toggles
         // selection mode on.
         let act = screen.on_gesture(Gesture::Tap {
-            x: (w - 30) as u32,
+            x: w - 30,
             y: 10,
         });
         assert!(matches!(act, Action::RedrawFull));

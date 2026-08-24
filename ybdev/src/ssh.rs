@@ -10,6 +10,7 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 const PIDFILE: &str = "/tmp/dropbear_koreader.pid";
 const OURS: &str = "/mnt/us/extensions/reader/bin/dropbear";
@@ -18,10 +19,28 @@ const KOREADER: &str = "/mnt/us/koreader/dropbear";
 const KOREADER_TREE: &str = "/mnt/us/koreader";
 const IPTABLES: &str = "/usr/sbin/iptables";
 
-/// Any live dropbear? A /proc comm scan — no forks, cheap enough to call
-/// per redraw. (busybox `ps` is unreliable on this FW; /proc is truth.)
+static CACHED_RUNNING: AtomicBool = AtomicBool::new(false);
+static LAST_CHECK_MS: AtomicU32 = AtomicU32::new(0);
+
+const CACHE_TTL_MS: u32 = 1000;
+
+/// Any live dropbear? A /proc comm scan with a 1-second TTL — cheap enough
+/// to call per redraw without thrashing /proc on busy ticks.
+/// (busybox `ps` is unreliable on this FW; /proc is truth.)
 pub fn running() -> bool {
-    pids().next().is_some()
+    let now = crate::log::now_ms() as u32;
+    let last = LAST_CHECK_MS.load(Ordering::Relaxed);
+    if last != 0 && now.wrapping_sub(last) < CACHE_TTL_MS {
+        return CACHED_RUNNING.load(Ordering::Relaxed);
+    }
+    let res = pids().next().is_some();
+    CACHED_RUNNING.store(res, Ordering::Relaxed);
+    LAST_CHECK_MS.store(now, Ordering::Relaxed);
+    res
+}
+
+pub fn invalidate_cache() {
+    LAST_CHECK_MS.store(0, Ordering::Relaxed);
 }
 
 fn pids() -> impl Iterator<Item = i32> {
@@ -111,6 +130,7 @@ pub fn enable() -> bool {
     if running() {
         return true;
     }
+    invalidate_cache();
     rules("A");
     // cwd = the tree whose settings/SSH/ the patched binary resolves.
     // No -r: a single host-key path breaks ed25519 negotiation (banner,
@@ -121,12 +141,14 @@ pub fn enable() -> bool {
     } else {
         (KOREADER, KOREADER_TREE)
     };
-    Command::new(bin)
+    let ok = Command::new(bin)
         .args(["-E", "-R", "-s", "-p", "2222", "-P", PIDFILE])
         .current_dir(tree)
         .spawn()
         .and_then(|mut c| c.wait())
-        .is_ok()
+        .is_ok();
+    invalidate_cache();
+    ok
 }
 
 /// Bring ssh down: TERM every dropbear (the pidfile may be stale after a
@@ -139,4 +161,5 @@ pub fn disable() {
     }
     rules("D");
     let _ = fs::remove_file(PIDFILE);
+    invalidate_cache();
 }

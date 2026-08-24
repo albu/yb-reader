@@ -117,7 +117,7 @@ impl ReaderBackend for PdfBackend {
         };
         match rx.try_recv() {
             Ok(Ok(ready)) => {
-                self.doc = Some(Rc::new(ready.doc.0));
+                self.doc = Some(Rc::new(ready.doc.into_inner()));
                 self.total = ready.total;
                 self.page_no = self.page_no.min(self.total.saturating_sub(1));
                 self.loading = None;

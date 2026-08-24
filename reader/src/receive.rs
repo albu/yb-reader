@@ -1302,11 +1302,14 @@ enum Phase {
     Failed(String),
 }
 
+type SetupResult = Result<(ReceiveServer, String, Option<String>), String>;
+type SetupSlot = Arc<Mutex<Option<SetupResult>>>;
+
 pub struct ReceiveScreen {
     phase: Phase,
     stop: Arc<AtomicBool>,
     /// Filled by the setup thread, taken by on_tick.
-    setup: Arc<Mutex<Option<Result<(ReceiveServer, String, Option<String>), String>>>>,
+    setup: SetupSlot,
     server: Option<ReceiveServer>,
     qr: Option<QrCode>,
     seen_count: usize,
