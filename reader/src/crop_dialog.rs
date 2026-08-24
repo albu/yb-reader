@@ -66,12 +66,25 @@ impl CropDialog {
     }
 
     fn nudge(&mut self, delta: f32) {
+        let is_odd = self.settings.split.mirror_even_odd && (self.page_no % 2 == 1);
         let s = &mut self.settings.split;
         match self.active_edge {
             ActiveEdge::Top => s.margin_top = (s.margin_top + delta).clamp(0.0, 0.40),
             ActiveEdge::Bottom => s.margin_bottom = (s.margin_bottom + delta).clamp(0.0, 0.40),
-            ActiveEdge::Left => s.margin_left = (s.margin_left + delta).clamp(0.0, 0.40),
-            ActiveEdge::Right => s.margin_right = (s.margin_right + delta).clamp(0.0, 0.40),
+            ActiveEdge::Left => {
+                if is_odd {
+                    s.margin_right = (s.margin_right + delta).clamp(0.0, 0.40);
+                } else {
+                    s.margin_left = (s.margin_left + delta).clamp(0.0, 0.40);
+                }
+            }
+            ActiveEdge::Right => {
+                if is_odd {
+                    s.margin_left = (s.margin_left + delta).clamp(0.0, 0.40);
+                } else {
+                    s.margin_right = (s.margin_right + delta).clamp(0.0, 0.40);
+                }
+            }
             ActiveEdge::All => {
                 s.margin_top = (s.margin_top + delta).clamp(0.0, 0.40);
                 s.margin_bottom = (s.margin_bottom + delta).clamp(0.0, 0.40);
@@ -142,9 +155,14 @@ impl Screen for CropDialog {
         let page_oy = (h - rh) / 2;
 
         let s = &self.settings.split;
-        let x0 = page_ox + (s.margin_left * rw as f32).round() as i32;
+        let (ml, mr) = if s.mirror_even_odd && (self.page_no % 2 == 1) {
+            (s.margin_right, s.margin_left)
+        } else {
+            (s.margin_left, s.margin_right)
+        };
+        let x0 = page_ox + (ml * rw as f32).round() as i32;
         let y0 = page_oy + (s.margin_top * rh as f32).round() as i32;
-        let x1 = page_ox + ((1.0 - s.margin_right) * rw as f32).round() as i32;
+        let x1 = page_ox + ((1.0 - mr) * rw as f32).round() as i32;
         let y1 = page_oy + ((1.0 - s.margin_bottom) * rh as f32).round() as i32;
 
         // 2. Dim outer excluded margins with a clean cross-hatch stipple pattern
@@ -488,9 +506,14 @@ impl Screen for CropDialog {
                 let page_oy = (h - rh) / 2;
 
                 let s = &self.settings.split;
-                let x0 = page_ox + (s.margin_left * rw as f32).round() as i32;
+                let (ml, mr) = if s.mirror_even_odd && (self.page_no % 2 == 1) {
+                    (s.margin_right, s.margin_left)
+                } else {
+                    (s.margin_left, s.margin_right)
+                };
+                let x0 = page_ox + (ml * rw as f32).round() as i32;
                 let y0 = page_oy + (s.margin_top * rh as f32).round() as i32;
-                let x1 = page_ox + ((1.0 - s.margin_right) * rw as f32).round() as i32;
+                let x1 = page_ox + ((1.0 - mr) * rw as f32).round() as i32;
                 let y1 = page_oy + ((1.0 - s.margin_bottom) * rh as f32).round() as i32;
 
                 if (vy - y0).abs() < 50 {

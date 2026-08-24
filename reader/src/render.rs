@@ -56,6 +56,18 @@ impl LayoutGeom {
         w: u32,
         h: u32,
     ) -> Option<LayoutGeom> {
+        Self::new_for_page(settings, bounds, 0, sub_idx, w, h)
+    }
+
+    /// `w`/`h` are the VISUAL dims of the target buffer, with page number awareness for even/odd margin mirroring.
+    pub fn new_for_page(
+        settings: &ReaderSettings,
+        bounds: mupdf::Rect,
+        page_no: usize,
+        sub_idx: usize,
+        w: u32,
+        h: u32,
+    ) -> Option<LayoutGeom> {
         let pw = bounds.x1 - bounds.x0;
         let ph = bounds.y1 - bounds.y0;
         if pw <= 0.0 || ph <= 0.0 {
@@ -67,7 +79,7 @@ impl LayoutGeom {
         let (vis_w, vis_h) = (w as f32, (h.saturating_sub(footer_h + header_h)) as f32);
 
         let config = &settings.split;
-        let sub_boxes = config.sub_boxes();
+        let sub_boxes = config.sub_boxes_for_page(page_no);
         let sub_box = sub_boxes
             .get(sub_idx)
             .copied()
@@ -365,7 +377,7 @@ pub fn render_page(
             return None;
         }
     };
-    let geom = LayoutGeom::new(settings, bounds, sub_idx, w, h)?;
+    let geom = LayoutGeom::new_for_page(settings, bounds, page_no, sub_idx, w, h)?;
     render_page_on(&page, &geom, sub_idx, settings, w, h)
 }
 
@@ -682,11 +694,143 @@ mod tests {
         let margins = detect_page_margins(&page, 8.0);
         assert!(margins.is_some());
         let (ml, mt, mr, mb) = margins.unwrap();
-        assert!(ml > 0.0);
-        assert!(mt > 0.0);
+        assert!(ml > 0.0 && mt > 0.0 && mr > 0.0 && mb > 0.0);
         let book_margins = detect_book_margins(&doc, 0);
         assert!(book_margins.is_some());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Autocrop must not swap top/bottom. Quads and bounds both arrive
+    /// in mupdf's normalized (origin-relative, y-DOWN) space — the same
+    /// invariant `words_follow_nonzero_cropbox_origin` pins for word
+    /// boxes. Text pinned near the TOP edge (PDF y=700 of 792) must
+    /// yield a small margin_top and a huge margin_bottom (clamped to
+    /// 0.40). Reading the quad corners as PDF y-up would flip the two
+    /// and fail here.
+    #[test]
+    fn autocrop_pins_top_vs_bottom() {
+        let path = std::env::temp_dir().join("yb_autocrop_top.pdf");
+        std::fs::write(
+            &path,
+            build_pdf(&[(
+                "BT /F1 24 Tf 100 700 Td (TopText) Tj ET".to_string(),
+                String::new(),
+            )]),
+        )
+        .expect("write test pdf");
+        let doc = Document::open(path.as_os_str()).expect("open test pdf");
+        let page = doc.load_page(0).expect("load page");
+        let (ml, mt, mr, mb) = detect_page_margins(&page, 8.0).expect("margins");
+        assert!(mt < 0.12, "margin_top {mt:.3} too big — top/bottom swapped?");
+        assert!(mb > 0.35, "margin_bottom {mb:.3} too small");
+        assert!(ml > 0.10 && ml < 0.19, "margin_left {ml:.3}");
+        assert!(mr > 0.35, "margin_right {mr:.3}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A text-free page (vector ink only) takes the downscaled-pixmap
+    /// fallback. A 100x100 black square at PDF (50,50) sits at the
+    /// page's bottom-left: mb and ml stay small, mt/mr clamp high.
+    #[test]
+    fn autocrop_pixmap_fallback_ink_only() {
+        let path = std::env::temp_dir().join("yb_autocrop_ink.pdf");
+        std::fs::write(
+            &path,
+            build_pdf(&[("0 0 0 rg 50 50 100 100 re f".to_string(), String::new())]),
+        )
+        .expect("write test pdf");
+        let doc = Document::open(path.as_os_str()).expect("open test pdf");
+        let page = doc.load_page(0).expect("load page");
+        let (ml, mt, mr, mb) = detect_page_margins(&page, 8.0).expect("margins");
+        assert!(mb < 0.10, "margin_bottom {mb:.3} — ink placed wrong or axis swapped");
+        assert!(ml < 0.10, "margin_left {ml:.3}");
+        assert!(mt > 0.35, "margin_top {mt:.3}");
+        assert!(mr > 0.35, "margin_right {mr:.3}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Book-wide detection folds L/R to the smaller side so facing
+    /// pages (ink near the left on one, near the right on the other)
+    /// never clip.
+    #[test]
+    fn autocrop_book_margins_symmetric_lr() {
+        let path = std::env::temp_dir().join("yb_autocrop_book.pdf");
+        std::fs::write(
+            &path,
+            build_pdf(&[
+                (
+                    "BT /F1 24 Tf 60 400 Td (L) Tj ET".to_string(),
+                    String::new(),
+                ),
+                (
+                    "BT /F1 24 Tf 540 400 Td (R) Tj ET".to_string(),
+                    String::new(),
+                ),
+            ]),
+        )
+        .expect("write test pdf");
+        let doc = Document::open(path.as_os_str()).expect("open test pdf");
+        let (ml, _mt, mr, _mb) = detect_book_margins(&doc, 0).expect("book margins");
+        assert!(
+            (ml - mr).abs() < 1e-4,
+            "L/R not symmetrized: ml={ml:.3} mr={mr:.3}"
+        );
+        assert!(
+            ml < 0.12 && mr < 0.12,
+            "facing-page clip guard failed: ml={ml:.3} mr={mr:.3}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A minimal N-page letter-size PDF with one Helvetica content
+    /// stream per page. Same byte-exact construction as `cropbox_pdf`,
+    /// generalized so autocrop tests can place ink asymmetrically and
+    /// build multi-page books.
+    fn build_pdf(pages: &[(String, String)]) -> Vec<u8> {
+        let n = pages.len();
+        let font_no = 3 + 2 * n;
+        let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 3 + 2 * i)).collect();
+        let mut objs: Vec<String> = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), n),
+        ];
+        for (i, (content, extra)) in pages.iter().enumerate() {
+            objs.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] {} /Contents {} 0 R \
+                 /Resources << /Font << /F1 {} 0 R >> >> >>",
+                extra,
+                4 + 2 * i,
+                font_no
+            ));
+            objs.push(format!(
+                "<< /Length {} >>\nstream\n{}\nendstream",
+                content.len() + 1,
+                content
+            ));
+        }
+        objs.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into());
+
+        let count = objs.len();
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offs = vec![0usize; count];
+        for (i, o) in objs.iter().enumerate() {
+            offs[i] = pdf.len();
+            pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", i + 1, o).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", count + 1).as_bytes());
+        for o in offs {
+            pdf.extend_from_slice(format!("{:010} 00000 n \n", o).as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF",
+                count + 1,
+                xref
+            )
+            .as_bytes(),
+        );
+        pdf
     }
 
     /// A minimal one-page PDF whose CropBox sits at a real offset from

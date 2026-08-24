@@ -155,7 +155,7 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                     mr_str.parse(),
                     mb_str.parse(),
                 ) {
-                    let split = SplitConfig {
+                    let mut split = SplitConfig {
                         preset: str_to_preset(preset_str),
                         rotation: rot,
                         overlap: if ov > 0.035 { 0.018 } else { ov },
@@ -163,6 +163,7 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                         margin_top: mt,
                         margin_right: mr,
                         margin_bottom: mb,
+                        mirror_even_odd: false,
                     };
 
                     let font_size = it.next().and_then(|s| s.parse().ok()).unwrap_or(11.0);
@@ -184,6 +185,8 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                         .and_then(|s| s.parse::<f32>().ok())
                         .filter(|v| (0.8..=1.8).contains(v))
                         .unwrap_or(1.0);
+                    let mirror_even_odd = it.next().map(|s| s == "1").unwrap_or(false);
+                    split.mirror_even_odd = mirror_even_odd;
 
                     settings = Some(ReaderSettings {
                         split,
@@ -226,7 +229,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
             if let Some(s) = p.settings {
                 let sc = s.split;
                 format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}\t{}",
                     k,
                     p.page,
                     p.total,
@@ -245,6 +248,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
                     if s.invert { "1" } else { "0" },
                     s.margin_pad,
                     s.line_spacing,
+                    if sc.mirror_even_odd { "1" } else { "0" },
                 )
             } else if p.sub_idx > 0 {
                 format!("{}\t{}\t{}\t{}\t{}", k, p.page, p.total, p.ts, p.sub_idx)
@@ -352,17 +356,19 @@ mod tests {
         assert_eq!(map["a.epub"], Pos::simple(12, 340, 1700000000));
         assert_eq!(map.len(), 2);
 
-        let path = "/tmp/yb-positions-test.txt";
-        let _ = std::fs::remove_file(path);
-        save_at(path, &map);
-        assert_eq!(load_at(path), map);
-        let _ = std::fs::remove_file(path);
+        let path = std::env::temp_dir().join("yb-positions-roundtrip-test.txt");
+        let p = path.to_str().unwrap();
+        let _ = std::fs::remove_file(p);
+        save_at(p, &map);
+        assert_eq!(load_at(p), map);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn settings_roundtrip() {
         let mut settings = ReaderSettings::default();
         settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
+        settings.split.mirror_even_odd = true;
         settings.font_size = 13.5;
         settings.contrast = ContrastMode::BoldText;
         settings.invert = true;
@@ -379,20 +385,22 @@ mod tests {
                 settings: Some(settings),
             },
         );
-        let path = "/tmp/yb-positions-settings-test.txt";
-        let _ = std::fs::remove_file(path);
-        save_at(path, &map);
-        let loaded = load_at(path);
+        let path = std::env::temp_dir().join("yb-positions-settings-test.txt");
+        let p = path.to_str().unwrap();
+        let _ = std::fs::remove_file(p);
+        save_at(p, &map);
+        let loaded = load_at(p);
         assert_eq!(loaded["paper.pdf"].page, 5);
         assert_eq!(loaded["paper.pdf"].sub_idx, 1);
         let s = loaded["paper.pdf"].settings.unwrap();
         assert_eq!(s.split.preset, SplitPreset::Horizontal2);
+        assert!(s.split.mirror_even_odd);
         assert_eq!(s.font_size, 13.5);
         assert_eq!(s.contrast, ContrastMode::BoldText);
         assert!(s.invert);
         // margin_pad survives the store (it was silently reset to 72).
         assert_eq!(s.margin_pad, 108);
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]
@@ -427,39 +435,41 @@ mod tests {
                 settings: Some(settings),
             },
         );
-        let path = "/tmp/yb-positions-yread-test.txt";
-        let _ = std::fs::remove_file(path);
-        save_at(path, &map);
-        let loaded = load_at(path);
+        let path = std::env::temp_dir().join("yb-positions-yread-test.txt");
+        let p = path.to_str().unwrap();
+        let _ = std::fs::remove_file(p);
+        save_at(p, &map);
+        let loaded = load_at(p);
         assert_eq!(loaded["book.epub"].page, 7);
         assert_eq!(loaded["book.epub"].sub_idx, 2);
         let s = loaded["book.epub"].settings.unwrap();
         assert!((s.line_spacing - 1.3).abs() < 0.01);
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]
     fn record_skips_identical_entries_but_writes_changes() {
-        let path = "/tmp/yb-positions-dedupe-test.txt";
-        let _ = std::fs::remove_file(path);
+        let path = std::env::temp_dir().join("yb-positions-dedupe-test.txt");
+        let p = path.to_str().unwrap();
+        let _ = std::fs::remove_file(p);
         let pos = Pos::simple(3, 30, 1000);
-        record_at(path, "a.epub", pos);
+        record_at(p, "a.epub", pos);
         // Tamper externally with an UNPARSEABLE line: if the second,
         // identical record is a no-op the content survives; if it wrote,
         // the reload would drop the bad line and the rewrite would
         // remove it.
-        std::fs::write(path, "a.epub\t3\t30\t1000\nsentinel\tx\t1\t1\n").unwrap();
-        record_at(path, "a.epub", pos);
+        std::fs::write(p, "a.epub\t3\t30\t1000\nsentinel\tx\t1\t1\n").unwrap();
+        record_at(p, "a.epub", pos);
         assert!(
-            std::fs::read_to_string(path).unwrap().contains("sentinel"),
+            std::fs::read_to_string(p).unwrap().contains("sentinel"),
             "identical record must not rewrite the store"
         );
         // A real change still writes (and the tampered line is gone).
-        record_at(path, "a.epub", Pos::simple(4, 30, 1001));
-        let after = std::fs::read_to_string(path).unwrap();
+        record_at(p, "a.epub", Pos::simple(4, 30, 1001));
+        let after = std::fs::read_to_string(p).unwrap();
         assert!(!after.contains("sentinel"));
         assert!(after.contains("a.epub\t4\t30\t1001"));
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]
@@ -467,19 +477,20 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("keep.epub".to_string(), Pos::simple(1, 10, 1));
         map.insert("gone.epub".to_string(), Pos::simple(2, 10, 2));
-        let path = "/tmp/yb-positions-prune-test.txt";
-        let _ = std::fs::remove_file(path);
-        save_at(path, &map);
+        let path = std::env::temp_dir().join("yb-positions-prune-test.txt");
+        let p = path.to_str().unwrap();
+        let _ = std::fs::remove_file(p);
+        save_at(p, &map);
 
-        prune_at(path, &["keep.epub".to_string()]);
-        let after = load_at(path);
+        prune_at(p, &["keep.epub".to_string()]);
+        let after = load_at(p);
         assert_eq!(after.len(), 1);
         assert!(after.contains_key("keep.epub"));
 
         // An empty live set is a failed scan (unreadable documents/),
         // not an empty library: prune must leave the store alone.
-        prune_at(path, &[]);
-        assert_eq!(load_at(path).len(), 1);
-        let _ = std::fs::remove_file(path);
+        prune_at(p, &[]);
+        assert_eq!(load_at(p).len(), 1);
+        let _ = std::fs::remove_file(p);
     }
 }

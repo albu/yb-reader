@@ -56,6 +56,8 @@ pub struct SplitConfig {
     pub margin_top: f32,
     pub margin_right: f32,
     pub margin_bottom: f32,
+    /// Mirror left and right margins on odd pages (facing-page / twoside book layouts)
+    pub mirror_even_odd: bool,
 }
 
 impl Default for SplitConfig {
@@ -68,6 +70,7 @@ impl Default for SplitConfig {
             margin_top: 0.0,
             margin_right: 0.0,
             margin_bottom: 0.0,
+            mirror_even_odd: false,
         }
     }
 }
@@ -83,6 +86,7 @@ impl SplitConfig {
                 margin_top: 0.0,
                 margin_right: 0.0,
                 margin_bottom: 0.0,
+                mirror_even_odd: false,
             },
             SplitPreset::Horizontal2 => Self {
                 preset: SplitPreset::Horizontal2,
@@ -92,6 +96,7 @@ impl SplitConfig {
                 margin_top: 0.02,
                 margin_right: 0.02,
                 margin_bottom: 0.02,
+                mirror_even_odd: false,
             },
             SplitPreset::Horizontal3 => Self {
                 preset: SplitPreset::Horizontal3,
@@ -101,6 +106,7 @@ impl SplitConfig {
                 margin_top: 0.02,
                 margin_right: 0.02,
                 margin_bottom: 0.02,
+                mirror_even_odd: false,
             },
             SplitPreset::Vertical2 => Self {
                 preset: SplitPreset::Vertical2,
@@ -110,6 +116,7 @@ impl SplitConfig {
                 margin_top: 0.02,
                 margin_right: 0.02,
                 margin_bottom: 0.02,
+                mirror_even_odd: false,
             },
             SplitPreset::Grid4 => Self {
                 preset: SplitPreset::Grid4,
@@ -119,6 +126,7 @@ impl SplitConfig {
                 margin_top: 0.02,
                 margin_right: 0.02,
                 margin_bottom: 0.02,
+                mirror_even_odd: false,
             },
         }
     }
@@ -145,11 +153,18 @@ impl SplitConfig {
         }
     }
 
-    /// Generates the list of sub-boxes in reading order (normalized 0.0..1.0 coordinates).
-    pub fn sub_boxes(&self) -> Vec<RectF> {
-        let x0 = self.margin_left.clamp(0.0, 0.45);
+    /// Generates the list of sub-boxes in reading order for a given page number (0-indexed).
+    /// If `mirror_even_odd` is true, odd pages (1, 3, 5...) swap left and right margins.
+    pub fn sub_boxes_for_page(&self, page_no: usize) -> Vec<RectF> {
+        let (ml, mr) = if self.mirror_even_odd && (page_no % 2 == 1) {
+            (self.margin_right, self.margin_left)
+        } else {
+            (self.margin_left, self.margin_right)
+        };
+
+        let x0 = ml.clamp(0.0, 0.45);
         let y0 = self.margin_top.clamp(0.0, 0.45);
-        let x1 = (1.0 - self.margin_right).clamp(x0 + 0.1, 1.0);
+        let x1 = (1.0 - mr).clamp(x0 + 0.1, 1.0);
         let y1 = (1.0 - self.margin_bottom).clamp(y0 + 0.1, 1.0);
 
         let w = x1 - x0;
@@ -220,6 +235,11 @@ impl SplitConfig {
                 ]
             }
         }
+    }
+
+    /// Generates the list of sub-boxes in reading order (default page 0).
+    pub fn sub_boxes(&self) -> Vec<RectF> {
+        self.sub_boxes_for_page(0)
     }
 
     #[allow(dead_code)]
@@ -387,5 +407,28 @@ mod tests {
         s.invert = true;
         let lut_inv = s.build_lut();
         assert_eq!(lut_inv[0], 255);
+    }
+
+    #[test]
+    fn test_mirror_even_odd() {
+        let mut cfg = SplitConfig::default();
+        cfg.margin_left = 0.16;
+        cfg.margin_right = 0.10;
+        cfg.mirror_even_odd = true;
+
+        // Even page (page 0, 2): margin_left = 0.16, margin_right = 0.10 -> x0=0.16, x1=0.90
+        let boxes_even = cfg.sub_boxes_for_page(0);
+        assert_eq!(boxes_even.len(), 1);
+        assert!((boxes_even[0].x0 - 0.16).abs() < 1e-4);
+        assert!((boxes_even[0].x1 - 0.90).abs() < 1e-4);
+
+        // Odd page (page 1, 3): swapped! margin_left = 0.10, margin_right = 0.16 -> x0=0.10, x1=0.84
+        let boxes_odd = cfg.sub_boxes_for_page(1);
+        assert_eq!(boxes_odd.len(), 1);
+        assert!((boxes_odd[0].x0 - 0.10).abs() < 1e-4);
+        assert!((boxes_odd[0].x1 - 0.84).abs() < 1e-4);
+
+        // Width on both pages is identical (1.0 - 0.16 - 0.10 = 0.74)
+        assert!((boxes_even[0].width() - boxes_odd[0].width()).abs() < 1e-4);
     }
 }

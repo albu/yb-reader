@@ -226,7 +226,7 @@ impl ReaderBackend for PdfBackend {
         let mut gray = None;
         if let Some(cached) = &self.cached_page {
             if cached.page_no == self.page_no {
-                if let Some(geom) = render::LayoutGeom::new(settings, cached.bounds, self.sub_idx, vw, vh) {
+                if let Some(geom) = render::LayoutGeom::new_for_page(settings, cached.bounds, self.page_no, self.sub_idx, vw, vh) {
                     if geom.zoom.to_bits() == cached.zoom_bits {
                         if let Some(tp) = &cached.text_page {
                             words = render::words_from_text_page(tp, &geom);
@@ -256,7 +256,7 @@ impl ReaderBackend for PdfBackend {
                     Err(e) => {
                         ybdev::log::plog(&format!("render: page {} bounds: {}", self.page_no, e));
                     }
-                    Ok(bounds) => match render::LayoutGeom::new(settings, bounds, self.sub_idx, vw, vh) {
+                    Ok(bounds) => match render::LayoutGeom::new_for_page(settings, bounds, self.page_no, self.sub_idx, vw, vh) {
                         None => {
                             ybdev::log::plog(&format!(
                                 "render: page {} has a degenerate box {:?}",
