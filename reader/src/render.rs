@@ -351,6 +351,85 @@ pub fn detect_book_margins(doc: &Document, cur_page: usize) -> Option<(f32, f32,
     Some((lr_safe, min_t, lr_safe, min_b))
 }
 
+/// Auto-detect facing-page (even/odd) margins by sampling even and odd body pages.
+/// Returns `(even_margin_left, margin_top, even_margin_right, margin_bottom)` suited for `mirror_even_odd = true`.
+pub fn detect_even_odd_margins(doc: &Document, cur_page: usize) -> Option<(f32, f32, f32, f32)> {
+    let total = doc.page_count().ok()?.max(0) as usize;
+    if total == 0 {
+        return None;
+    }
+
+    let mut even_samples = Vec::new();
+    let mut odd_samples = Vec::new();
+
+    let mut sample_pages = Vec::new();
+    for p in [
+        cur_page,
+        cur_page + 1,
+        cur_page.saturating_sub(1),
+        cur_page + 2,
+        total / 4,
+        total / 4 + 1,
+        total / 2,
+        total / 2 + 1,
+    ] {
+        if p < total && !sample_pages.contains(&p) {
+            sample_pages.push(p);
+        }
+    }
+
+    for pno in sample_pages {
+        if let Ok(page) = doc.load_page(pno as i32) {
+            if let Some(m) = detect_page_margins(&page, 8.0) {
+                if pno % 2 == 0 {
+                    even_samples.push(m);
+                } else {
+                    odd_samples.push(m);
+                }
+            }
+        }
+    }
+
+    if even_samples.is_empty() && odd_samples.is_empty() {
+        return None;
+    }
+
+    let mut min_even_l = f32::MAX;
+    let mut min_even_r = f32::MAX;
+    let mut min_t = f32::MAX;
+    let mut min_b = f32::MAX;
+
+    for (ml, mt, mr, mb) in &even_samples {
+        min_even_l = min_even_l.min(*ml);
+        min_even_r = min_even_r.min(*mr);
+        min_t = min_t.min(*mt);
+        min_b = min_b.min(*mb);
+    }
+
+    for (ml, mt, mr, mb) in &odd_samples {
+        // Odd page's left corresponds to even page's right; odd page's right corresponds to even page's left
+        min_even_r = min_even_r.min(*ml);
+        min_even_l = min_even_l.min(*mr);
+        min_t = min_t.min(*mt);
+        min_b = min_b.min(*mb);
+    }
+
+    if min_even_l == f32::MAX {
+        min_even_l = min_even_r;
+    }
+    if min_even_r == f32::MAX {
+        min_even_r = min_even_l;
+    }
+    if min_t == f32::MAX {
+        min_t = 0.0;
+    }
+    if min_b == f32::MAX {
+        min_b = 0.0;
+    }
+
+    Some((min_even_l, min_t, min_even_r, min_b))
+}
+
 /// Rasterize (page, sub_idx) to visual-sized grayscale over the shared
 /// [`LayoutGeom`] math. Loads the page itself — for callers that only
 /// need ink (crop preview, tests). The backend uses [`render_page_on`]
@@ -779,6 +858,33 @@ mod tests {
             ml < 0.12 && mr < 0.12,
             "facing-page clip guard failed: ml={ml:.3} mr={mr:.3}"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Facing-page detection finds asymmetric odd/even margins without flattening to symmetric.
+    #[test]
+    fn autocrop_even_odd_margins() {
+        let path = std::env::temp_dir().join("yb_autocrop_even_odd.pdf");
+        std::fs::write(
+            &path,
+            build_pdf(&[
+                // Page 0 (Even): Text on the right (ml=0.20, mr=0.10)
+                (
+                    "BT /F1 24 Tf 150 400 Td (EvenPageText) Tj ET".to_string(),
+                    String::new(),
+                ),
+                // Page 1 (Odd): Text on the left (ml=0.10, mr=0.20)
+                (
+                    "BT /F1 24 Tf 60 400 Td (OddPageText) Tj ET".to_string(),
+                    String::new(),
+                ),
+            ]),
+        )
+        .expect("write test pdf");
+        let doc = Document::open(path.as_os_str()).expect("open test pdf");
+        let (ml, _mt, mr, _mb) = detect_even_odd_margins(&doc, 0).expect("even odd margins");
+        // ml (even page left) should be larger than mr (even page right)
+        assert!(ml > mr, "Even page left should reflect outer margin: ml={ml:.3}, mr={mr:.3}");
         let _ = std::fs::remove_file(&path);
     }
 

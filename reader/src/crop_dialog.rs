@@ -1,6 +1,6 @@
-//! Interactive visual margin crop screen for PDF / fixed-layout books.
-//! Displays the full uncropped page with 4 draggable dashed guide lines,
-//! corner handles, and precision nudging controls.
+//! Interactive visual margin crop studio for PDF / fixed-layout books.
+//! Displays full uncropped pages with draggable dashed guide lines,
+//! facing-page (Even/Odd) preview flipping, and intelligent auto-crop detection.
 
 use ybdev::input::Gesture;
 use yui::painter::{pt, Painter, Rect};
@@ -25,7 +25,8 @@ pub struct CropDialog {
     pub total: usize,
     pub settings: ReaderSettings,
     pub doc: Option<std::rc::Rc<mupdf::Document>>,
-    pub page_gray: Option<Vec<u8>>,
+    pub view_page_no: usize,
+    pub cached_page_gray: Option<(usize, Vec<u8>)>,
     pub active_edge: ActiveEdge,
     drag_edge: Option<ActiveEdge>,
     dims: (i32, i32),
@@ -47,7 +48,8 @@ impl CropDialog {
             total,
             settings,
             doc,
-            page_gray: None,
+            view_page_no: page_no,
+            cached_page_gray: None,
             active_edge: ActiveEdge::Top,
             drag_edge: None,
             dims: (1236, 1648),
@@ -66,7 +68,7 @@ impl CropDialog {
     }
 
     fn nudge(&mut self, delta: f32) {
-        let is_odd = self.settings.split.mirror_even_odd && (self.page_no % 2 == 1);
+        let is_odd = self.settings.split.mirror_even_odd && (self.view_page_no % 2 == 1);
         let s = &mut self.settings.split;
         match self.active_edge {
             ActiveEdge::Top => s.margin_top = (s.margin_top + delta).clamp(0.0, 0.40),
@@ -93,6 +95,36 @@ impl CropDialog {
             }
         }
     }
+
+    fn run_auto_crop(&mut self) {
+        if let Some(doc) = &self.doc {
+            if self.settings.split.mirror_even_odd {
+                if let Some((ml, mt, mr, mb)) =
+                    crate::render::detect_even_odd_margins(doc.as_ref(), self.view_page_no)
+                {
+                    self.settings.split.margin_left = ml;
+                    self.settings.split.margin_top = mt;
+                    self.settings.split.margin_right = mr;
+                    self.settings.split.margin_bottom = mb;
+                }
+            } else if let Some((ml, mt, mr, mb)) =
+                crate::render::detect_book_margins(doc.as_ref(), self.view_page_no)
+            {
+                self.settings.split.margin_left = ml;
+                self.settings.split.margin_top = mt;
+                self.settings.split.margin_right = mr;
+                self.settings.split.margin_bottom = mb;
+            }
+        }
+    }
+
+    fn reset_crop(&mut self) {
+        self.settings.split.margin_left = 0.0;
+        self.settings.split.margin_top = 0.0;
+        self.settings.split.margin_right = 0.0;
+        self.settings.split.margin_bottom = 0.0;
+        self.settings.split.mirror_even_odd = false;
+    }
 }
 
 impl Screen for CropDialog {
@@ -105,8 +137,13 @@ impl Screen for CropDialog {
         let (w, h) = p.size();
         self.dims = (w, h);
 
-        // Render full uncropped portrait page if not yet cached
-        if self.page_gray.is_none() {
+        // Render full uncropped portrait page if not cached for current view_page_no
+        let needs_render = match &self.cached_page_gray {
+            Some((cached_p, _)) => *cached_p != self.view_page_no,
+            None => true,
+        };
+
+        if needs_render {
             if let Some(doc) = &self.doc {
                 let mut fit_s = self.settings;
                 fit_s.show_header = false;
@@ -116,26 +153,28 @@ impl Screen for CropDialog {
                 fit_s.split.margin_top = 0.0;
                 fit_s.split.margin_right = 0.0;
                 fit_s.split.margin_bottom = 0.0;
-                self.page_gray = crate::render::render_page(
+                if let Some(gray) = crate::render::render_page(
                     doc.as_ref(),
-                    self.page_no,
+                    self.view_page_no,
                     0,
                     &fit_s,
                     w as u32,
                     h as u32,
-                );
+                ) {
+                    self.cached_page_gray = Some((self.view_page_no, gray));
+                }
             }
         }
 
         // 1. Draw the uncropped base page
-        if let Some(gray) = &self.page_gray {
+        if let Some((_, gray)) = &self.cached_page_gray {
             p.blit_gray(0, 0, w, h, gray, w as usize);
         } else {
             p.clear(255);
         }
 
         let (pw, ph) = if let Some(doc) = &self.doc {
-            if let Ok(page) = doc.load_page(self.page_no as i32) {
+            if let Ok(page) = doc.load_page(self.view_page_no as i32) {
                 if let Ok(b) = page.bounds() {
                     (b.x1 - b.x0, b.y1 - b.y0)
                 } else {
@@ -155,7 +194,7 @@ impl Screen for CropDialog {
         let page_oy = (h - rh) / 2;
 
         let s = &self.settings.split;
-        let (ml, mr) = if s.mirror_even_odd && (self.page_no % 2 == 1) {
+        let (ml, mr) = if s.mirror_even_odd && (self.view_page_no % 2 == 1) {
             (s.margin_right, s.margin_left)
         } else {
             (s.margin_left, s.margin_right)
@@ -265,7 +304,14 @@ impl Screen for CropDialog {
                     p.rect(Rect::new(mid_x, sy, 1, seg_h), 100);
                     sy += dash + gap;
                 }
-                p.text_center_in(mid_x - pt(30.0), mid_x + pt(30.0), (y0 + y1) / 2, 6.5, 80, "2-Col");
+                p.text_center_in(
+                    mid_x - pt(30.0),
+                    mid_x + pt(30.0),
+                    (y0 + y1) / 2,
+                    6.5,
+                    80,
+                    "2-Col",
+                );
             }
             crate::split::SplitPreset::Grid4 => {
                 let mid_x = (x0 + x1) / 2;
@@ -303,18 +349,148 @@ impl Screen for CropDialog {
         p.rect(Rect::new(x1 - clen, y1 - cth, clen, cth), 0);
         p.rect(Rect::new(x1 - cth, y1 - clen, cth, clen), 0);
 
-        // 5. Floating Bottom Control Palette (pill)
-        let bar_h = pt(42.0);
-        let bar_w = (w - pt(32.0)).min(pt(280.0));
+        // 5. Floating Bottom Control Palette
+        let bar_h = pt(74.0);
+        let bar_w = (w - pt(24.0)).min(pt(310.0));
         let bar_x = (w - bar_w) / 2;
-        let bar_y = h - bar_h - pt(16.0);
+        let bar_y = h - bar_h - pt(10.0);
 
         // Drop shadow + white rounded pill card
         p.rect(Rect::new(bar_x + 2, bar_y + 2, bar_w, bar_h), 120);
         p.rect(Rect::new(bar_x, bar_y, bar_w, bar_h), 255);
         p.rect_outline_t(Rect::new(bar_x, bar_y, bar_w, bar_h), 2, 0);
 
-        // Row 1: Edge selector pills [ Top | Bottom | Left | Right | All ]
+        // Row 1 (y = bar_y + pt(4.0)): Mode & Page Flip Switchers
+        let r1_y = bar_y + pt(4.0);
+        let r1_h = pt(15.0);
+
+        // Mode: Unified
+        let mode_uni_btn = Rect::new(bar_x + pt(6.0), r1_y, pt(56.0), r1_h);
+        if !s.mirror_even_odd {
+            p.rect(mode_uni_btn, 0);
+            p.text_center_in(
+                mode_uni_btn.x,
+                mode_uni_btn.x + mode_uni_btn.w,
+                r1_y + pt(10.5),
+                6.5,
+                255,
+                "Unified",
+            );
+        } else {
+            p.rect_outline_t(mode_uni_btn, 1, 120);
+            p.text_center_in(
+                mode_uni_btn.x,
+                mode_uni_btn.x + mode_uni_btn.w,
+                r1_y + pt(10.5),
+                6.5,
+                0,
+                "Unified",
+            );
+        }
+
+        // Mode: Odd/Even
+        let mode_oe_btn = Rect::new(bar_x + pt(66.0), r1_y, pt(64.0), r1_h);
+        if s.mirror_even_odd {
+            p.rect(mode_oe_btn, 0);
+            p.text_center_in(
+                mode_oe_btn.x,
+                mode_oe_btn.x + mode_oe_btn.w,
+                r1_y + pt(10.5),
+                6.5,
+                255,
+                "Odd/Even",
+            );
+        } else {
+            p.rect_outline_t(mode_oe_btn, 1, 120);
+            p.text_center_in(
+                mode_oe_btn.x,
+                mode_oe_btn.x + mode_oe_btn.w,
+                r1_y + pt(10.5),
+                6.5,
+                0,
+                "Odd/Even",
+            );
+        }
+
+        // Page preview switchers
+        if s.mirror_even_odd {
+            let even_pno = if self.view_page_no % 2 == 0 {
+                self.view_page_no
+            } else {
+                self.view_page_no.saturating_sub(1)
+            };
+            let odd_pno = if even_pno + 1 < self.total {
+                even_pno + 1
+            } else {
+                even_pno
+            };
+
+            let even_btn = Rect::new(bar_x + pt(136.0), r1_y, pt(80.0), r1_h);
+            let odd_btn = Rect::new(bar_x + pt(220.0), r1_y, pt(80.0), r1_h);
+
+            if self.view_page_no % 2 == 0 {
+                p.rect(even_btn, 0);
+                p.text_center_in(
+                    even_btn.x,
+                    even_btn.x + even_btn.w,
+                    r1_y + pt(10.5),
+                    6.5,
+                    255,
+                    &format!("Even (p.{})", even_pno + 1),
+                );
+                p.rect_outline_t(odd_btn, 1, 120);
+                p.text_center_in(
+                    odd_btn.x,
+                    odd_btn.x + odd_btn.w,
+                    r1_y + pt(10.5),
+                    6.5,
+                    0,
+                    &format!("Odd (p.{})", odd_pno + 1),
+                );
+            } else {
+                p.rect_outline_t(even_btn, 1, 120);
+                p.text_center_in(
+                    even_btn.x,
+                    even_btn.x + even_btn.w,
+                    r1_y + pt(10.5),
+                    6.5,
+                    0,
+                    &format!("Even (p.{})", even_pno + 1),
+                );
+                p.rect(odd_btn, 0);
+                p.text_center_in(
+                    odd_btn.x,
+                    odd_btn.x + odd_btn.w,
+                    r1_y + pt(10.5),
+                    6.5,
+                    255,
+                    &format!("Odd (p.{})", odd_pno + 1),
+                );
+            }
+        } else {
+            let prev_btn = Rect::new(bar_x + pt(146.0), r1_y, pt(72.0), r1_h);
+            let next_btn = Rect::new(bar_x + pt(224.0), r1_y, pt(72.0), r1_h);
+            p.rect_outline_t(prev_btn, 1, 120);
+            p.text_center_in(
+                prev_btn.x,
+                prev_btn.x + prev_btn.w,
+                r1_y + pt(10.5),
+                6.5,
+                0,
+                "◀ Prev Pg",
+            );
+            p.rect_outline_t(next_btn, 1, 120);
+            p.text_center_in(
+                next_btn.x,
+                next_btn.x + next_btn.w,
+                r1_y + pt(10.5),
+                6.5,
+                0,
+                "Next Pg ▶",
+            );
+        }
+
+        // Row 2: Edge selector pills [ Top | Bottom | Left | Right | All ]
         let edges = [
             (ActiveEdge::Top, "Top"),
             (ActiveEdge::Bottom, "Btm"),
@@ -323,84 +499,97 @@ impl Screen for CropDialog {
             (ActiveEdge::All, "All"),
         ];
         let edge_btn_w = (bar_w - pt(16.0)) / 5;
-        let edge_btn_h = pt(16.0);
-        let edge_y = bar_y + pt(4.0);
+        let edge_btn_h = pt(15.0);
+        let edge_y = bar_y + pt(24.0);
 
         for (i, (edge, lbl)) in edges.iter().enumerate() {
             let bx = bar_x + pt(8.0) + i as i32 * edge_btn_w;
             let br = Rect::new(bx, edge_y, edge_btn_w - pt(2.0), edge_btn_h);
             if self.active_edge == *edge {
                 p.rect(br, 0);
-                p.text_center_in(br.x, br.x + br.w, edge_y + pt(11.0), 6.5, 255, lbl);
+                p.text_center_in(br.x, br.x + br.w, edge_y + pt(10.5), 6.5, 255, lbl);
             } else {
                 p.rect_outline_t(br, 1, 120);
-                p.text_center_in(br.x, br.x + br.w, edge_y + pt(11.0), 6.5, 0, lbl);
+                p.text_center_in(br.x, br.x + br.w, edge_y + pt(10.5), 6.5, 0, lbl);
             }
         }
 
-        // Row 2: Precision Nudge [-1%] [+1%] | [Auto] | [Reset] | [Apply]
-        let r2_y = bar_y + pt(23.0);
-        let btn_h = pt(15.0);
+        // Row 3: Precision Nudge [-1%] [%] [+1%] | [Auto] | [Reset] | [Apply]
+        let r3_y = bar_y + pt(45.0);
+        let btn_h = pt(18.0);
 
         // Minus button
-        let m_btn = Rect::new(bar_x + pt(6.0), r2_y, pt(20.0), btn_h);
+        let m_btn = Rect::new(bar_x + pt(6.0), r3_y, pt(22.0), btn_h);
         p.rect_outline_t(m_btn, 1, 0);
-        p.text_center_in(m_btn.x, m_btn.x + m_btn.w, r2_y + pt(10.5), 8.0, 0, "-");
+        p.text_center_in(m_btn.x, m_btn.x + m_btn.w, r3_y + pt(12.5), 8.0, 0, "-");
 
         // Percentage display
+        let is_odd = s.mirror_even_odd && (self.view_page_no % 2 == 1);
         let pct = match self.active_edge {
             ActiveEdge::Top => (s.margin_top * 100.0).round() as i32,
             ActiveEdge::Bottom => (s.margin_bottom * 100.0).round() as i32,
-            ActiveEdge::Left => (s.margin_left * 100.0).round() as i32,
-            ActiveEdge::Right => (s.margin_right * 100.0).round() as i32,
+            ActiveEdge::Left => {
+                if is_odd {
+                    (s.margin_right * 100.0).round() as i32
+                } else {
+                    (s.margin_left * 100.0).round() as i32
+                }
+            }
+            ActiveEdge::Right => {
+                if is_odd {
+                    (s.margin_left * 100.0).round() as i32
+                } else {
+                    (s.margin_right * 100.0).round() as i32
+                }
+            }
             ActiveEdge::All => (s.margin_top * 100.0).round() as i32,
         };
         let pct_str = format!("{}%", pct);
         p.text_center_in(
             bar_x + pt(28.0),
-            bar_x + pt(52.0),
-            r2_y + pt(10.5),
+            bar_x + pt(56.0),
+            r3_y + pt(12.5),
             7.0,
             0,
             &pct_str,
         );
 
         // Plus button
-        let p_btn = Rect::new(bar_x + pt(54.0), r2_y, pt(20.0), btn_h);
+        let p_btn = Rect::new(bar_x + pt(56.0), r3_y, pt(22.0), btn_h);
         p.rect_outline_t(p_btn, 1, 0);
-        p.text_center_in(p_btn.x, p_btn.x + p_btn.w, r2_y + pt(10.5), 8.0, 0, "+");
+        p.text_center_in(p_btn.x, p_btn.x + p_btn.w, r3_y + pt(12.5), 8.0, 0, "+");
 
         // Auto button
-        let auto_btn = Rect::new(bar_x + pt(78.0), r2_y, pt(42.0), btn_h);
+        let auto_btn = Rect::new(bar_x + pt(84.0), r3_y, pt(48.0), btn_h);
         p.rect_outline_t(auto_btn, 1, 0);
         p.text_center_in(
             auto_btn.x,
             auto_btn.x + auto_btn.w,
-            r2_y + pt(10.5),
+            r3_y + pt(12.5),
             7.0,
             0,
             "Auto",
         );
 
         // Reset button
-        let res_btn = Rect::new(bar_x + pt(124.0), r2_y, pt(42.0), btn_h);
+        let res_btn = Rect::new(bar_x + pt(136.0), r3_y, pt(48.0), btn_h);
         p.rect_outline_t(res_btn, 1, 100);
         p.text_center_in(
             res_btn.x,
             res_btn.x + res_btn.w,
-            r2_y + pt(10.5),
+            r3_y + pt(12.5),
             7.0,
             0,
             "Reset",
         );
 
-        // Done button
-        let done_btn = Rect::new(bar_x + bar_w - pt(64.0), r2_y, pt(58.0), btn_h);
+        // Apply button
+        let done_btn = Rect::new(bar_x + bar_w - pt(70.0), r3_y, pt(64.0), btn_h);
         p.rect(done_btn, 0);
         p.text_center_in(
             done_btn.x,
             done_btn.x + done_btn.w,
-            r2_y + pt(10.5),
+            r3_y + pt(12.5),
             7.5,
             255,
             "Apply",
@@ -419,10 +608,10 @@ impl Screen for CropDialog {
             _ => return Action::Keep,
         };
 
-        let bar_h = pt(44.0);
-        let bar_w = (w - pt(32.0)).min(pt(280.0));
+        let bar_h = pt(74.0);
+        let bar_w = (w - pt(24.0)).min(pt(310.0));
         let bar_x = (w - bar_w) / 2;
-        let bar_y = h - bar_h - pt(16.0);
+        let bar_y = h - bar_h - pt(10.0);
 
         match g {
             Gesture::Tap { .. } => {
@@ -431,44 +620,59 @@ impl Screen for CropDialog {
                     && vx >= bar_x
                     && vx <= bar_x + bar_w
                 {
-                    // Row 2: discrete action buttons (paint's geometry).
-                    let r2_y = bar_y + pt(23.0);
-                    let btn_h = pt(15.0);
-                    if Rect::new(bar_x + pt(6.0), r2_y, pt(20.0), btn_h).contains(vx, vy) {
-                        self.nudge(-0.01);
-                        return Action::Redraw;
-                    }
-                    if Rect::new(bar_x + pt(54.0), r2_y, pt(20.0), btn_h).contains(vx, vy) {
-                        self.nudge(0.01);
-                        return Action::Redraw;
-                    }
-                    if Rect::new(bar_x + pt(78.0), r2_y, pt(42.0), btn_h).contains(vx, vy) {
-                        if let Some(doc) = &self.doc {
-                            if let Ok(page) = doc.load_page(self.page_no as i32) {
-                                if let Some((ml, mt, mr, mb)) = crate::render::detect_page_margins(&page, 8.0) {
-                                    self.settings.split.margin_left = ml;
-                                    self.settings.split.margin_top = mt;
-                                    self.settings.split.margin_right = mr;
-                                    self.settings.split.margin_bottom = mb;
-                                    return Action::Redraw;
-                                }
+                    // Row 1: Mode & Page Flip Switchers
+                    let r1_y = bar_y + pt(4.0);
+                    let r1_h = pt(18.0);
+                    if vy >= r1_y && vy < r1_y + r1_h {
+                        let mode_uni_btn = Rect::new(bar_x + pt(6.0), r1_y, pt(56.0), r1_h);
+                        let mode_oe_btn = Rect::new(bar_x + pt(66.0), r1_y, pt(64.0), r1_h);
+                        if mode_uni_btn.contains(vx, vy) {
+                            self.settings.split.mirror_even_odd = false;
+                            return Action::Redraw;
+                        }
+                        if mode_oe_btn.contains(vx, vy) {
+                            self.settings.split.mirror_even_odd = true;
+                            return Action::Redraw;
+                        }
+
+                        if self.settings.split.mirror_even_odd {
+                            let even_pno = if self.view_page_no % 2 == 0 {
+                                self.view_page_no
+                            } else {
+                                self.view_page_no.saturating_sub(1)
+                            };
+                            let odd_pno = if even_pno + 1 < self.total {
+                                even_pno + 1
+                            } else {
+                                even_pno
+                            };
+                            let even_btn = Rect::new(bar_x + pt(136.0), r1_y, pt(80.0), r1_h);
+                            let odd_btn = Rect::new(bar_x + pt(220.0), r1_y, pt(80.0), r1_h);
+                            if even_btn.contains(vx, vy) {
+                                self.view_page_no = even_pno;
+                                return Action::Redraw;
+                            }
+                            if odd_btn.contains(vx, vy) {
+                                self.view_page_no = odd_pno;
+                                return Action::Redraw;
+                            }
+                        } else {
+                            let prev_btn = Rect::new(bar_x + pt(146.0), r1_y, pt(72.0), r1_h);
+                            let next_btn = Rect::new(bar_x + pt(224.0), r1_y, pt(72.0), r1_h);
+                            if prev_btn.contains(vx, vy) && self.view_page_no > 0 {
+                                self.view_page_no -= 1;
+                                return Action::Redraw;
+                            }
+                            if next_btn.contains(vx, vy) && self.view_page_no + 1 < self.total {
+                                self.view_page_no += 1;
+                                return Action::Redraw;
                             }
                         }
-                        return Action::Keep;
                     }
-                    if Rect::new(bar_x + pt(124.0), r2_y, pt(42.0), btn_h).contains(vx, vy) {
-                        self.settings.split.margin_left = 0.0;
-                        self.settings.split.margin_top = 0.0;
-                        self.settings.split.margin_right = 0.0;
-                        self.settings.split.margin_bottom = 0.0;
-                        return Action::Redraw;
-                    }
-                    if Rect::new(bar_x + bar_w - pt(64.0), r2_y, pt(58.0), btn_h).contains(vx, vy) {
-                        return self.apply_crop();
-                    }
-                    // Row 1: five equal edge buttons, indexed by column.
-                    let edge_y = bar_y + pt(4.0);
-                    let edge_btn_h = pt(16.0);
+
+                    // Row 2: Edge Selector Pills
+                    let edge_y = bar_y + pt(24.0);
+                    let edge_btn_h = pt(18.0);
                     if vy >= edge_y && vy < edge_y + edge_btn_h {
                         let edge_btn_w = (bar_w - pt(16.0)) / 5;
                         let idx = ((vx - (bar_x + pt(8.0))) / edge_btn_w).clamp(0, 4) as usize;
@@ -482,11 +686,34 @@ impl Screen for CropDialog {
                         self.active_edge = edges[idx];
                         return Action::Redraw;
                     }
+
+                    // Row 3: Precision Nudge [-1%] [%] [+1%] | [Auto] | [Reset] | [Apply]
+                    let r3_y = bar_y + pt(45.0);
+                    let btn_h = pt(22.0);
+                    if Rect::new(bar_x + pt(6.0), r3_y, pt(22.0), btn_h).contains(vx, vy) {
+                        self.nudge(-0.01);
+                        return Action::Redraw;
+                    }
+                    if Rect::new(bar_x + pt(56.0), r3_y, pt(22.0), btn_h).contains(vx, vy) {
+                        self.nudge(0.01);
+                        return Action::Redraw;
+                    }
+                    if Rect::new(bar_x + pt(84.0), r3_y, pt(48.0), btn_h).contains(vx, vy) {
+                        self.run_auto_crop();
+                        return Action::Redraw;
+                    }
+                    if Rect::new(bar_x + pt(136.0), r3_y, pt(48.0), btn_h).contains(vx, vy) {
+                        self.reset_crop();
+                        return Action::Redraw;
+                    }
+                    if Rect::new(bar_x + bar_w - pt(70.0), r3_y, pt(64.0), btn_h).contains(vx, vy) {
+                        return self.apply_crop();
+                    }
                 }
 
-                // Tapping outside floating palette -> sets active edge
+                // Tapping outside floating palette -> selects nearest margin guide line
                 let (pw, ph) = if let Some(doc) = &self.doc {
-                    if let Ok(page) = doc.load_page(self.page_no as i32) {
+                    if let Ok(page) = doc.load_page(self.view_page_no as i32) {
                         if let Ok(b) = page.bounds() {
                             (b.x1 - b.x0, b.y1 - b.y0)
                         } else {
@@ -506,7 +733,7 @@ impl Screen for CropDialog {
                 let page_oy = (h - rh) / 2;
 
                 let s = &self.settings.split;
-                let (ml, mr) = if s.mirror_even_odd && (self.page_no % 2 == 1) {
+                let (ml, mr) = if s.mirror_even_odd && (self.view_page_no % 2 == 1) {
                     (s.margin_right, s.margin_left)
                 } else {
                     (s.margin_left, s.margin_right)
@@ -531,7 +758,7 @@ impl Screen for CropDialog {
             Gesture::LongPress { .. } => {
                 // Direct drag initiation: detect closest edge
                 let (pw, ph) = if let Some(doc) = &self.doc {
-                    if let Ok(page) = doc.load_page(self.page_no as i32) {
+                    if let Ok(page) = doc.load_page(self.view_page_no as i32) {
                         if let Ok(b) = page.bounds() {
                             (b.x1 - b.x0, b.y1 - b.y0)
                         } else {
@@ -551,9 +778,14 @@ impl Screen for CropDialog {
                 let page_oy = (h - rh) / 2;
 
                 let s = &self.settings.split;
-                let x0 = page_ox + (s.margin_left * rw as f32).round() as i32;
+                let (ml, mr) = if s.mirror_even_odd && (self.view_page_no % 2 == 1) {
+                    (s.margin_right, s.margin_left)
+                } else {
+                    (s.margin_left, s.margin_right)
+                };
+                let x0 = page_ox + (ml * rw as f32).round() as i32;
                 let y0 = page_oy + (s.margin_top * rh as f32).round() as i32;
-                let x1 = page_ox + ((1.0 - s.margin_right) * rw as f32).round() as i32;
+                let x1 = page_ox + ((1.0 - mr) * rw as f32).round() as i32;
                 let y1 = page_oy + ((1.0 - s.margin_bottom) * rh as f32).round() as i32;
 
                 if (vy - y0).abs() < 60 {
@@ -573,10 +805,10 @@ impl Screen for CropDialog {
             }
 
             Gesture::Drag { .. } => {
-                // Direct dragging of dashed margin lines!
+                // Direct dragging of dashed margin lines
                 if let Some(edge) = self.drag_edge {
                     let (pw, ph) = if let Some(doc) = &self.doc {
-                        if let Ok(page) = doc.load_page(self.page_no as i32) {
+                        if let Ok(page) = doc.load_page(self.view_page_no as i32) {
                             if let Ok(b) = page.bounds() {
                                 (b.x1 - b.x0, b.y1 - b.y0)
                             } else {
@@ -595,6 +827,8 @@ impl Screen for CropDialog {
                     let page_ox = (w - rw) / 2;
                     let page_oy = (h - rh) / 2;
 
+                    let is_odd =
+                        self.settings.split.mirror_even_odd && (self.view_page_no % 2 == 1);
                     let s = &mut self.settings.split;
                     match edge {
                         ActiveEdge::Top => {
@@ -605,11 +839,20 @@ impl Screen for CropDialog {
                                 ((page_oy + rh - vy) as f32 / rh as f32).clamp(0.0, 0.40);
                         }
                         ActiveEdge::Left => {
-                            s.margin_left = ((vx - page_ox) as f32 / rw as f32).clamp(0.0, 0.40);
+                            let val = ((vx - page_ox) as f32 / rw as f32).clamp(0.0, 0.40);
+                            if is_odd {
+                                s.margin_right = val;
+                            } else {
+                                s.margin_left = val;
+                            }
                         }
                         ActiveEdge::Right => {
-                            s.margin_right =
-                                ((page_ox + rw - vx) as f32 / rw as f32).clamp(0.0, 0.40);
+                            let val = ((page_ox + rw - vx) as f32 / rw as f32).clamp(0.0, 0.40);
+                            if is_odd {
+                                s.margin_left = val;
+                            } else {
+                                s.margin_right = val;
+                            }
                         }
                         _ => {}
                     }

@@ -212,44 +212,20 @@ impl Screen for QuickSettingsSheet {
             }
             y += pt(ROW_H_PT) + pt(4.0);
 
-            // Row 2: Auto Crop, Even/Odd Mirror, & Interactive Margin Crop Guides
+            // Row 2: Visual Crop Studio Entry
             p.text(pad, y + pt(15.0), 8.5, 0, "CROP");
-            let auto_btn = Rect::new(w - pad - pt(236.0), y, pt(64.0), pt(BTN_H_PT));
-            let mirror_btn = Rect::new(w - pad - pt(168.0), y, pt(78.0), pt(BTN_H_PT));
-            let crop_btn = Rect::new(w - pad - pt(86.0), y, pt(86.0), pt(BTN_H_PT));
-
-            p.rect_outline_t(auto_btn, 1, 0);
-            p.text_center_in(
-                auto_btn.x,
-                auto_btn.x + auto_btn.w,
-                y + pt(15.0),
-                7.5,
-                0,
-                "[ Auto ]",
-            );
-
-            if self.settings.split.mirror_even_odd {
-                p.rect(mirror_btn, 0);
-                p.text_center_in(
-                    mirror_btn.x,
-                    mirror_btn.x + mirror_btn.w,
-                    y + pt(15.0),
-                    7.5,
-                    255,
-                    "Odd/Evn ✓",
-                );
+            let crop_status = if self.settings.split.margin_left == 0.0
+                && self.settings.split.margin_top == 0.0
+                && self.settings.split.margin_right == 0.0
+                && self.settings.split.margin_bottom == 0.0
+            {
+                "[ Crop Margins: Off ➔ ]"
+            } else if self.settings.split.mirror_even_odd {
+                "[ Crop: Odd/Even Active ➔ ]"
             } else {
-                p.rect_outline_t(mirror_btn, 1, 120);
-                p.text_center_in(
-                    mirror_btn.x,
-                    mirror_btn.x + mirror_btn.w,
-                    y + pt(15.0),
-                    7.5,
-                    0,
-                    "Odd/Evn",
-                );
-            }
-
+                "[ Crop: Active ➔ ]"
+            };
+            let crop_btn = Rect::new(w - pad - pt(175.0), y, pt(175.0), pt(BTN_H_PT));
             p.rect_outline_t(crop_btn, 1, 0);
             p.text_center_in(
                 crop_btn.x,
@@ -257,7 +233,7 @@ impl Screen for QuickSettingsSheet {
                 y + pt(15.0),
                 7.5,
                 0,
-                "[ Guides ]",
+                crop_status,
             );
             y += pt(ROW_H_PT) + pt(4.0);
         }
@@ -411,25 +387,8 @@ impl Screen for QuickSettingsSheet {
             }
             y += pt(ROW_H_PT) + pt(4.0);
 
-            // Row 2: Auto Crop, Even/Odd Mirror, & Adjust Crop Guides button
-            let auto_btn = Rect::new(w - pad - pt(236.0), y, pt(64.0), pt(BTN_H_PT));
-            let mirror_btn = Rect::new(w - pad - pt(168.0), y, pt(78.0), pt(BTN_H_PT));
-            let crop_btn = Rect::new(w - pad - pt(86.0), y, pt(86.0), pt(BTN_H_PT));
-            if auto_btn.contains(vx, vy) {
-                if let Some(doc) = &self.doc {
-                    if let Some((ml, mt, mr, mb)) = crate::render::detect_book_margins(doc.as_ref(), self.page_no) {
-                        self.settings.split.margin_left = ml;
-                        self.settings.split.margin_top = mt;
-                        self.settings.split.margin_right = mr;
-                        self.settings.split.margin_bottom = mb;
-                        return self.apply_change();
-                    }
-                }
-            }
-            if mirror_btn.contains(vx, vy) {
-                self.settings.split.mirror_even_odd = !self.settings.split.mirror_even_odd;
-                return self.apply_change();
-            }
+            // Row 2: Visual Crop Studio Entry
+            let crop_btn = Rect::new(w - pad - pt(175.0), y, pt(175.0), pt(BTN_H_PT));
             if crop_btn.contains(vx, vy) {
                 let book = self.book.clone();
                 let page = self.page_no;
