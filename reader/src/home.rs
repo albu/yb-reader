@@ -518,12 +518,12 @@ impl Screen for HomeScreen {
 
     fn on_enter(&mut self) -> Action {
         self.scan();
-        Action::Redraw
+        Action::RedrawFull
     }
 
     fn on_resume(&mut self) -> Action {
         self.scan();
-        Action::Redraw
+        Action::RedrawFull
     }
 
     fn draw(&mut self, p: &mut Painter) {
