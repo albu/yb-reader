@@ -1055,73 +1055,78 @@ fn decode_numeric_entity(ent: &str) -> Option<u32> {
 }
 
 fn decode_entity(ent: &str) -> Option<&'static str> {
-    match ent {
-        "quot" => Some("\""),
-        "amp" => Some("&"),
-        "apos" => Some("'"),
-        "lt" => Some("<"),
-        "gt" => Some(">"),
-        "nbsp" => Some("\u{00A0}"),
-        "iexcl" => Some("¡"),
-        "cent" => Some("¢"),
-        "pound" => Some("£"),
-        "curren" => Some("¤"),
-        "yen" => Some("¥"),
-        "brvbar" => Some("¦"),
-        "sect" => Some("§"),
-        "uml" => Some("¨"),
-        "copy" => Some("©"),
-        "ordf" => Some("ª"),
-        "laquo" => Some("«"),
-        "not" => Some("¬"),
-        "shy" => Some("\u{00AD}"),
-        "reg" => Some("®"),
-        "macr" => Some("¯"),
-        "deg" => Some("°"),
-        "plusmn" => Some("±"),
-        "sup2" => Some("²"),
-        "sup3" => Some("³"),
-        "acute" => Some("´"),
-        "micro" => Some("µ"),
-        "para" => Some("¶"),
-        "middot" => Some("·"),
-        "cedil" => Some("¸"),
-        "sup1" => Some("¹"),
-        "ordm" => Some("º"),
-        "raquo" => Some("»"),
-        "frac14" => Some("¼"),
-        "frac12" => Some("½"),
-        "frac34" => Some("¾"),
-        "iquest" => Some("¿"),
-        "times" => Some("×"),
-        "divide" => Some("÷"),
-        "ndash" => Some("–"),
-        "mdash" => Some("—"),
-        "lsquo" => Some("‘"),
-        "rsquo" => Some("’"),
-        "sbquo" => Some("‚"),
-        "ldquo" => Some("“"),
-        "rdquo" => Some("”"),
-        "bdquo" => Some("„"),
-        "dagger" => Some("†"),
-        "Dagger" => Some("‡"),
-        "bull" => Some("•"),
-        "hellip" => Some("…"),
-        "permil" => Some("‰"),
-        "prime" => Some("′"),
-        "Prime" => Some("″"),
-        "lsaquo" => Some("‹"),
-        "rsaquo" => Some("›"),
-        "euro" => Some("€"),
-        "trade" => Some("™"),
-        "minus" => Some("−"),
-        "thinsp" => Some("\u{2009}"),
-        "ensp" => Some("\u{2002}"),
-        "emsp" => Some("\u{2003}"),
-        "zwj" => Some("\u{200D}"),
-        "zwnj" => Some("\u{200C}"),
-        _ => None,
-    }
+    // Sorted table of the named entities EPUB authors actually emit;
+    // linear probe is fine for chapter-size text.
+    const ENTITIES: &[(&str, &str)] = &[
+        ("Dagger", "‡"),
+        ("Prime", "″"),
+        ("acute", "´"),
+        ("amp", "&"),
+        ("apos", "'"),
+        ("bdquo", "„"),
+        ("brvbar", "¦"),
+        ("bull", "•"),
+        ("cedil", "¸"),
+        ("cent", "¢"),
+        ("copy", "©"),
+        ("curren", "¤"),
+        ("dagger", "†"),
+        ("deg", "°"),
+        ("divide", "÷"),
+        ("emsp", "\u{2003}"),
+        ("ensp", "\u{2002}"),
+        ("euro", "€"),
+        ("frac12", "½"),
+        ("frac14", "¼"),
+        ("frac34", "¾"),
+        ("gt", ">"),
+        ("hellip", "…"),
+        ("iexcl", "¡"),
+        ("iquest", "¿"),
+        ("laquo", "«"),
+        ("ldquo", "“"),
+        ("lsaquo", "‹"),
+        ("lsquo", "‘"),
+        ("lt", "<"),
+        ("macr", "¯"),
+        ("mdash", "—"),
+        ("micro", "µ"),
+        ("middot", "·"),
+        ("minus", "−"),
+        ("nbsp", "\u{00A0}"),
+        ("ndash", "–"),
+        ("not", "¬"),
+        ("ordf", "ª"),
+        ("ordm", "º"),
+        ("para", "¶"),
+        ("permil", "‰"),
+        ("plusmn", "±"),
+        ("pound", "£"),
+        ("prime", "′"),
+        ("quot", "\""),
+        ("raquo", "»"),
+        ("rdquo", "”"),
+        ("reg", "®"),
+        ("rsaquo", "›"),
+        ("rsquo", "’"),
+        ("sbquo", "‚"),
+        ("sect", "§"),
+        ("shy", "\u{00AD}"),
+        ("sup1", "¹"),
+        ("sup2", "²"),
+        ("sup3", "³"),
+        ("thinsp", "\u{2009}"),
+        ("times", "×"),
+        ("trade", "™"),
+        ("uml", "¨"),
+        ("yen", "¥"),
+        ("zwj", "\u{200D}"),
+        ("zwnj", "\u{200C}"),
+    ];
+    ENTITIES
+        .iter()
+        .find(|(name, _)| *name == ent)
+        .map(|(_, value)| *value)
 }
 
 fn resolve_relative_path(base_file: &str, target: &str) -> String {
@@ -1161,4 +1166,21 @@ pub fn parse_epub(data: &[u8]) -> Result<Book, String> {
 /// keeps image bytes lazy. This is the reader's path.
 pub fn parse_epub_file(path: &Path) -> Result<Book, String> {
     EpubParser::open(path)?.parse_lazy()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unescape_html_lossy;
+
+    #[test]
+    fn unescape_named_numeric_and_unknown() {
+        assert_eq!(unescape_html_lossy("a &amp; b"), "a & b");
+        assert_eq!(unescape_html_lossy("&nbsp;&hellip;"), "\u{00A0}…");
+        assert_eq!(unescape_html_lossy("&frac12; &sup2; &emsp;"), "½ ² \u{2003}");
+        assert_eq!(unescape_html_lossy("&#x2014; &#39;"), "— '");
+        // Unknown names and unterminated entities pass through verbatim.
+        assert_eq!(unescape_html_lossy("&bogus; &amp"), "&bogus; &amp");
+        // NUL is rejected at the numeric gate, never emitted.
+        assert_eq!(unescape_html_lossy("&#0;"), "&#0;");
+    }
 }

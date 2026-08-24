@@ -103,7 +103,6 @@ pub trait ReaderBackend {
     ) -> PageTurnResult;
 
     fn jump_to_sub(&mut self, sub_idx: usize, vw: u32, vh: u32, settings: &ReaderSettings);
-    #[allow(dead_code)]
     fn jump_to_page(&mut self, page: usize, vw: u32, vh: u32, settings: &ReaderSettings);
 
     fn render_page(&mut self, vw: u32, vh: u32, settings: &ReaderSettings) -> RenderOutput;
@@ -150,7 +149,6 @@ pub trait ReaderBackend {
         vw: u32,
         vh: u32,
     ) -> bool;
-    #[allow(dead_code)]
     fn interactive_preview(
         &mut self,
         settings: &ReaderSettings,

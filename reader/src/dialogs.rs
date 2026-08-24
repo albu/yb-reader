@@ -38,10 +38,6 @@ pub fn toc_dialog(
 ) -> Action {
     let mut dlg =
         crate::toc_dialog::TocDialog::from_outlines(outlines, cur_page, move |act| match act {
-            crate::toc_dialog::TocAction::JumpTo(target) => {
-                record(&path_name, target, total, settings);
-                Action::Pop
-            }
             crate::toc_dialog::TocAction::JumpToYRead { page, .. } => {
                 record(&path_name, page, total, settings);
                 Action::Pop
@@ -74,10 +70,6 @@ pub fn yread_toc_dialog(
         cur_char,
         offsets,
         move |act| match act {
-            crate::toc_dialog::TocAction::JumpTo(target) => {
-                record(&path_name, target, total_pages, settings);
-                Action::Pop
-            }
             crate::toc_dialog::TocAction::JumpToYRead {
                 chapter_idx,
                 char_offset,
@@ -130,10 +122,6 @@ pub fn scrubber_dialog(
                     let mut dlg =
                         crate::toc_dialog::TocDialog::from_outlines(&ol, target, move |act| {
                             match act {
-                                crate::toc_dialog::TocAction::JumpTo(t) => {
-                                    record(&path_cl, t, total, settings);
-                                    Action::PopN(2)
-                                }
                                 crate::toc_dialog::TocAction::JumpToYRead { page, .. } => {
                                     record(&path_cl, page, total, settings);
                                     Action::PopN(2)

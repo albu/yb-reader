@@ -13,8 +13,6 @@ pub struct TocItem {
 }
 
 pub enum TocAction {
-    #[allow(dead_code)]
-    JumpTo(usize),
     JumpToYRead {
         chapter_idx: usize,
         char_offset: usize,
@@ -107,30 +105,6 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
         }
 
         Self::with_items_and_active(items, best_idx, on_action)
-    }
-
-    #[allow(dead_code)]
-    pub fn from_chapters(
-        chapters: &[yread::model::Chapter],
-        current_chap: usize,
-        on_action: F,
-    ) -> Self {
-        let mut items = Vec::new();
-        for (idx, ch) in chapters.iter().enumerate() {
-            let title = if ch.title.trim().is_empty() {
-                format!("Chapter {}", idx + 1)
-            } else {
-                ch.title.trim().to_string()
-            };
-            items.push(TocItem {
-                title,
-                chapter_idx: idx,
-                char_offset: 0,
-                page: idx,
-                level: 0,
-            });
-        }
-        Self::with_items(items, current_chap, on_action)
     }
 
     /// Common init: everything collapsed except the ancestor chain of the

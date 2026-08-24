@@ -23,14 +23,6 @@ pub const HEADER_H: u32 = 98; // px (covers clock/battery status header with cle
 pub const FOOTER_H: u32 = 72; // px (covers progress track and page number without text overlap)
 pub const TEXT_AA_LEVEL: i32 = 8;
 
-#[allow(dead_code)]
-pub fn avail_pt(w: u32, h: u32, margin_pad: u32) -> (f32, f32) {
-    (
-        (w.saturating_sub(2 * margin_pad)) as f32 * 72.0 / 300.0,
-        (h.saturating_sub(2 * margin_pad + FOOTER_H + HEADER_H)) as f32 * 72.0 / 300.0,
-    )
-}
-
 /// Reading-area geometry for one (settings, page bounds, sub_idx, visual
 /// dims) combination. Everything downstream — pixel placement and text
 /// coordinate mapping — derives from these fields, never from its own
@@ -688,113 +680,5 @@ mod tests {
             );
             assert!(r.x0 < r.x1 && r.y0 < r.y1);
         }
-    }
-}
-
-#[cfg(test)]
-mod lab {
-    use super::*;
-    use mupdf::Context;
-
-    // Host-only render lab: set YB_LAB=1, cargo test lab -- --nocapture.
-    // Compares font-weight CSS strategies, @font-face, and text AA on
-    // the real epub; writes /tmp/lab_*.raw for PNG wrapping.
-    #[test]
-    fn lab_css_variants() {
-        if std::env::var("YB_LAB").is_err() {
-            return;
-        }
-        let epubs = ["/tmp/lab.epub"];
-        let path = epubs[0];
-        let page_no = 100;
-        let (w, h) = (1236u32, 1648u32);
-        let (aw, ah) = avail_pt(w, h, 48);
-        let georgia = "/System/Library/Fonts/Supplemental/Georgia Bold.ttf";
-        let variants: &[(&str, &str, bool, i32)] = &[
-            ("1_base", "", true, 8),
-            ("2_bold_body", "body { font-weight: bold; }", true, 8),
-            (
-                "3_bold_star_imp",
-                "* { font-weight: bold !important; }",
-                true,
-                8,
-            ),
-            ("4_nodoccss_bold", "body { font-weight: bold; }", false, 8),
-            ("5_aa0", "", true, 0),
-            (
-                "6_fontface",
-                &format!(
-                    "@font-face {{ font-family: labgeo; src: url(file://{georgia}); }} \
-                     body {{ font-family: labgeo; }}"
-                ),
-                true,
-                8,
-            ),
-            ("7_aa0_bold", "* { font-weight: bold !important; }", true, 0),
-            (
-                "8_sans",
-                "* { font-family: sans-serif !important; }",
-                true,
-                8,
-            ),
-            (
-                "9_sans_aa0",
-                "* { font-family: sans-serif !important; }",
-                true,
-                0,
-            ),
-            ("10_fontface_doc", "", true, 8),
-            ("11_fontface_dir", "", true, 8),
-            (
-                "15_patched_lineheight",
-                "* { line-height: 1.6 !important; }",
-                true,
-                8,
-            ),
-            (
-                "14_lineheight",
-                "* { line-height: 1.6 !important; }",
-                true,
-                8,
-            ),
-        ];
-        for (name, css, doc_css, aa) in variants {
-            // 10_* reads the @font-face-patched copy of the same book.
-            let path = match name {
-                n if n.starts_with("10_") => "/tmp/lab_patched.epub",
-                // same patched book, opened as the unzipped directory —
-                // the shipping candidate (no rezip needed on device)
-                n if n.starts_with("11_") => "/tmp/lab_epub",
-                n if n.starts_with("15_") => "/tmp/lab_epub", // patched copy + user-css line-height
-                n if n.starts_with("14_") => "/tmp/lab_orig",
-                _ => path,
-            };
-            let mut ctx = Context::get();
-            let _ = ctx.set_user_css(css);
-            ctx.set_use_document_css(*doc_css);
-            ctx.set_text_aa_level(*aa);
-            let mut doc = Document::open(path).expect("open");
-            let _ = doc.layout(aw, ah, 11.0);
-            let page = doc.load_page(page_no).expect("page");
-            let mut m = Matrix::IDENTITY;
-            m.scale(300.0 / 72.0, 300.0 / 72.0);
-            let pm = page
-                .to_pixmap(&m, &Colorspace::device_gray(), false, true)
-                .expect("pixmap");
-            let pw = pm.width() as usize;
-            let phh = pm.height() as usize;
-            let stride = pm.stride() as usize;
-            let samples = pm.samples();
-            // pack tight (drop stride pad)
-            let mut tight = vec![0u8; pw * phh];
-            for y in 0..phh {
-                tight[y * pw..(y + 1) * pw].copy_from_slice(&samples[y * stride..y * stride + pw]);
-            }
-            std::fs::write(format!("/tmp/lab_{name}.raw"), &tight).unwrap();
-            let dark = tight.iter().filter(|&&v| v < 100).count();
-            let total = doc.page_count().unwrap_or(0);
-            println!("{name}: {pw}x{phh} darkpx={dark} pages={total}");
-        }
-        let _ = Context::get().set_user_css("");
     }
 }

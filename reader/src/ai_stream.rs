@@ -13,6 +13,10 @@ use yui::painter::{pt, Painter, Rect, PX};
 use yui::screen::{Action, Screen};
 use yui::Orientation;
 
+// The poller machinery below is live in production (`new()` wires it up),
+// but in test builds `new()` short-circuits to `new_mock()`, so none of it
+// is reachable and rustc flags it dead. Kept `#[allow(dead_code)]` rather
+// than cfg-gating, which would break `new()`'s non-test branch compile.
 #[allow(dead_code)]
 pub const AI_STREAM_PORT: u16 = 8768;
 #[allow(dead_code)]
@@ -92,14 +96,11 @@ pub enum DocBlock {
 
 #[derive(Debug, Clone)]
 pub struct Turn {
-    #[allow(dead_code)]
     pub id: String,
     pub assistant: String,
     pub prompt: String,
     pub timestamp: String,
-    #[allow(dead_code)]
     pub status: String,
-    #[allow(dead_code)]
     pub tool_status: Option<String>,
     #[allow(dead_code)]
     pub revision: u64,
@@ -400,7 +401,7 @@ impl AiStreamScreen {
     }
 
     /// Create an offline AiStreamScreen without background poller thread (for offline rendering / tests).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new_mock(w: u32, h: u32) -> AiStreamScreen {
         let mut s = AiStreamScreen {
             turn: Turn::default(),
@@ -421,7 +422,7 @@ impl AiStreamScreen {
     }
 
     #[allow(dead_code)]
-    fn load_config() -> Option<(Option<String>, u16)> {
+fn load_config() -> Option<(Option<String>, u16)> {
         let content = std::fs::read_to_string(CONF_PATH).ok()?;
         let mut host = None;
         for line in content.lines() {
@@ -437,7 +438,7 @@ impl AiStreamScreen {
     }
 
     #[allow(dead_code)]
-    fn save_host(host: &str) {
+fn save_host(host: &str) {
         ybdev::config::write_server(CONF_PATH, &format!("http://{}:{}", host, AI_STREAM_PORT));
     }
 

@@ -69,7 +69,6 @@ pub fn save(book: &str, v: &[Highlight]) -> bool {
 
 /// Add a highlight (deduped by exact text). Returns false for an empty
 /// span, an already-known span, or a failed write.
-#[allow(dead_code)]
 pub fn add(book: &str, page: usize, text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
@@ -102,7 +101,6 @@ pub fn remove(book: &str, text: &str) -> bool {
     save(book, &v)
 }
 
-#[allow(dead_code)]
 pub fn matched_spans(
     hl: &[Highlight],
     page: usize,

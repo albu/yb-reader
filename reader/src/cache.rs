@@ -55,11 +55,6 @@ pub fn cache_file_path_at(dir: &str, book_name: &str, page_no: usize, sub_idx: u
     Path::new(dir).join(format!("{}_p{}_s{}.snap", key, page_no, sub_idx))
 }
 
-#[allow(dead_code)]
-pub fn cache_file_path(book_name: &str, page_no: usize, sub_idx: usize) -> PathBuf {
-    cache_file_path_at(CACHE_DIR, book_name, page_no, sub_idx)
-}
-
 /// Load cached grayscale page if it exists and matches settings and dimensions.
 pub fn load_snapshot_from(
     dir: &str,
@@ -150,7 +145,6 @@ pub fn load_snapshot(
 }
 
 /// Save page snapshot to cache and run garbage collection.
-#[allow(dead_code)]
 pub fn save_snapshot_to(
     dir: &str,
     book_name: &str,
@@ -198,7 +192,6 @@ pub fn save_snapshot_to(
     prune_cache_dir(dir);
 }
 
-#[allow(dead_code)]
 pub fn save_snapshot(
     book_name: &str,
     page_no: usize,
@@ -244,11 +237,6 @@ pub fn prune_cache_dir(dir: &str) {
             let _ = fs::remove_file(path);
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn prune_cache() {
-    prune_cache_dir(CACHE_DIR);
 }
 
 #[cfg(test)]

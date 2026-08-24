@@ -277,7 +277,6 @@ impl SleepScreen {
 }
 
 fn pick_random_screensaver() -> Option<Vec<u8>> {
-    #[allow(unused_mut)]
     let mut dirs = vec![
         "/mnt/us/screensavers".to_string(),
         "/mnt/us/extensions/reader/screensavers".to_string(),

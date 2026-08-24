@@ -312,25 +312,6 @@ pub fn record_pos(
     );
 }
 
-/// Simple record (for books without custom settings).
-#[allow(dead_code)]
-pub fn record(name: &str, page: usize, total: usize) {
-    let mut map = load_at(store_path());
-    let prev_settings = map.get(name).and_then(|p| p.settings);
-    let prev_sub = map.get(name).map(|p| p.sub_idx).unwrap_or(0);
-    map.insert(
-        name.to_string(),
-        Pos {
-            page,
-            total,
-            ts: now_ts(),
-            sub_idx: prev_sub,
-            settings: prev_settings,
-        },
-    );
-    save_at(store_path(), &map);
-}
-
 /// The most recently opened book, if any.
 pub fn last_read() -> Option<(String, Pos)> {
     load_at(store_path()).into_iter().max_by_key(|(_, p)| p.ts)

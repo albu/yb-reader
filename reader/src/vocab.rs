@@ -3,10 +3,6 @@ use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use yui::painter::{pt, Painter};
-
-use crate::split::RectF;
-
 const VOCAB_PATH: &str = "/mnt/us/extensions/reader/data/vocab.bin";
 const PROFILE_PATH: &str = "/mnt/us/extensions/reader/vocab_profile.json";
 const MAGIC: &[u8; 8] = b"YBVOC01\0";
@@ -15,21 +11,6 @@ const MAGIC: &[u8; 8] = b"YBVOC01\0";
 /// open would otherwise re-read it from flash into a fresh heap buffer.
 /// Lookups take &self, so every ReaderScreen shares this one instance.
 static DB: OnceLock<Option<VocabDb>> = OnceLock::new();
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
-pub enum AnnotationStyle {
-    /// Small superscript definition directly above the word
-    Interlinear,
-    /// Clean 1-2 line footer list at the bottom of the page
-    #[default]
-    Margin,
-    /// Subtle dotted underline under words on the frontier; tap to expand
-    DottedUnderline,
-    /// Disabled
-    Off,
-}
-
 
 /// An entry looked up from the lexical database.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,10 +324,6 @@ pub struct VocabProfile {
     pub known_words: HashSet<String>,
     /// Words explicitly looked up or starred for learning
     pub learning_words: HashSet<String>,
-    /// Display style for inline Word Wise glosses
-    pub style: AnnotationStyle,
-    /// Max number of annotated words budgeted per page (1..5)
-    pub max_per_page: usize,
 }
 
 impl Default for VocabProfile {
@@ -355,8 +332,6 @@ impl Default for VocabProfile {
             user_level: 65, // B2 Upper-Intermediate default
             known_words: HashSet::new(),
             learning_words: HashSet::new(),
-            style: AnnotationStyle::Margin,
-            max_per_page: 2,
         }
     }
 }
@@ -385,20 +360,6 @@ impl VocabProfile {
                 "level" => {
                     if let Ok(lvl) = val.parse::<u8>() {
                         prof.user_level = lvl.clamp(1, 100);
-                    }
-                }
-                "style" => {
-                    prof.style = match val {
-                        "interlinear" => AnnotationStyle::Interlinear,
-                        "margin" => AnnotationStyle::Margin,
-                        "dotted" => AnnotationStyle::DottedUnderline,
-                        "off" => AnnotationStyle::Off,
-                        _ => AnnotationStyle::Interlinear,
-                    };
-                }
-                "max" => {
-                    if let Ok(m) = val.parse::<usize>() {
-                        prof.max_per_page = m.clamp(1, 10);
                     }
                 }
                 "known" => {
@@ -431,20 +392,12 @@ impl VocabProfile {
         if let Some(parent) = path.as_ref().parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let style_str = match self.style {
-            AnnotationStyle::Interlinear => "interlinear",
-            AnnotationStyle::Margin => "margin",
-            AnnotationStyle::DottedUnderline => "dotted",
-            AnnotationStyle::Off => "off",
-        };
 
         let known_list: Vec<&str> = self.known_words.iter().map(|s| s.as_str()).collect();
         let learning_list: Vec<&str> = self.learning_words.iter().map(|s| s.as_str()).collect();
 
         let mut out = String::new();
         out.push_str(&format!("level {}\n", self.user_level));
-        out.push_str(&format!("style {}\n", style_str));
-        out.push_str(&format!("max {}\n", self.max_per_page));
         out.push_str(&format!("known {}\n", known_list.join(",")));
         out.push_str(&format!("learning {}\n", learning_list.join(",")));
 
@@ -466,115 +419,6 @@ impl VocabProfile {
         }
         self.save();
     }
-
-    /// Mark a word as known / dismiss it: suppresses future annotations.
-    pub fn mark_known(&mut self, word: &str, difficulty: u8) {
-        let clean = clean_word(word);
-        self.learning_words.remove(&clean);
-        self.known_words.insert(clean);
-
-        // If you marked an advanced word as known, gently adapt frontier up
-        if difficulty > self.user_level && self.user_level < 95 {
-            self.user_level = (self.user_level + 1).min(98);
-        }
-        self.save();
-    }
-
-    /// Decide whether a candidate word should be annotated on this page.
-    #[allow(dead_code)]
-    pub fn should_annotate(&self, entry: &WordEntry) -> bool {
-        if self.style == AnnotationStyle::Off {
-            return false;
-        }
-        if entry.gloss_en.is_empty() && entry.gloss_ru.is_empty() {
-            return false;
-        }
-
-        let clean = clean_word(&entry.word);
-        if self.known_words.contains(&clean) {
-            return false;
-        }
-        if self.learning_words.contains(&clean) {
-            return true;
-        }
-
-        // Annotated if word difficulty exceeds user level
-        entry.difficulty >= self.user_level
-    }
-}
-
-/// Paint the budgeted annotations in the profile's style: interlinear
-/// pills above each word, dotted underlines, or a two-line margin list.
-#[allow(dead_code)]
-pub fn draw_annotations(
-    p: &mut Painter,
-    annotations: &[(RectF, WordEntry)],
-    style: AnnotationStyle,
-    is_night: bool,
-) {
-    let (_w, h) = p.size();
-    match style {
-        AnnotationStyle::Interlinear => {
-            for (r, entry) in annotations {
-                let full_gloss = &entry.gloss_en;
-                // Budget in CHARS, not bytes: glosses are regularly
-                // Cyrillic (2 bytes/char), and a byte budget over-truncated
-                // them while the >16 gate let them through unclipped.
-                let short = if full_gloss.chars().count() > 16 {
-                    let mut s = String::new();
-                    for w in full_gloss.split_whitespace() {
-                        if s.chars().count() + w.chars().count() + 1 > 15 {
-                            s.push('…');
-                            break;
-                        }
-                        if !s.is_empty() {
-                            s.push(' ');
-                        }
-                        s.push_str(w);
-                    }
-                    s
-                } else {
-                    full_gloss.clone()
-                };
-
-                let font_sz = 4.5;
-                let tw = p.text_width(font_sz, &short).round() as i32;
-                let word_mid = ((r.x0 + r.x1) / 2.0).round() as i32;
-                let gx = (word_mid - tw / 2).max(pt(6.0));
-                let gy = (r.y0 - pt(2.0) as f32).round() as i32;
-
-                // Floating outline pill badge centered above the word
-                let pill_r =
-                    yui::painter::Rect::new(gx - pt(2.0), gy - pt(4.5), tw + pt(4.0), pt(5.5));
-                p.rect(pill_r, if is_night { 0 } else { 255 });
-                p.rect_outline_t(pill_r, 1, if is_night { 80 } else { 200 });
-                p.text(gx, gy, font_sz, if is_night { 235 } else { 30 }, &short);
-            }
-        }
-        AnnotationStyle::DottedUnderline => {
-            for (r, _) in annotations {
-                let y = (r.y1 - 1.0).round() as i32;
-                let x0 = r.x0.round() as i32;
-                let x1 = r.x1.round() as i32;
-                let dot_fg = if is_night { 190 } else { 80 };
-                let mut x = x0;
-                while x + 2 <= x1 {
-                    p.rect(yui::painter::Rect::new(x, y, 2, 2), dot_fg);
-                    x += 4;
-                }
-            }
-        }
-        AnnotationStyle::Margin => {
-            let mut my = h - pt(28.0);
-            for (_, entry) in annotations.iter().take(2) {
-                let line = format!("• {}: {}", entry.word, entry.gloss_en);
-                let trunc = p.truncate(7.0, &line, p.width_pt() - 32.0);
-                p.text(pt(16.0), my, 7.0, if is_night { 190 } else { 85 }, &trunc);
-                my += pt(10.0);
-            }
-        }
-        AnnotationStyle::Off => {}
-    }
 }
 
 #[cfg(test)]
@@ -589,22 +433,22 @@ mod tests {
         let mut prof = VocabProfile::default();
         assert_eq!(prof.user_level, 65);
 
-        // Mark advanced word (difficulty 85) as known -> adapts user level up
-        prof.mark_known("ubiquitous", 85);
-        assert_eq!(prof.user_level, 66);
-        assert!(prof.known_words.contains("ubiquitous"));
-
-        // Lookup easier word (difficulty 40) -> adapts user level down
+        // Lookup below the frontier -> recorded for learning, frontier dips.
         prof.record_lookup("gloomy", 40);
-        assert_eq!(prof.user_level, 65);
+        assert_eq!(prof.user_level, 64);
         assert!(prof.learning_words.contains("gloomy"));
+
+        // Lookup above the frontier -> recorded, no further dip.
+        prof.record_lookup("lofty", 90);
+        assert_eq!(prof.user_level, 64);
+        assert!(prof.learning_words.contains("lofty"));
 
         prof.save_to(path);
 
         let loaded = VocabProfile::load_from(path);
-        assert_eq!(loaded.user_level, 65);
-        assert!(loaded.known_words.contains("ubiquitous"));
+        assert_eq!(loaded.user_level, 64);
         assert!(loaded.learning_words.contains("gloomy"));
+        assert!(loaded.learning_words.contains("lofty"));
 
         let _ = fs::remove_file(path);
     }
