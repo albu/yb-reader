@@ -44,6 +44,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
+# An orphan takeover flag (armed without the upstart job installed — the
+# pre-gate state, or a non-root install) can only strand the device on the
+# next reboot: the framework stops and nothing starts the reader. This
+# session is proof the device boots stock, so drop it.
+if [ -e /mnt/us/DONT_START_FRAMEWORK ] && [ ! -e /etc/upstart/yb-reader.conf ]; then
+    rm -f /mnt/us/DONT_START_FRAMEWORK
+fi
+
 lipc-set-prop com.lab126.pillow disableEnablePillow disable 2>/dev/null
 # Freeze the on-screen UI (awesome, the WM) and the Java framework core
 # (cvm) — both draw over us and answer taps if left running.
