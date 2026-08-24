@@ -42,7 +42,7 @@ cleanup() {
     modprobe g_mass_storage 2>/dev/null || true
     rm -rf "$LOCK" 2>/dev/null
 }
-trap cleanup EXIT INT TERM HUP
+trap cleanup EXIT INT TERM
 
 # An orphan takeover flag (armed without the upstart job installed — the
 # pre-gate state, or a non-root install) can only strand the device on the

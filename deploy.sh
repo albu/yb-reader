@@ -45,7 +45,7 @@ ssh_deploy() {
         echo "       (if a previous deploy was killed, rm -rf $LOCK_DIR)" >&2
         exit 1
     fi
-    trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT INT TERM HUP
+    trap 'rm -rf "$LOCK_DIR" 2>/dev/null' EXIT INT TERM HUP
 
     cargo zigbuild --target "$TARGET" --release
     BIN="$ROOT/target/$TARGET/release/yb-reader"
@@ -85,7 +85,7 @@ ssh_deploy() {
     # is the truth, not the flag — the curtain card can arm the flag from
     # a stock session, and boot.sh there would race start.sh's unfreeze
     # of cvm (and a second reader).
-    $SSHC "$HOST" "mv -f /mnt/us/extensions/reader/bin/start.sh.new.$$ /mnt/us/extensions/reader/bin/start.sh 2>/dev/null; mv -f /mnt/us/extensions/reader/bin/boot.sh.new.$$ /mnt/us/extensions/reader/bin/boot.sh 2>/dev/null; mv -f $STAGE_DST $DST && chmod +x $DST /mnt/us/extensions/reader/bin/start.sh /mnt/us/extensions/reader/bin/boot.sh && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails && touch /var/local/yb-reader/last && pkill -9 -f 'boot\.sh' 2>/dev/null || true; killall -9 reader 2>/dev/null || true; sleep 1; if test -e /mnt/us/DONT_START_FRAMEWORK; then initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1; else nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 & fi"
+    $SSHC "$HOST" "mv -f /mnt/us/extensions/reader/bin/start.sh.new.$$ /mnt/us/extensions/reader/bin/start.sh 2>/dev/null; mv -f /mnt/us/extensions/reader/bin/boot.sh.new.$$ /mnt/us/extensions/reader/bin/boot.sh 2>/dev/null; mv -f $STAGE_DST $DST && chmod +x $DST /mnt/us/extensions/reader/bin/start.sh /mnt/us/extensions/reader/bin/boot.sh && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails && touch /var/local/yb-reader/last && pkill -9 -x boot.sh 2>/dev/null || true; killall -9 reader 2>/dev/null || true; rm -rf /tmp/yb-reader.lock 2>/dev/null; sleep 1; if test -e /mnt/us/DONT_START_FRAMEWORK; then initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1; else nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 & fi"
     # Post-verification: the deploy is not done when the bytes land, it is
     # done when the new binary is the one running (rc=0 TERM exits are
     # "normal" to the job, so nothing else guarantees the relaunch).
