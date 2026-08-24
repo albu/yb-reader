@@ -9,8 +9,6 @@ use std::time::Duration;
 
 pub const DEFAULT_PORT: u16 = 8765;
 pub const DISCOVER_PORT: u16 = DEFAULT_PORT + 1;
-#[allow(dead_code)]
-pub const FETCH_PORT: u16 = DEFAULT_PORT + 2;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Ceiling on one response body. Legit payloads are frame PNGs (well under

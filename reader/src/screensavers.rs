@@ -24,19 +24,17 @@ const DIM: u8 = 110;
 const INK: u8 = 0;
 
 /// Same dirs, same order, as yui's picker — this screen manages what
-/// that code draws. Device builds carry only the on-device dirs; debug
-/// builds add a host-side dev fixture dir.
-#[cfg(not(debug_assertions))]
-const DIRS: [&str; 2] = [
-    "/mnt/us/screensavers",
-    "/mnt/us/extensions/reader/screensavers",
-];
-#[cfg(debug_assertions)]
-const DIRS: [&str; 3] = [
-    "/mnt/us/screensavers",
-    "/mnt/us/extensions/reader/screensavers",
-    "/tmp/dev_screensaver",
-];
+/// that code draws. Defaults to device directories, plus optional YB_SCREENSAVER_DIR for dev/tests.
+pub fn screensaver_dirs() -> Vec<String> {
+    let mut dirs = vec![
+        "/mnt/us/screensavers".to_string(),
+        "/mnt/us/extensions/reader/screensavers".to_string(),
+    ];
+    if let Ok(dev) = std::env::var("YB_SCREENSAVER_DIR") {
+        dirs.push(dev);
+    }
+    dirs
+}
 
 pub struct ScreensaversScreen {
     w: i32,
@@ -71,8 +69,8 @@ fn is_image(p: &std::path::Path) -> bool {
 pub fn scan() -> Vec<(String, u64)> {
     let mut out: Vec<(String, u64)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for d in DIRS {
-        let Ok(entries) = std::fs::read_dir(d) else {
+    for d in screensaver_dirs() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
             continue;
         };
         for e in entries.flatten() {
@@ -138,7 +136,7 @@ impl ScreensaversScreen {
     /// disk cache GC keep-set.
     fn current_hashes() -> Vec<u64> {
         let mut out = Vec::new();
-        for d in DIRS {
+        for d in screensaver_dirs() {
             let Ok(entries) = std::fs::read_dir(d) else {
                 continue;
             };
@@ -156,6 +154,37 @@ impl ScreensaversScreen {
 
     fn in_rotation(&self, name: &str) -> bool {
         !self.disabled.contains(name)
+    }
+
+    fn toggle(&mut self, name: &str) {
+        if self.disabled.contains(name) {
+            self.disabled.remove(name);
+        } else {
+            self.disabled.insert(name.to_string());
+        }
+        save_disabled(&self.disabled);
+    }
+
+    fn resolve_full_path(&self, name: &str) -> Option<std::path::PathBuf> {
+        for d in screensaver_dirs() {
+            let candidate = std::path::Path::new(&d).join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn delete(&mut self, name: &str) {
+        if let Some(p) = self.resolve_full_path(name) {
+            let _ = std::fs::remove_file(p);
+        }
+        self.disabled.remove(name);
+        save_disabled(&self.disabled);
+        self.files = scan();
+        if self.offset >= self.files.len() {
+            self.offset = self.files.len().saturating_sub(self.per_page);
+        }
     }
 
     /// Pure row-index math, host-testable.
@@ -203,8 +232,8 @@ pub fn prewarm() {
         .name("ss-prewarm".to_string())
         .spawn(|| {
             let mut hashes = Vec::new();
-            for d in DIRS {
-                let Ok(entries) = std::fs::read_dir(d) else {
+            for d in screensaver_dirs() {
+                let Ok(entries) = std::fs::read_dir(&d) else {
                     continue;
                 };
                 for e in entries.flatten() {

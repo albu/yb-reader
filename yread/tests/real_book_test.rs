@@ -10,12 +10,9 @@ use yread::shape::ShapeCache;
 
 #[test]
 fn test_render_real_sample_book() {
-    let book_path = "/tmp/sample_book.epub";
-    if !Path::new(book_path).exists() {
-        println!(
-            "Book not found at '{}', skipping real book test.",
-            book_path
-        );
+    let default_path = "/tmp/sample_book.epub".to_string();
+    let book_path = std::env::var("YB_TEST_EPUB").unwrap_or(default_path);
+    if !Path::new(&book_path).exists() {
         return;
     }
 

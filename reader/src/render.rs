@@ -360,14 +360,14 @@ mod tests {
     use crate::split::{SplitConfig, SplitPreset};
     use mupdf::TextPageFlags;
 
-    const PDF: &str = "/tmp/sample_book.pdf";
+    fn test_pdf() -> Option<String> {
+        std::env::var("YB_TEST_PDF").ok().filter(|p| std::path::Path::new(p).exists())
+    }
 
     #[test]
     fn test_render_subbox_portrait() {
-        if !std::path::Path::new(PDF).exists() {
-            return;
-        }
-        let doc = Document::open(PDF).expect("open doc");
+        let Some(pdf) = test_pdf() else { return; };
+        let doc = Document::open(&pdf).expect("open doc");
         let settings = ReaderSettings::default();
         let rendered = render_page(&doc, 20, 0, &settings, 1236, 1648);
         assert!(rendered.is_some());
@@ -376,10 +376,8 @@ mod tests {
 
     #[test]
     fn test_render_subbox_horizontal2_landscape() {
-        if !std::path::Path::new(PDF).exists() {
-            return;
-        }
-        let doc = Document::open(PDF).expect("open doc");
+        let Some(pdf) = test_pdf() else { return; };
+        let doc = Document::open(&pdf).expect("open doc");
         let mut settings = ReaderSettings::default();
         settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
         // Visual dims for landscape: swapped.
@@ -392,10 +390,8 @@ mod tests {
 
     #[test]
     fn test_slice_pixmap_matches_render_page() {
-        if !std::path::Path::new(PDF).exists() {
-            return;
-        }
-        let doc = Document::open(PDF).expect("open doc");
+        let Some(pdf) = test_pdf() else { return; };
+        let doc = Document::open(&pdf).expect("open doc");
         let page = doc.load_page(20).expect("load page");
         let bounds = page.bounds().expect("bounds");
         let mut settings = ReaderSettings::default();
@@ -418,10 +414,8 @@ mod tests {
 
     #[test]
     fn test_render_subbox_horizontal3_landscape() {
-        if !std::path::Path::new(PDF).exists() {
-            return;
-        }
-        let doc = Document::open(PDF).expect("open doc");
+        let Some(pdf) = test_pdf() else { return; };
+        let doc = Document::open(&pdf).expect("open doc");
         let mut settings = ReaderSettings::default();
         settings.split = SplitConfig::for_preset(SplitPreset::Horizontal3);
         for sub in 0..3 {
@@ -432,10 +426,8 @@ mod tests {
 
     #[test]
     fn test_diagnostic_subboxes() {
-        if !std::path::Path::new(PDF).exists() {
-            return;
-        }
-        let doc = Document::open(PDF).expect("open doc");
+        let Some(pdf) = test_pdf() else { return; };
+        let doc = Document::open(&pdf).expect("open doc");
 
         for page_no in [0, 1, 5, 20, 21, 50] {
             let page = doc.load_page(page_no).unwrap();
@@ -468,10 +460,8 @@ mod tests {
     /// hand-copied variant of the loop under test).
     #[test]
     fn words_from_text_page_extracts_in_reading_order() {
-        if !std::path::Path::new(PDF).exists() {
-            return;
-        }
-        let doc = Document::open(PDF).expect("open doc");
+        let Some(pdf) = test_pdf() else { return; };
+        let doc = Document::open(&pdf).expect("open doc");
         let page = doc.load_page(20).expect("load page 20");
         let settings = ReaderSettings::default();
         let tp = page
@@ -501,10 +491,8 @@ mod tests {
     /// this.
     #[test]
     fn extracted_words_land_on_painted_ink() {
-        if !std::path::Path::new(PDF).exists() {
-            return;
-        }
-        let doc = Document::open(PDF).expect("open doc");
+        let Some(pdf) = test_pdf() else { return; };
+        let doc = Document::open(&pdf).expect("open doc");
         let page = doc.load_page(20).expect("load page");
         let mut settings = ReaderSettings::default();
         settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
@@ -547,10 +535,8 @@ mod tests {
 
     #[test]
     fn test_probe_mupdf() {
-        if !std::path::Path::new(PDF).exists() {
-            return;
-        }
-        let doc = Document::open(PDF).expect("open doc");
+        let Some(pdf) = test_pdf() else { return; };
+        let doc = Document::open(&pdf).expect("open doc");
         let page = doc.load_page(8).unwrap();
         if let Ok(links) = page.links() {
             for l in links.take(5) {

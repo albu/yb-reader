@@ -324,9 +324,6 @@ pub fn word_dialog(
                     let mut deck = crate::flashcards::FlashcardDeck::load();
                     deck.add_word(&word);
                 }
-                crate::word_dialog::WordAction::MarkKnown => {
-                    prof.mark_known(&word, diff);
-                }
                 crate::word_dialog::WordAction::Close => {}
             }
             Action::Pop

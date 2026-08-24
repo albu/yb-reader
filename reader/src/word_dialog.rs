@@ -14,8 +14,6 @@ pub struct WordDialog {
 
 pub enum WordAction {
     StarLearning,
-    #[allow(dead_code)]
-    MarkKnown,
     Close,
 }
 

@@ -880,7 +880,9 @@ fn test_epub_malformed_chapter_degrades_not_dies() {
 
 #[test]
 fn test_parse_real_sample_fb2() {
-    let p = std::path::Path::new("/tmp/sample.fb2");
+    let default_path = "/tmp/sample.fb2".to_string();
+    let fb2_path = std::env::var("YB_TEST_FB2").unwrap_or(default_path);
+    let p = std::path::Path::new(&fb2_path);
     if !p.exists() {
         return;
     }

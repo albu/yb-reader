@@ -10,16 +10,17 @@ use yread::shape::ShapeCache;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let epub_path = args.get(1).cloned().unwrap_or_else(|| {
-        "/tmp/sample_book.epub".to_string()
-    });
+    let Some(epub_path) = args.get(1) else {
+        eprintln!("Usage: rendertest <book.epub> [chapter_idx]");
+        return;
+    };
     let target_ch_idx: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
 
     println!("============================================================");
     println!("PROFILING EPUB: {}", epub_path);
     println!("============================================================");
 
-    if !Path::new(&epub_path).exists() {
+    if !Path::new(epub_path).exists() {
         eprintln!("File not found: {}", epub_path);
         return;
     }
