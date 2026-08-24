@@ -439,10 +439,18 @@ impl Rasterizer {
                     // yield 4 B/px RGBA; the blit below would have read the
                     // red channel as alpha coverage and stamped garbage.
                     // Keep each pixel's alpha — e-ink shows shape, not hue.
+                    // SubpixelMask is 3 B/px LCD coverage with no alpha:
+                    // average the channels (the current source list never
+                    // yields it, but the arm must not lie about the layout).
                     let data = match img.content {
-                        Content::Color | Content::SubpixelMask => {
-                            img.data.chunks_exact(4).map(|px| px[3]).collect()
-                        }
+                        Content::Color => img.data.chunks_exact(4).map(|px| px[3]).collect(),
+                        Content::SubpixelMask => img
+                            .data
+                            .chunks_exact(3)
+                            .map(|px| {
+                                ((px[0] as u32 + px[1] as u32 + px[2] as u32) / 3) as u8
+                            })
+                            .collect(),
                         Content::Mask => img.data,
                     };
                     Arc::new(CachedGlyph {

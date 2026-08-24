@@ -345,9 +345,12 @@ fn prune_at(path: &str, live: &[String]) {
     if live.is_empty() {
         return;
     }
+    // Set, not slice scan: this runs per home-screen scan against every
+    // stored entry — O(n·m) was measurable with a few hundred books.
+    let live_set: std::collections::HashSet<&String> = live.iter().collect();
     let mut map = load_at(path);
     let before = map.len();
-    map.retain(|name, _| live.contains(name));
+    map.retain(|name, _| live_set.contains(name));
     if map.len() != before {
         save_at(path, &map);
     }

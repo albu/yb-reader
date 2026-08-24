@@ -528,6 +528,14 @@ pub fn paginate_chapter_with_images(
                     .copied()
                     .unwrap_or_else(|| (width.unwrap_or(content_w as u32), height.unwrap_or(400)));
 
+                // A sniffed/crafted header declaring a zero dimension
+                // would turn the scale into inf (survived only by the
+                // .min(1.0) ordering luck) and emit a 0×0 element — skip
+                // the image outright.
+                if orig_w == 0 || orig_h == 0 {
+                    continue;
+                }
+
                 let max_w = content_w;
                 let max_h = content_h * 0.80; // Keep within page limits
                 let scale = (max_w / orig_w as f32).min(max_h / orig_h as f32).min(1.0);

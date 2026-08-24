@@ -433,29 +433,16 @@ impl ReaderBackend for YreadBackend {
         }
         if self.yqueued_turns != 0 {
             // turn_page moves at most ONE page (or one chapter crossing)
-            // per call, so a queued burst applies one step at a time. A
-            // cold chapter crossing re-queues the remainder inside
-            // turn_page; it applies on a later poll when that layout
-            // lands. AtBoundary discards the rest — otherwise
-            // has_pending_work would tick at 100 ms forever on a queue
-            // that can never drain.
-            let mut applied = false;
-            let mut guard = 0;
-            while self.yqueued_turns != 0 && guard < 128 {
-                guard += 1;
-                let step = self.yqueued_turns.signum();
-                match self.turn_page(step, vw, vh, settings) {
-                    PageTurnResult::Changed { .. } => {
-                        self.yqueued_turns -= step;
-                        applied = true;
-                    }
-                    PageTurnResult::AtBoundary => {
-                        self.yqueued_turns = 0;
-                        break;
-                    }
-                    PageTurnResult::Queued => break,
-                }
-            }
+            // per call; a cold chapter crossing re-queues the remainder
+            // inside turn_page, which applies on a later poll when that
+            // layout lands. The counter is taken out first: the closure
+            // needs &mut self for turn_page.
+            let mut q = std::mem::take(&mut self.yqueued_turns);
+            let applied =
+                crate::backend::drain_queued_turns(&mut q, |step| {
+                    self.turn_page(step, vw, vh, settings)
+                });
+            self.yqueued_turns = q;
             if applied {
                 redraw = true;
             }

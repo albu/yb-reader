@@ -448,10 +448,13 @@ pub fn draw_annotations(
         AnnotationStyle::Interlinear => {
             for (r, entry) in annotations {
                 let full_gloss = &entry.gloss_en;
-                let short = if full_gloss.len() > 16 {
+                // Budget in CHARS, not bytes: glosses are regularly
+                // Cyrillic (2 bytes/char), and a byte budget over-truncated
+                // them while the >16 gate let them through unclipped.
+                let short = if full_gloss.chars().count() > 16 {
                     let mut s = String::new();
                     for w in full_gloss.split_whitespace() {
-                        if s.len() + w.len() + 1 > 15 {
+                        if s.chars().count() + w.chars().count() + 1 > 15 {
                             s.push('…');
                             break;
                         }

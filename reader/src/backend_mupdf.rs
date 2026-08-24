@@ -110,23 +110,15 @@ impl ReaderBackend for PdfBackend {
                 self.total = ready.total;
                 self.page_no = self.page_no.min(self.total.saturating_sub(1));
                 self.loading = None;
-                // Drain taps buffered during open. Same discipline as the
-                // yread drain: one step per call, AtBoundary discards the
-                // rest so the queue can never wedge non-empty.
-                let mut guard = 0;
-                while self.queued_turns != 0 && guard < 128 {
-                    guard += 1;
-                    let step = self.queued_turns.signum();
-                    match self.turn_page(step, vw, vh, settings) {
-                        PageTurnResult::Changed { .. } => self.queued_turns -= step,
-                        PageTurnResult::AtBoundary => {
-                            self.queued_turns = 0;
-                            break;
-                        }
-                        PageTurnResult::Queued => break,
-                    }
-                }
-                self.queued_turns = 0;
+                // Drain taps buffered during open. The counter is taken out
+                // first: the closure needs &mut self for turn_page. The pdf
+                // backend never re-queues on its own, so the queue drains
+                // fully here (mem::take already left it at 0).
+                let mut q = std::mem::take(&mut self.queued_turns);
+                let _applied =
+                    crate::backend::drain_queued_turns(&mut q, |step| {
+                        self.turn_page(step, vw, vh, settings)
+                    });
                 // The document just became ready: repaint regardless of
                 // whether any queued taps applied.
                 true
@@ -213,34 +205,44 @@ impl ReaderBackend for PdfBackend {
                 is_loading: true,
             };
         };
-
-        let gray = render_page(doc.as_ref(), self.page_no, self.sub_idx, settings, vw, vh);
-        if gray.is_none() {
-            // A None here is a mupdf failure (load_page / to_pixmap), not
-            // an empty page — the latter renders as a white buffer. A
-            // corrupt PDF must be distinguishable from a blank one in the
-            // log instead of silently showing a blank page.
-            ybdev::log::plog(&format!(
-                "render: page {} sub {} produced no pixmap (mupdf failure)",
-                self.page_no, self.sub_idx
-            ));
-        }
         self.sub_box_count = settings.split.sub_boxes().len().max(1);
 
+        // One load_page feeds ink, words and links — a second load per
+        // frame was measurable on cold page turns.
         let mut words = Vec::new();
         let mut links = Vec::new();
-
-        if let Ok(p) = doc.load_page(self.page_no as i32) {
-            if let Ok(bounds) = p.bounds() {
-                if let Some(geom) = render::LayoutGeom::new(settings, bounds, self.sub_idx, vw, vh)
-                {
-                    if let Ok(tp) = p.to_text_page(mupdf::TextPageFlags::empty()) {
-                        words = render::words_from_text_page(&tp, &geom);
-                    }
-                    links = render::links_from_page(&p, &geom);
-                }
+        let gray = match doc.load_page(self.page_no as i32) {
+            Err(e) => {
+                ybdev::log::plog(&format!("render: load_page {}: {}", self.page_no, e));
+                None
             }
-        }
+            Ok(p) => match p.bounds() {
+                Err(e) => {
+                    ybdev::log::plog(&format!("render: page {} bounds: {}", self.page_no, e));
+                    None
+                }
+                Ok(bounds) => match render::LayoutGeom::new(settings, bounds, self.sub_idx, vw, vh)
+                {
+                    None => {
+                        // Degenerate page box (zero width/height) — a
+                        // mupdf failure must be distinguishable from a
+                        // blank page in the log, not a silent white screen.
+                        ybdev::log::plog(&format!(
+                            "render: page {} has a degenerate box {:?}",
+                            self.page_no, bounds
+                        ));
+                        None
+                    }
+                    Some(geom) => {
+                        if let Ok(tp) = p.to_text_page(mupdf::TextPageFlags::empty()) {
+                            words = render::words_from_text_page(&tp, &geom);
+                        }
+                        links = render::links_from_page(&p, &geom);
+                        render::render_page_on(&p, &geom, self.sub_idx, settings, vw, vh)
+                    }
+                },
+            },
+        };
 
         RenderOutput {
             gray,

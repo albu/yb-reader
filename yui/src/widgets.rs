@@ -277,11 +277,14 @@ impl SleepScreen {
 }
 
 fn pick_random_screensaver() -> Option<Vec<u8>> {
-    let dirs = [
+    let mut dirs = vec![
         "/mnt/us/screensavers",
         "/mnt/us/extensions/reader/screensavers",
-        "/tmp/dev_screensaver",
     ];
+    // Dev-machine pool of test images — debug builds only, so a device
+    // build never carries developer paths (or pays a dead read_dir).
+    #[cfg(debug_assertions)]
+    dirs.push("/tmp/dev_screensaver");
     let mut files = Vec::new();
     for d in dirs {
         if let Ok(entries) = std::fs::read_dir(d) {

@@ -298,19 +298,24 @@ impl<R: BufRead> Fb2Parser<R> {
                 );
                 let mut target: Option<String> = None;
                 let mut is_note = false;
+                let mut same_doc = false;
                 for attr in e.attributes().flatten() {
                     let k = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
                     let v = String::from_utf8_lossy(&attr.value).to_string();
                     if k.ends_with("href") {
+                        same_doc = v.starts_with('#');
                         target = Some(v.trim_start_matches('#').to_string());
                     } else if k == "type" && (v == "note" || v == "footnote" || v == "comment") {
                         is_note = true;
                     }
                 }
                 if let Some(t) = target {
-                    // Note references render as small superscript markers;
-                    // the conventional "n…" id covers books omitting type.
-                    if is_note || t.starts_with('n') || t.starts_with("note") {
+                    // Note references render as small superscript markers.
+                    // type="note" is authoritative; the "n…" id heuristic
+                    // only extends to SAME-DOCUMENT anchors (FB2 note refs
+                    // are l:href="#n…") — a plain link to chapter1.xhtml
+                    // must never render as a marker.
+                    if is_note || (same_doc && t.starts_with('n')) {
                         self.current_style.is_sup = true;
                         self.current_style.size_mult *= 0.75;
                     }

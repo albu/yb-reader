@@ -288,7 +288,17 @@ impl MirrorScreen {
         let t0 = now_ms();
         let mut buf: Vec<u8> = Vec::new();
         let mut stage = "ok";
+        // Mirror bodies are grayscale screen PNGs ("well under 1 MB" per
+        // protocol's own note) plus tiny status/ack JSON. The protocol's
+        // 16 MB ceiling exists for the ai_stream's bigger turns; a mirror
+        // server declaring that much must not make the settle loop
+        // allocate it per 500 ms re-fetch on a ~150 MB-RAM device.
+        // Returning false aborts the request cleanly (Stage::Body).
+        const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
         let mut sink = |chunk: &[u8]| {
+            if buf.len() + chunk.len() > MAX_FRAME_BYTES {
+                return false;
+            }
             buf.extend_from_slice(chunk);
             true
         };
@@ -309,9 +319,14 @@ impl MirrorScreen {
         });
         if r.is_none() {
             // Retrying is safe for GETs, and for POSTs because page turns
-            // carry an idempotency key.
+            // carry an idempotency key. (A second closure, not reuse: the
+            // first still borrows buf until its last use, and buf must be
+            // cleared in between.)
             buf.clear();
             let mut sink = |chunk: &[u8]| {
+                if buf.len() + chunk.len() > MAX_FRAME_BYTES {
+                    return false;
+                }
                 buf.extend_from_slice(chunk);
                 true
             };

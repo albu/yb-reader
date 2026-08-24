@@ -642,7 +642,11 @@ impl<R: Read + Seek> EpubParser<R> {
                     }
                 }
                 Ok(Event::Text(ref e)) => {
-                    let raw_slice = std::str::from_utf8(e.as_ref()).unwrap_or("");
+                    // Lossy, consistent with the tolerant-walker contract:
+                    // one stray non-UTF-8 byte costs a replacement char,
+                    // not the rest of the chapter's text.
+                    let raw = String::from_utf8_lossy(e.as_ref());
+                    let raw_slice = raw.as_ref();
                     let text = unescape_html_lossy(raw_slice);
                     if in_title_tag {
                         title_tag_buf.push_str(&text);

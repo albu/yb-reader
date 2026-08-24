@@ -49,23 +49,26 @@ pub fn load(book: &str) -> Vec<Highlight> {
         .collect()
 }
 
-pub fn save(book: &str, v: &[Highlight]) {
+/// Persist the set. Returns false when the write failed (also logged) —
+/// callers that told the user "saved" must not.
+pub fn save(book: &str, v: &[Highlight]) -> bool {
     let _ = std::fs::create_dir_all(notes_dir());
     let mut s = String::new();
     for h in v {
         s.push_str(&format!("{}\t{}\t{}\n", h.page, h.ts, h.text));
     }
     // Atomic + fsync'd swap: a crash mid-highlight must cost at most the
-    // previous save, never a truncated store. `add()`/`remove()` only
-    // report dedup; a failed write is logged here (it was silently
-    // dropped before, while the underline still got drawn).
-    if !ybdev::atomic::write(path_for(book), s.as_bytes()) {
+    // previous save, never a truncated store.
+    if ybdev::atomic::write(path_for(book), s.as_bytes()) {
+        true
+    } else {
         ybdev::log::plog(&format!("notes: failed to save highlights for {}", book));
+        false
     }
 }
 
-/// Add a highlight (deduped by exact text). Returns false for an empty or
-/// already-known span.
+/// Add a highlight (deduped by exact text). Returns false for an empty
+/// span, an already-known span, or a failed write.
 #[allow(dead_code)]
 pub fn add(book: &str, page: usize, text: &str) -> bool {
     let text = text.trim();
@@ -82,12 +85,13 @@ pub fn add(book: &str, page: usize, text: &str) -> bool {
         text: text.to_string(),
     });
     v.sort_by_key(|h| h.ts);
-    save(book, &v);
-    true
+    save(book, &v)
 }
 
 /// Remove a highlight by its exact text (the same key `add` dedupes on).
-/// Returns true if it existed.
+/// Returns true only if it existed AND the removal was persisted; a
+/// failed write leaves the old store intact, so the caller should treat
+/// the highlight as still present.
 pub fn remove(book: &str, text: &str) -> bool {
     let mut v = load(book);
     let before = v.len();
@@ -95,8 +99,7 @@ pub fn remove(book: &str, text: &str) -> bool {
     if v.len() == before {
         return false;
     }
-    save(book, &v);
-    true
+    save(book, &v)
 }
 
 #[allow(dead_code)]

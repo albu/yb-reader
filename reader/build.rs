@@ -14,10 +14,14 @@ fn main() {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "nogit".to_string());
+    // `status --porcelain` covers staged, unstaged AND untracked files —
+    // `diff --quiet` missed staged-only edits, so a deploy built from a
+    // staged tree reported a clean sha.
     let dirty = Command::new("git")
-        .args(["diff", "--quiet"])
-        .status()
-        .map(|s| !s.success())
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| !o.stdout.is_empty())
         .unwrap_or(true);
     let v = if dirty { format!("{sha}*") } else { sha };
     println!("cargo:rustc-env=YB_BUILD={v}");

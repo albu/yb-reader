@@ -19,7 +19,7 @@ const fn ioc(dir: u32, typ: u8, nr: u32, size: usize) -> Ioctl {
     v as Ioctl
 }
 
-const fn iow(typ: u8, nr: u32, size: usize) -> Ioctl {
+pub(crate) const fn iow(typ: u8, nr: u32, size: usize) -> Ioctl {
     ioc(IOC_WRITE, typ, nr, size)
 }
 const fn ior(typ: u8, nr: u32, size: usize) -> Ioctl {

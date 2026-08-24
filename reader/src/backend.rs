@@ -9,6 +9,36 @@ pub enum PageTurnResult {
     Queued,
 }
 
+/// Drain buffered turns one step per call (`turn_page` moves at most one
+/// page or chapter-crossing per invocation, so a queued burst applies one
+/// step at a time). `AtBoundary` discards the rest — otherwise the queue
+/// can never drain and the poller would tick forever; `Queued` (a cold
+/// chapter crossing) leaves the remainder for a later poll. The guard
+/// bounds pathological re-queue loops. Returns whether any step applied.
+pub fn drain_queued_turns(
+    queued: &mut i32,
+    mut turn: impl FnMut(i32) -> PageTurnResult,
+) -> bool {
+    let mut applied = false;
+    let mut guard = 0;
+    while *queued != 0 && guard < 128 {
+        guard += 1;
+        let step = queued.signum();
+        match turn(step) {
+            PageTurnResult::Changed { .. } => {
+                *queued -= step;
+                applied = true;
+            }
+            PageTurnResult::AtBoundary => {
+                *queued = 0;
+                break;
+            }
+            PageTurnResult::Queued => break,
+        }
+    }
+    applied
+}
+
 pub struct RenderOutput {
     pub gray: Option<Vec<u8>>,
     pub words: Vec<(String, RectF)>,

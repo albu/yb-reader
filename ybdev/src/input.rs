@@ -7,7 +7,12 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// One-shot log latch for a hung-up touch device — without it, every
+/// deadline window would re-log the same POLLHUP.
+static TOUCH_GONE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwipeDir {
@@ -402,7 +407,12 @@ impl Input {
         // homescreen. With the grab, the kernel routes events only to
         // this fd; it is released automatically when the fd closes (even
         // on crash). KOReader grabs the same way.
-        const EVIOCGRAB: libc::c_int = 0x40044590;
+        //
+        // linux/input.h: #define EVIOCGRAB _IOW('E', 0x90, int)
+        const EVIOCGRAB: crate::mtk::Ioctl = crate::mtk::iow(b'E', 0x90, std::mem::size_of::<i32>());
+        // Cross-check against the number the kernel headers spell out —
+        // guards the encoder against a copy slip.
+        const _: () = assert!(EVIOCGRAB == 0x4004_4590 as crate::mtk::Ioctl);
         // `as _`: the request type is c_int on 32-bit targets and c_ulong
         // on the 64-bit host — let inference pick per target.
         let rv = unsafe { libc::ioctl(f.as_raw_fd(), EVIOCGRAB as _, &1i32) };
@@ -414,8 +424,12 @@ impl Input {
 
         let pwr_f = discover_pwrkey().and_then(|p| {
             let file = OpenOptions::new().read(true).write(false).open(&p).ok()?;
-            let _ = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, &1i32) };
-            crate::log::plog(&format!("pwrkey opened on {}", p));
+            let rv = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, &1i32) };
+            crate::log::plog(&format!(
+                "pwrkey opened on {} (grab {})",
+                p,
+                if rv == 0 { "ok" } else { "FAILED" }
+            ));
             Some(file)
         });
 
@@ -502,6 +516,25 @@ impl Input {
             }
             if rv == 0 {
                 continue;
+            }
+
+            // POLLHUP/POLLERR (driver unbound, device gone) is reported
+            // by poll() instantly and forever, whether requested or not —
+            // without this arm the loop would busy-spin to the deadline
+            // on every next_gesture call, at 100% CPU, forever.
+            if pwr_fd >= 0 && (pfds[1].revents & (libc::POLLHUP | libc::POLLERR)) != 0 {
+                crate::log::plog("input: power-key fd hung up — retiring it");
+                self.pwr_f = None;
+            }
+            if (pfds[0].revents & (libc::POLLHUP | libc::POLLERR)) != 0 {
+                if !TOUCH_GONE.swap(true, Ordering::Relaxed) {
+                    crate::log::plog("input: touch device hung up — input disabled until restart");
+                }
+                // No event will ever arrive again; idle out the deadline
+                // (one sleep, zero CPU) so the app loop keeps its tick
+                // cadence instead of learning a new spin.
+                std::thread::sleep(remain);
+                return None;
             }
 
             // Check power key events first

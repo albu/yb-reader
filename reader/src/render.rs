@@ -41,6 +41,13 @@ pub struct LayoutGeom {
     /// Full page size in document units.
     pub pw: f32,
     pub ph: f32,
+    /// Page-box origin in the coordinate space `bounds` reports. mupdf
+    /// normalizes the page CTM, so this is normally 0 — bounds AND text
+    /// quads both come back origin-relative. Kept explicit so to_screen
+    /// stays correct in whatever space the page reports, rather than
+    /// assuming the normalization.
+    bx0: f32,
+    by0: f32,
     /// Document→screen scale, fit inside the reading area.
     pub zoom: f32,
     /// Screen offset (px) of the rendered box inside the reading area.
@@ -87,6 +94,8 @@ impl LayoutGeom {
             sub_box,
             pw,
             ph,
+            bx0: bounds.x0,
+            by0: bounds.y0,
             zoom,
             vis_ox,
             vis_oy,
@@ -107,12 +116,18 @@ impl LayoutGeom {
     }
 
     /// Map a document-space rect inside the current sub-box to visual
-    /// (screen) coordinates.
+    /// (screen) coordinates. Input is ABSOLUTE document space (what
+    /// text-page quads and link bounds arrive in); the rendered box
+    /// starts at the page-box origin, so it is subtracted here — a
+    /// non-origin CropBox used to shift words off their ink by
+    /// `bx0 * zoom`.
     fn to_screen(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> (f32, f32, f32, f32) {
-        let sx0 = self.vis_ox as f32 + (x0 - self.sub_box.x0 * self.pw) * self.zoom;
-        let sy0 = self.vis_oy as f32 + (y0 - self.sub_box.y0 * self.ph) * self.zoom;
-        let sx1 = self.vis_ox as f32 + (x1 - self.sub_box.x0 * self.pw) * self.zoom;
-        let sy1 = self.vis_oy as f32 + (y1 - self.sub_box.y0 * self.ph) * self.zoom;
+        let ox = self.bx0 + self.sub_box.x0 * self.pw;
+        let oy = self.by0 + self.sub_box.y0 * self.ph;
+        let sx0 = self.vis_ox as f32 + (x0 - ox) * self.zoom;
+        let sy0 = self.vis_oy as f32 + (y0 - oy) * self.zoom;
+        let sx1 = self.vis_ox as f32 + (x1 - ox) * self.zoom;
+        let sy1 = self.vis_oy as f32 + (y1 - oy) * self.zoom;
         (sx0, sy0, sx1, sy1)
     }
 
@@ -123,15 +138,15 @@ impl LayoutGeom {
         RectF::new(sx0.min(sx1), sy0.min(sy1), sx0.max(sx1), sy0.max(sy1))
     }
 
-    /// Visual rect of the sub-box itself, in document units (test helper:
-    /// maps exactly the region this sub-page renders).
+    /// Visual rect of the sub-box itself, in absolute document units
+    /// (test helper: maps exactly the region this sub-page renders).
     #[cfg(test)]
     pub fn sub_rect_doc(&self) -> (f32, f32, f32, f32) {
         (
-            self.sub_box.x0 * self.pw,
-            self.sub_box.y0 * self.ph,
-            self.sub_box.x1 * self.pw,
-            self.sub_box.y1 * self.ph,
+            self.bx0 + self.sub_box.x0 * self.pw,
+            self.by0 + self.sub_box.y0 * self.ph,
+            self.bx0 + self.sub_box.x1 * self.pw,
+            self.by0 + self.sub_box.y1 * self.ph,
         )
     }
 }
@@ -201,7 +216,9 @@ pub fn links_from_page(page: &mupdf::Page, g: &LayoutGeom) -> Vec<(RectF, String
 }
 
 /// Rasterize (page, sub_idx) to visual-sized grayscale over the shared
-/// [`LayoutGeom`] math. Pure function over the document.
+/// [`LayoutGeom`] math. Loads the page itself — for callers that only
+/// need ink (crop preview, tests). The backend uses [`render_page_on`]
+/// so one load feeds ink, words and links.
 pub fn render_page(
     doc: &Document,
     page_no: usize,
@@ -210,12 +227,38 @@ pub fn render_page(
     w: u32,
     h: u32,
 ) -> Option<Vec<u8>> {
+    let page = match doc.load_page(page_no as i32) {
+        Ok(p) => p,
+        Err(e) => {
+            ybdev::log::plog(&format!("render: load_page {}: {}", page_no, e));
+            return None;
+        }
+    };
+    let bounds = match page.bounds() {
+        Ok(b) => b,
+        Err(e) => {
+            ybdev::log::plog(&format!("render: page {} bounds: {}", page_no, e));
+            return None;
+        }
+    };
+    let geom = LayoutGeom::new(settings, bounds, sub_idx, w, h)?;
+    render_page_on(&page, &geom, sub_idx, settings, w, h)
+}
+
+/// Core rasterizer over an already-loaded page — the caller owns the
+/// single `load_page` and the geometry it shares with the word/link
+/// walkers.
+pub fn render_page_on(
+    page: &mupdf::Page,
+    geom: &LayoutGeom,
+    sub_idx: usize,
+    settings: &ReaderSettings,
+    w: u32,
+    h: u32,
+) -> Option<Vec<u8>> {
     // Thread-local mupdf context: set on every call so any thread that
     // rasterizes picks the knob up (contexts are per-thread clones).
     mupdf::Context::get().set_text_aa_level(TEXT_AA_LEVEL);
-    let page = doc.load_page(page_no as i32).ok()?;
-    let bounds = page.bounds().ok()?;
-    let geom = LayoutGeom::new(settings, bounds, sub_idx, w, h)?;
 
     let config = &settings.split;
     let sub_box = geom.sub_box;
@@ -225,9 +268,13 @@ pub fn render_page(
 
     let mut m = Matrix::IDENTITY;
     m.scale(zoom, zoom);
-    let pm = page
-        .to_pixmap(&m, &Colorspace::device_gray(), false, true)
-        .ok()?;
+    let pm = match page.to_pixmap(&m, &Colorspace::device_gray(), false, true) {
+        Ok(pm) => pm,
+        Err(e) => {
+            ybdev::log::plog(&format!("render: to_pixmap failed: {}", e));
+            return None;
+        }
+    };
 
     let pm_w = pm.width() as usize;
     let pm_h = pm.height() as usize;
@@ -476,6 +523,109 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A minimal one-page PDF whose CropBox sits at a real offset from
+    /// the MediaBox origin (x=300). Built byte-exact here so the test
+    /// needs no fixture file.
+    fn cropbox_pdf() -> Vec<u8> {
+        let content = b"BT /F1 24 Tf 320 400 Td (Hello CropBox) Tj ET";
+        let objs: [String; 5] = [
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+             /CropBox [300 100 512 692] /Contents 4 0 R \
+             /Resources << /Font << /F1 5 0 R >> >> >>"
+                .into(),
+            format!(
+                "<< /Length {} >>\nstream\n{}\nendstream",
+                content.len() + 1,
+                String::from_utf8_lossy(content)
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offs = [0usize; 5];
+        for (i, o) in objs.iter().enumerate() {
+            offs[i] = pdf.len();
+            pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", i + 1, o).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for o in offs {
+            pdf.extend_from_slice(format!("{:010} 00000 n \n", o).as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{}\n%%EOF", xref).as_bytes(),
+        );
+        pdf
+    }
+
+    /// Words must land on ink for pages whose CropBox origin is not
+    /// (0,0). mupdf normalizes the page CTM (bounds and text quads both
+    /// come back origin-relative), so this pins the SPACE CONSISTENCY
+    /// invariant rather than an absolute-coordinates assumption: if a
+    /// future mupdf or backend returns non-normalized bounds, to_screen
+    /// must keep subtracting the page-box origin or every word box
+    /// shifts by `x0 * zoom` (here that would be ~760 px — clean off
+    /// the word's own ink).
+    #[test]
+    fn words_follow_nonzero_cropbox_origin() {
+        let path = std::env::temp_dir().join("yb_cropbox_test.pdf");
+        std::fs::write(&path, cropbox_pdf()).expect("write test pdf");
+        let doc = Document::open(path.as_os_str()).expect("open");
+
+        let page = doc.load_page(0).expect("page");
+        let bounds = page.bounds().expect("bounds");
+        // Premise: mupdf honored the CropBox dimensions (212x592, not the
+        // 612x792 MediaBox). x0 is normalized to 0 — that IS the contract
+        // this test documents.
+        assert!(
+            (bounds.x1 - bounds.x0 - 212.0).abs() < 0.5 && (bounds.y1 - bounds.y0 - 592.0).abs() < 0.5,
+            "bounds: {bounds:?}"
+        );
+
+        let settings = ReaderSettings::default();
+        let (vw, vh) = (1236u32, 1648u32);
+        let gray = render_page(&doc, 0, 0, &settings, vw, vh).expect("render");
+        let geom = LayoutGeom::new(&settings, bounds, 0, vw, vh).expect("geom");
+        let tp = page
+            .to_text_page(mupdf::TextPageFlags::empty())
+            .expect("text page");
+        let words = words_from_text_page(&tp, &geom);
+        let Some((first, r)) = words.first() else {
+            panic!("no words extracted from cropbox page");
+        };
+        assert!(first.starts_with("Hello"), "first word: {first}");
+
+        // Where the ink is: zoom is height-limited (212x592 box into
+        // 1236x1506) ≈ 2.544; the box is centered → vis_ox ≈ 348; word
+        // starts 20pt inside the box → x0 ≈ 348 + 20*2.544 ≈ 399. A
+        // mapping that forgot the space normalization lands at ≈ 1162.
+        assert!(
+            r.x0 > 350.0 && r.x0 < 450.0,
+            "word box x0 {:.1} not on its ink (expected ~399)",
+            r.x0
+        );
+        assert!(r.x1 < 800.0, "word box spills off-buffer: {r:?}");
+
+        // Belt and braces: the box's mean gray must be ink, not paper.
+        let (x0, y0) = (r.x0.round().max(0.0) as usize, r.y0.round().max(0.0) as usize);
+        let (x1, y1) = ((r.x1.round() as usize).min(vw as usize), (r.y1.round() as usize).min(vh as usize));
+        let (mut sum, mut n) = (0u64, 0usize);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                sum += gray[y * vw as usize + x] as u64;
+                n += 1;
+            }
+        }
+        let page_mean = gray.iter().map(|&v| v as f64).sum::<f64>() / gray.len() as f64;
+        let word_mean = sum as f64 / n as f64;
+        assert!(
+            word_mean < page_mean - 8.0,
+            "word box not on ink: word={word_mean:.1} page={page_mean:.1}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Mapping invariants: the sub-box maps inside the visual buffer and

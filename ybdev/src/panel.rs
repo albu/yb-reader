@@ -72,8 +72,14 @@ pub struct Panel {
     marker: u32,
 }
 
-// mmap'ed framebuffer memory is owned by the kernel; the Panel is used from
-// a single thread, but this keeps it movable across threads if needed.
+// SAFETY(Send): the mmap'ed framebuffer is kernel-owned memory with no
+// thread affinity, and Panel is deliberately NOT `Sync` — Rust's
+// ownership model then enforces the real invariant: after a move, only
+// the receiving thread holds it, so concurrent access through borrows
+// cannot be expressed. Residual hazards are outside the type system:
+// a second independently-opened Panel aliases the same pages (keep it
+// single-instance), and the display controller writes MAP_SHARED pages
+// concurrently by design — standard framebuffer practice.
 unsafe impl Send for Panel {}
 
 fn read_sysfs_line(path: &str) -> Option<String> {
@@ -178,7 +184,10 @@ impl Panel {
         })
     }
 
-    /// Read-only view of the whole framebuffer.
+    /// Read-only view of the whole framebuffer. The slice's lifetime is
+    /// tied to `&self`, so it cannot overlap a [`Panel::buf_mut`] borrow
+    /// through this Panel — the raw pointer inside does not weaken that;
+    /// only re-deriving pointers from the slice would.
     pub fn buf(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.map, self.map_len) }
     }
@@ -188,7 +197,10 @@ impl Panel {
         self.map_len
     }
 
-    /// Mutable view of the whole framebuffer.
+    /// Mutable view of the whole framebuffer. Exclusive against other
+    /// Panel borrows by signature; the underlying pages are MAP_SHARED,
+    /// so the display controller may write them concurrently — that is
+    /// inherent to framebuffers, not an aliasing bug.
     pub fn buf_mut(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.map, self.map_len) }
     }
