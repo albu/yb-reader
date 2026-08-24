@@ -37,19 +37,24 @@ ssh_deploy() {
     cargo zigbuild --target "$TARGET" --release
     BIN="$ROOT/target/$TARGET/release/yb-reader"
     DST=/mnt/us/extensions/reader/bin/reader
+    STAGE_DST="$DST.new.$$"
     # The device suspends on an input-idle timer even mid-conversation;
     # a bare ssh then hangs to its 60s+ timeout and (set -e) can eat the
     # rest of the deploy silently. Every remote call gets a timeout.
     SSHC="ssh -o ConnectTimeout=10"
 
-    scp -o ConnectTimeout=10 -q "$BIN" "$HOST:$DST.new"
+    # Sync launcher scripts so fixes to start.sh/boot.sh land alongside the binary
+    scp -o ConnectTimeout=10 -q "$ROOT/packages/yb-reader/bin/start.sh" "$HOST:/mnt/us/extensions/reader/bin/start.sh" || true
+    scp -o ConnectTimeout=10 -q "$ROOT/packages/yb-reader/bin/boot.sh" "$HOST:/mnt/us/extensions/reader/bin/boot.sh" || true
+
+    scp -o ConnectTimeout=10 -q "$BIN" "$HOST:$STAGE_DST"
     s=$(shasum -a 256 "$BIN" | awk '{print $1}')
-    d=$($SSHC "$HOST" "sha256sum $DST.new" | awk '{print $1}')
+    d=$($SSHC "$HOST" "sha256sum $STAGE_DST" | awk '{print $1}')
     if [ "$s" != "$d" ]; then
-        echo "ERROR: hash mismatch after scp: $HOST:$DST.new" >&2
+        echo "ERROR: hash mismatch after scp: $HOST:$STAGE_DST" >&2
         echo "  expected $s" >&2
         echo "  got      $d" >&2
-        ssh "$HOST" "rm -f $DST.new" || true
+        ssh "$HOST" "rm -f $STAGE_DST" || true
         exit 1
     fi
 
@@ -61,7 +66,7 @@ ssh_deploy() {
     # is the truth, not the flag — the curtain card can arm the flag from
     # a stock session, and boot.sh there would race start.sh's unfreeze
     # of cvm (and a second reader).
-    $SSHC "$HOST" "mv -f $DST.new $DST && chmod +x $DST && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails && touch /var/local/yb-reader/last && pkill -9 -f 'boot\.sh' 2>/dev/null || true; killall -9 reader 2>/dev/null || true; sleep 1; if test -e /mnt/us/DONT_START_FRAMEWORK; then initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1; else nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 & fi"
+    $SSHC "$HOST" "mv -f $STAGE_DST $DST && chmod +x $DST /mnt/us/extensions/reader/bin/start.sh /mnt/us/extensions/reader/bin/boot.sh && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails && touch /var/local/yb-reader/last && pkill -9 -f 'boot\.sh' 2>/dev/null || true; killall -9 reader 2>/dev/null || true; sleep 1; if test -e /mnt/us/DONT_START_FRAMEWORK; then initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1; else nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 & fi"
     # Post-verification: the deploy is not done when the bytes land, it is
     # done when the new binary is the one running (rc=0 TERM exits are
     # "normal" to the job, so nothing else guarantees the relaunch).

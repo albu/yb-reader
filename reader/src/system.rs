@@ -164,9 +164,12 @@ impl Screen for SystemScreen {
         let gap = pt(CARD_GAP_PT);
         let top = pt(CARD_TOP_PT);
 
-        let os_boot = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists();
+        let upstart_installed = std::path::Path::new("/etc/upstart/yb-reader.conf").exists();
+        let os_boot = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists() && upstart_installed;
         let (bv, bs) = if os_boot {
             ("yb OS", "Tap: switch to Stock")
+        } else if !upstart_installed {
+            ("Stock", "Requires root upstart job")
         } else {
             ("Stock", "Tap: switch to yb OS")
         };
@@ -281,6 +284,16 @@ impl Screen for SystemScreen {
                 // reader instance (start.sh's lock exists for that).
                 let r_boot = Rect::new(pad, top, cw, ch);
                 if r_boot.contains(x, y) {
+                    let upstart_installed = std::path::Path::new("/etc/upstart/yb-reader.conf").exists();
+                    if !upstart_installed {
+                        return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                            "Root Upstart Required",
+                            "Direct OS Boot requires /etc/upstart/yb-reader.conf to be installed on rootfs. Without it, the Kindle cannot start yb-reader automatically.",
+                            "OK",
+                            None,
+                            |_| Action::Pop,
+                        )));
+                    }
                     let flag = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK");
                     if flag.exists() {
                         let _ = std::fs::remove_file(flag);
@@ -298,7 +311,7 @@ impl Screen for SystemScreen {
                         // `wifid enable 1` can never bring it back
                         // (found on device 2026-08-19).
                         let _ = std::process::Command::new("lipc-set-prop")
-                            .args(["-i", "com.lab126.wifid", "enable", "0"])
+                             .args(["-i", "com.lab126.wifid", "enable", "0"])
                             .status();
                         let _ = std::process::Command::new("lipc-set-prop")
                             .args(["-i", "com.lab126.cmd", "wirelessEnable", "0"])
@@ -332,7 +345,9 @@ impl Screen for SystemScreen {
                     // long-press power (TERM -> reader guard restores
                     // frontlight/wifi/firewall) — no teardown of our own
                     // needed.
-                    let next = if std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists() {
+                    let next = if std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists()
+                        && std::path::Path::new("/etc/upstart/yb-reader.conf").exists()
+                    {
                         "yb OS"
                     } else {
                         "Stock Kindle"

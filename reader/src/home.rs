@@ -80,6 +80,7 @@ const ROW_LABELS: [&str; 5] = [
 /// from System's EXIT card, behind a confirm that honors its buttons.
 pub fn takeover() -> bool {
     std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists()
+        && std::path::Path::new("/etc/upstart/yb-reader.conf").exists()
 }
 
 /// Library ordering — a view concern, not a filesystem one. Cycles on a

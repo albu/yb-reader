@@ -32,8 +32,17 @@ if ! mkdir -m 777 "$LOCK" 2>/dev/null; then
     rm -rf "$LOCK" 2>/dev/null
     mkdir -m 777 "$LOCK" 2>/dev/null || exit 0
 fi
-trap 'rm -rf "$LOCK" 2>/dev/null' EXIT INT TERM
 
+cleanup() {
+    # Unfreeze UI actors and restore pillow/home booklet on any exit/signal
+    killall -CONT webreader kfxreader kfxview awesome cvm 2>/dev/null
+    lipc-set-prop com.lab126.pillow disableEnablePillow enable 2>/dev/null
+    lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home 2>/dev/null
+    modprobe usb_f_mass_storage 2>/dev/null || true
+    modprobe g_mass_storage 2>/dev/null || true
+    rm -rf "$LOCK" 2>/dev/null
+}
+trap cleanup EXIT INT TERM HUP
 
 lipc-set-prop com.lab126.pillow disableEnablePillow disable 2>/dev/null
 # Freeze the on-screen UI (awesome, the WM) and the Java framework core
@@ -50,18 +59,6 @@ done
 
 ./reader
 rc=$?
-
-# Wake everything BEFORE the lipc calls: lipc is a conversation, and a
-# frozen cvm cannot answer — appmgrd times the call out and draws the
-# "Application error" dialog.
-killall -CONT webreader kfxreader 2>/dev/null
-killall -CONT awesome cvm 2>/dev/null
-lipc-set-prop com.lab126.pillow disableEnablePillow enable 2>/dev/null
-# The app held an EVIOCGRAB on the touchscreen, so the framework wakes
-# with an EMPTY event queue and no reason to repaint — our last screen
-# stays on the framebuffer until the next tap. Starting the home booklet
-# forces the redraw (a harmless re-launch if home is already current).
-lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home 2>/dev/null
 
 # Takeover handoff: a session launched by start.sh while takeover mode is
 # armed (DONT_START_FRAMEWORK present — e.g. the deploy's fallback path)

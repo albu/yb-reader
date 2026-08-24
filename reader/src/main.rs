@@ -123,9 +123,13 @@ fn main() {
     }
     // Takeover mode: leaving the app means "back to the stock Kindle" —
     // exit 42 is boot.sh's cue to remove the flag and start the
-    // framework. In stock mode exiting returns to the library as before.
+    // framework. If the upstart job is not installed, auto-remove the orphan flag.
     if std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists() {
-        guard::graceful_exit(42);
+        if std::path::Path::new("/etc/upstart/yb-reader.conf").exists() {
+            guard::graceful_exit(42);
+        } else {
+            let _ = std::fs::remove_file("/mnt/us/DONT_START_FRAMEWORK");
+        }
     }
     log::plog("yb-reader exit");
 }
