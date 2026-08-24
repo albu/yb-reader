@@ -710,11 +710,19 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+// Session credential: arrived via the QR URL (?t=…) or the pairing form —
+// either way it is in location.search. Every API call and download link
+// must echo it back; the server rejects anything else.
+const TOKEN = new URLSearchParams(location.search).get('t') || '';
+function withToken(path) {
+  return path + (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(TOKEN);
+}
+
 async function load(dir = '') {
   curDir = dir;
   contentCont.innerHTML = '<div class="empty-box">Loading...</div>';
   try {
-    const res = await fetch('/api/list?dir=' + encodeURIComponent(dir) + '&root=' + root);
+    const res = await fetch(withToken('/api/list?dir=' + encodeURIComponent(dir) + '&root=' + root));
     if (!res.ok) throw new Error('Status ' + res.status);
     const data = await res.json();
     allFolders = data.all_folders || [];
@@ -769,7 +777,7 @@ function renderContent(data) {
   if (root === 'screensavers') {
     html += `<div class="screensavers-grid" id="items-grid">`;
     for (const file of files) {
-      const fileUrl = '/api/file?root=' + root + '&dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name);
+      const fileUrl = withToken('/api/file?root=' + root + '&dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name));
       html += `
       <div class="poster-card item-card" data-name="${escapeHtml(file.name.toLowerCase())}">
         <div class="poster-img-wrap" onclick="openPreview('${fileUrl.replace(/'/g, "\\'")}', '${escapeHtml(file.name).replace(/'/g, "\\'")}')">
@@ -818,7 +826,7 @@ function renderContent(data) {
   if (files.length > 0) {
     html += `<div class="section-label">Books (${files.length})</div><div class="books-table" id="items-table">`;
     for (const file of files) {
-      const fileUrl = '/api/file?root=' + root + '&dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name);
+      const fileUrl = withToken('/api/file?root=' + root + '&dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name));
       let badgeClass = '';
       if (file.ext === 'pdf') badgeClass = 'pdf';
       else if (file.ext === 'cbz') badgeClass = 'cbz';
@@ -880,7 +888,7 @@ async function submitMkdir() {
   if (!name) return;
   closeModal('mkdir-modal');
   try {
-    const res = await fetch('/api/mkdir?dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(name) + '&root=' + root, { method: 'POST' });
+    const res = await fetch(withToken('/api/mkdir?dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(name) + '&root=' + root), { method: 'POST' });
     if (!res.ok) {
       const err = await res.json();
       throw new Error(err.error || 'Failed to create folder');
@@ -918,7 +926,7 @@ async function submitMove() {
   if (itemToMove === null) return;
   closeModal('move-modal');
   try {
-    const res = await fetch('/api/move?src_dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(itemToMove) + '&dst_dir=' + encodeURIComponent(dst) + '&root=' + root, { method: 'POST' });
+    const res = await fetch(withToken('/api/move?src_dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(itemToMove) + '&dst_dir=' + encodeURIComponent(dst) + '&root=' + root), { method: 'POST' });
     if (!res.ok) {
       const err = await res.json();
       throw new Error(err.error || 'Failed to move item');
@@ -941,7 +949,7 @@ async function submitDelete() {
   const { name, isFolder } = itemToDelete;
   closeModal('delete-modal');
   try {
-    const res = await fetch('/api/delete?dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(name) + '&root=' + root, { method: 'POST' });
+    const res = await fetch(withToken('/api/delete?dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(name) + '&root=' + root), { method: 'POST' });
     if (!res.ok) {
       const err = await res.json();
       throw new Error(err.error || 'Failed to delete item');
@@ -1002,7 +1010,7 @@ async function upload(files) {
     try {
       await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/upload?dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name) + '&root=' + root);
+        xhr.open('POST', withToken('/upload?dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name) + '&root=' + root));
         xhr.upload.onprogress = e => {
           if (e.lengthComputable) {
             const pct = Math.round(e.loaded / e.total * 100);

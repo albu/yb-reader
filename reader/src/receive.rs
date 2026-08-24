@@ -69,6 +69,133 @@ const IPTABLES: &str = "/usr/sbin/iptables";
 
 const SYSTEM_FILES: [&str; 2] = ["My Clippings.txt", "JAILBROKEN.txt"];
 
+/// Live connection threads allowed. Each costs a thread (default stack,
+/// kernel task) on a ~150 MB-RAM device; eight simultaneous clients is
+/// far past any single-user reality, and past it new connections get an
+/// immediate 503 instead of piling threads until the OOM killer picks a
+/// victim.
+const MAX_CONNS: usize = 8;
+
+/// Per-boot credential for the web receiver: six digits, shown on the
+/// e-ink screen under the address and carried by the QR URL. Six digits
+/// alone would fall in hours, so every miss parks its connection seat
+/// for [`AUTH_FAIL_DELAY`] — through the [`MAX_CONNS`] seats that caps
+/// guessing at roughly ten tries per second: ~28 h to exhaust the space,
+/// ~14 h expected hit, all of it *while the screen is open*. The real
+/// bound is time, not math: the listener and its firewall rule exist
+/// only as long as the receive session, which is a minutes-scale window.
+/// See SECURITY.md.
+const PIN_LEN: usize = 6;
+const AUTH_FAIL_DELAY: Duration = Duration::from_millis(800);
+
+/// Digits only, unbiased: draws at or above the largest multiple of 10⁶
+/// are redrawn so `% 1_000_000` stays flat. Falls back to a time/pid mix
+/// through FNV when /dev/urandom is unreadable (host CI) — quality
+/// degrades, availability doesn't.
+fn generate_pin() -> String {
+    const LIMIT: u64 = 1_000_000;
+    const REDRAW_FROM: u64 = u64::MAX - (u64::MAX % LIMIT);
+
+    let next = move || -> u64 {
+        let mut buf = [0u8; 8];
+        if std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
+            .is_ok()
+        {
+            return u64::from_be_bytes(buf);
+        }
+        ybdev::img::fnv1a(
+            &std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+                .to_le_bytes(),
+        ) as u64 ^ ((std::process::id() as u64) << 32)
+    };
+
+    loop {
+        let v = next();
+        if v < REDRAW_FROM {
+            return format!("{:0>width$}", v % LIMIT, width = PIN_LEN);
+        }
+    }
+}
+
+/// What the user typed may come from paper transcription or a phone
+/// keyboard: strip everything non-alphanumeric and uppercase. The pin is
+/// digits, so this accepts "482 913", "482913", "482913 ".
+fn normalize_code(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_uppercase())
+        .collect()
+}
+
+/// Length-checked constant-time compare: equal-length strings differ in
+/// at most the folded XOR. The pin is fixed-length anyway; this keeps
+/// the check honest if the credential ever isn't.
+fn tokens_match(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Every request — static page included — must present the pin, either
+/// as `?t=` (the QR URL supplies it once; the page echoes it thereafter,
+/// and the pairing form submits it) or `X-YB-Token:` (curl and scripts).
+fn authorized(session_pin: &str, query_str: &str, header_token: Option<&str>) -> bool {
+    let candidate = match header_token {
+        Some(h) => normalize_code(h),
+        None => match query_param(query_str, "t") {
+            Some(t) => normalize_code(&t),
+            None => return false,
+        },
+    };
+    tokens_match(session_pin, &candidate)
+}
+
+/// Served to a browser that arrived without (or with a wrong) pin —
+/// typically someone typing the bare address instead of scanning the
+/// QR. One field, submits `GET /?t=…`, zero JavaScript.
+const PAIR_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yb-reader</title>
+<style>
+body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+       background:#0d0e12; color:#f3f4f6; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; }
+.card { background:#16181f; border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:28px 24px; width:min(340px,90vw); text-align:center; }
+h1 { font-size:1.05rem; margin:0 0 6px; }
+p { color:#9ca3af; font-size:.85rem; margin:0 0 18px; }
+input { width:100%; box-sizing:border-box; padding:12px; font-size:1.4rem; letter-spacing:.35em; text-align:center;
+        background:#0d0e12; color:#f3f4f6; border:1px solid rgba(255,255,255,.15); border-radius:10px; outline:none; }
+input:focus { border-color:#3b82f6; }
+button { margin-top:14px; width:100%; padding:11px; font-size:.95rem; font-weight:600;
+         background:#3b82f6; color:#fff; border:none; border-radius:10px; cursor:pointer; }
+.err { color:#ef4444; margin-top:12px; font-size:.8rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>yb-reader</h1>
+  <p>Type the 6-digit code shown on your Kindle.</p>
+  <form action="/" method="get">
+    <input name="t" inputmode="numeric" pattern="[0-9 ]*" maxlength="9"
+           autocomplete="off" autofocus placeholder="••••••" required>
+    <button>Open</button>
+  </form>
+</div>
+</body>
+</html>
+"#;
+
 /// The web file manager: responsive mobile & desktop UI for browsing,
 /// uploading, previewing, moving, creating folders, and deleting books.
 const PAGE: &str = include_str!("receive_page.html");
@@ -82,6 +209,11 @@ pub struct ReceiveServer {
     /// "name (x.x MB)" of the last completed delivery, for the screen.
     last: Arc<Mutex<Option<String>>>,
     received: Arc<AtomicUsize>,
+    /// Per-boot session credential. Every HTTP request must carry it
+    /// (`?t=` on the QR URL, echoed by the page thereafter); the firewall
+    /// rule alone only scopes exposure to the LAN, this scopes it to
+    /// whoever scanned the screen.
+    token: Arc<String>,
 }
 
 impl ReceiveServer {
@@ -102,20 +234,48 @@ impl ReceiveServer {
 
         let last = Arc::new(Mutex::new(None));
         let received = Arc::new(AtomicUsize::new(0));
+        let token = Arc::new(generate_pin());
+        // Live connection seats, handed out below and reclaimed by
+        // ConnSlot's Drop.
+        let active = Arc::new(AtomicUsize::new(0));
+        static SHED_PLOGGED: AtomicBool = AtomicBool::new(false);
         let last_t = Arc::clone(&last);
         let recv_t = Arc::clone(&received);
+        let active_t = Arc::clone(&active);
         let stop_t = Arc::clone(&stop);
+        let token_t = Arc::clone(&token);
         let handle = std::thread::spawn(move || {
             while !stop_t.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((stream, _)) => {
+                    Ok((mut stream, _)) => {
                         let _ = stream.set_nonblocking(false);
+                        if active_t.load(Ordering::Relaxed) >= MAX_CONNS {
+                            // Shed without spawning: an immediate 503 is
+                            // cheaper for everyone than another thread.
+                            if !SHED_PLOGGED.swap(true, Ordering::Relaxed) {
+                                plog("receive: connection limit reached — shedding new clients");
+                            }
+                            respond(
+                                &mut stream,
+                                503,
+                                "Service Unavailable",
+                                "text/plain",
+                                "too many connections",
+                            );
+                            continue;
+                        }
                         // One thread per connection: a LAN client that
                         // connects and stalls (headers up to 30 s, body up
                         // to 30 min) must not block every other upload.
+                        active_t.fetch_add(1, Ordering::Relaxed);
                         let last = Arc::clone(&last_t);
                         let recv = Arc::clone(&recv_t);
-                        std::thread::spawn(move || handle_conn(stream, &last, &recv));
+                        let token = Arc::clone(&token_t);
+                        let slot = ConnSlot(Arc::clone(&active_t));
+                        std::thread::spawn(move || {
+                            let _slot = slot;
+                            handle_conn(stream, &last, &recv, &token);
+                        });
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(200));
@@ -136,11 +296,18 @@ impl ReceiveServer {
             handle: Some(handle),
             last,
             received,
+            token,
         })
     }
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The session credential for this boot of the listener — goes into
+    /// the QR URL, never into the log.
+    pub fn token(&self) -> &str {
+        &self.token
     }
 
     pub fn status(&self) -> (usize, Option<String>) {
@@ -328,10 +495,22 @@ fn collect_all_folders(base: &std::path::Path, rel: &std::path::Path, out: &mut 
     }
 }
 
+/// RAII seat for one connection thread: the concurrency counter falls
+/// even if [`handle_conn`] unwinds — otherwise a single panic would
+/// permanently shed every later client.
+struct ConnSlot(Arc<AtomicUsize>);
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 fn handle_conn(
     mut stream: TcpStream,
     last: &Arc<Mutex<Option<String>>>,
     received: &Arc<AtomicUsize>,
+    pin: &str,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
@@ -372,6 +551,7 @@ fn handle_conn(
     let mut content_length: Option<u64> = None;
     let mut expect_continue = false;
     let mut dup_cl = false;
+    let mut hdr_token: Option<String> = None;
     for line in lines {
         let Some((k, v)) = line.split_once(':') else {
             continue;
@@ -387,6 +567,8 @@ fn handle_conn(
             }
         } else if k == "expect" && v.trim().eq_ignore_ascii_case("100-continue") {
             expect_continue = true;
+        } else if k == "x-yb-token" {
+            hdr_token = Some(v.trim().to_string());
         }
     }
 
@@ -402,6 +584,27 @@ fn handle_conn(
     }
 
     let (raw_path, query_str) = path.split_once('?').unwrap_or((path, ""));
+
+    // Gate before any dispatch: the firewall rule only scopes exposure
+    // to the LAN; this scopes it to whoever can present the pin. A miss
+    // parks its connection seat for a beat — through MAX_CONNS that is
+    // the whole anti-guessing budget, so it runs before anything else.
+    if !authorized(pin, query_str, hdr_token.as_deref()) {
+        // Log the first miss only: a sustained brute force must leave a
+        // trace, but one plog line per guess would burn flash writes for
+        // noise (same latch pattern as SHED_PLOGGED).
+        static AUTH_MISS_PLOGGED: AtomicBool = AtomicBool::new(false);
+        if !AUTH_MISS_PLOGGED.swap(true, Ordering::Relaxed) {
+            plog("receive: auth miss — wrong or missing pin (further misses not logged)");
+        }
+        std::thread::sleep(AUTH_FAIL_DELAY);
+        if method == "GET" && (raw_path == "/" || raw_path == "/index.html") {
+            respond(&mut stream, 403, "Forbidden", "text/html; charset=utf-8", PAIR_PAGE);
+        } else {
+            respond(&mut stream, 403, "Forbidden", "text/plain", "forbidden");
+        }
+        return;
+    }
 
     if method == "GET" {
         if raw_path == "/api/list" || raw_path == "/api/tree" {
@@ -1090,7 +1293,10 @@ enum Phase {
     /// Wi-Fi + listener setup runs on a thread so the panel still paints.
     Starting,
     Ready {
+        /// Full QR payload, `?t=` included.
         url: String,
+        /// The pin, shown big under the address for typed entry.
+        pin: String,
         ssid: Option<String>,
     },
     Failed(String),
@@ -1149,9 +1355,10 @@ impl ReceiveScreen {
                     ip = local_ip();
                 }
                 let url = format!(
-                    "http://{}:{}/",
+                    "http://{}:{}/?t={}",
                     ip.unwrap_or_else(|| "127.0.0.1".into()),
-                    srv.port()
+                    srv.port(),
+                    srv.token()
                 );
                 let ssid = current_ssid();
                 Ok((srv, url, ssid))
@@ -1193,8 +1400,11 @@ impl Screen for ReceiveScreen {
             match self.setup.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(Ok((srv, url, ssid))) => {
                     self.qr = QrCode::new(url.as_bytes()).ok();
-                    plog(&format!("receive: listening on {}", url));
-                    self.phase = Phase::Ready { url, ssid };
+                    // The credential must not land in the persistent log —
+                    // the address alone is enough to diagnose reachability.
+                    plog("receive: listening (pin-gated)");
+                    let pin = srv.token().to_string();
+                    self.phase = Phase::Ready { url, pin, ssid };
                     self.server = Some(srv);
                     Action::RedrawFull
                 }
@@ -1235,7 +1445,7 @@ impl Screen for ReceiveScreen {
                 p.text_center(h / 2, 11.0, 0, e);
                 p.text_center(h / 2 + pt(18.0), 9.0, 0, "tap to retry");
             }
-            Phase::Ready { url, ssid } => {
+            Phase::Ready { url, pin, ssid } => {
                 if let Some(ssid_name) = ssid {
                     let s = format!("Wi-Fi: {}", ssid_name);
                     let trunc = p.truncate(8.5, &s, 140.0);
@@ -1245,7 +1455,7 @@ impl Screen for ReceiveScreen {
                 // QR: e-ink's ideal payload — static, pure black/white.
                 // 4-module quiet zone, scaled to fit, drawn once.
                 let top = bar_h + pt(24.0);
-                let target = (w * 2 / 5).min(h - top - pt(230.0));
+                let target = (w * 2 / 5).min(h - top - pt(262.0));
                 if let Some(qr) = &self.qr {
                     let qw = qr.width() as i32;
                     let total = qw + 8;
@@ -1270,24 +1480,28 @@ impl Screen for ReceiveScreen {
                     }
 
                     let ty = top + size + pt(34.0);
-                    p.text_center(ty, 11.5, 0, url);
+                    // Address without the credential, then the code on
+                    // its own line — the two ways in, both typable.
+                    let base = url.split("?t=").next().unwrap_or(url.as_str());
+                    p.text_center(ty, 11.5, 0, base);
+                    p.text_center(ty + pt(22.0), 13.5, 0, &format!("code {}", pin));
                     if let Some(s) = ssid {
                         p.text_center(
-                            ty + pt(18.0),
+                            ty + pt(42.0),
                             8.5,
                             110,
                             &format!("connect phone/laptop to “{}”", s),
                         );
                     } else {
                         p.text_center(
-                            ty + pt(18.0),
+                            ty + pt(42.0),
                             8.5,
                             110,
-                            "scan QR with camera or open address above",
+                            "scan QR, or open the address and type the code",
                         );
                     }
                     p.text_center(
-                        ty + pt(32.0),
+                        ty + pt(56.0),
                         8.5,
                         130,
                         "drop books or screensavers onto the page to send them",
@@ -1298,7 +1512,7 @@ impl Screen for ReceiveScreen {
                         .as_ref()
                         .map(|s| s.status())
                         .unwrap_or((0, None));
-                    let sy = ty + pt(60.0);
+                    let sy = ty + pt(86.0);
                     if n > 0 {
                         let line = format!("received {} — last: {}", n, last.unwrap_or_default());
                         let trunc = p.truncate(9.0, &line, p.width_pt() - 20.0);
@@ -1351,6 +1565,18 @@ mod tests {
     /// and start real listeners, so they must not run concurrently.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Inject `t=<pin>` into a raw test request's target so it passes the
+    /// session gate. Handles targets with or without an existing query;
+    /// headers and body pass through untouched.
+    fn with_pin(pin: &str, raw: &str) -> String {
+        let mut parts = raw.splitn(3, ' ');
+        let method = parts.next().unwrap_or_default();
+        let target = parts.next().unwrap_or_default();
+        let rest = parts.next().unwrap_or_default();
+        let sep = if target.contains('?') { '&' } else { '?' };
+        format!("{} {}{}t={} {}", method, target, sep, pin, rest)
+    }
+
     #[test]
     fn upload_roundtrip_and_extension_guard() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -1366,14 +1592,18 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let mut srv = ReceiveServer::start(Arc::clone(&stop)).expect("server");
         let port = srv.port();
+        let pin = srv.token().to_string();
 
         // Good upload: raw body, query-encoded name with a space, split
         // across two writes (headers first, body after).
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let body = b"fake epub bytes";
-        let req = format!(
-            "POST /upload?name=test%20book.epub HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
-            body.len()
+        let req = with_pin(
+            &pin,
+            &format!(
+                "POST /upload?name=test%20book.epub HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            ),
         );
         c.write_all(req.as_bytes()).unwrap();
         c.write_all(body).unwrap();
@@ -1391,7 +1621,8 @@ mod tests {
         // disallowed extension must be refused without leaving a file.
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         c.write_all(
-            b"POST /upload?name=evil.sh HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nhi",
+            with_pin(&pin, "POST /upload?name=evil.sh HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nhi")
+                .as_bytes(),
         )
         .unwrap();
         let mut resp = Vec::new();
@@ -1404,7 +1635,8 @@ mod tests {
         // up an open error later.
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         c.write_all(
-            b"POST /upload?name=book.mobi HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nhi",
+            with_pin(&pin, "POST /upload?name=book.mobi HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nhi")
+                .as_bytes(),
         )
         .unwrap();
         let mut resp = Vec::new();
@@ -1415,8 +1647,11 @@ mod tests {
         // Path traversal is neutralized by sanitize_fetch_name: the file
         // lands under its basename inside the save dir, never outside it.
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"POST /upload?name=..%2F..%2Fescape.epub HTTP/1.1\r\nHost: t\r\nContent-Length: 1\r\n\r\nx")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "POST /upload?name=..%2F..%2Fescape.epub HTTP/1.1\r\nHost: t\r\nContent-Length: 1\r\n\r\nx")
+                .as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(
@@ -1429,7 +1664,7 @@ mod tests {
 
         // GET serves the upload page.
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        c.write_all(with_pin(&pin, "GET / HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes()).unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(resp.starts_with(b"HTTP/1.1 200"));
@@ -1441,7 +1676,7 @@ mod tests {
         // returned WouldBlock and closed the connection with no response.
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         std::thread::sleep(Duration::from_millis(400));
-        c.write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        c.write_all(with_pin(&pin, "GET / HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes()).unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(
@@ -1457,7 +1692,8 @@ mod tests {
         // Test /api/mkdir
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         c.write_all(
-            b"POST /api/mkdir?name=Sci-Fi HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n",
+            with_pin(&pin, "POST /api/mkdir?name=Sci-Fi HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
+                .as_bytes(),
         )
         .unwrap();
         let mut resp = Vec::new();
@@ -1472,9 +1708,12 @@ mod tests {
         // Test /upload with dir parameter
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         let body2 = b"dune content";
-        let req2 = format!(
-            "POST /upload?dir=Sci-Fi&name=Dune.epub HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
-            body2.len()
+        let req2 = with_pin(
+            &pin,
+            &format!(
+                "POST /upload?dir=Sci-Fi&name=Dune.epub HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+                body2.len()
+            ),
         );
         c.write_all(req2.as_bytes()).unwrap();
         c.write_all(body2).unwrap();
@@ -1492,7 +1731,7 @@ mod tests {
 
         // Test /api/list
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"GET /api/list HTTP/1.1\r\nHost: t\r\n\r\n")
+        c.write_all(with_pin(&pin, "GET /api/list HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes())
             .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
@@ -1503,8 +1742,11 @@ mod tests {
 
         // Test /api/move
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"POST /api/move?src_dir=&name=test%20book.epub&dst_dir=Sci-Fi HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "POST /api/move?src_dir=&name=test%20book.epub&dst_dir=Sci-Fi HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(
@@ -1517,8 +1759,11 @@ mod tests {
 
         // Test /api/delete
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"POST /api/delete?dir=Sci-Fi&name=test%20book.epub HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "POST /api/delete?dir=Sci-Fi&name=test%20book.epub HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(
@@ -1533,9 +1778,12 @@ mod tests {
         // for the same reason mobi is refused in documents: the consumer
         // (the sleep-screen picker) can't render it.
         let png = b"fake png bytes";
-        let req = format!(
-            "POST /upload?root=screensavers&name=cover.png HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
-            png.len()
+        let req = with_pin(
+            &pin,
+            &format!(
+                "POST /upload?root=screensavers&name=cover.png HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+                png.len()
+            ),
         );
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         c.write_all(req.as_bytes()).unwrap();
@@ -1550,8 +1798,11 @@ mod tests {
         assert_eq!(std::fs::read(ss_dir.join("cover.png")).unwrap(), png);
 
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"POST /upload?root=screensavers&name=book.epub HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nhi")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "POST /upload?root=screensavers&name=book.epub HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nhi")
+                .as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(
@@ -1564,14 +1815,20 @@ mod tests {
         // Flat root: mkdir and move are refused server-side, not just
         // hidden in the UI.
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"POST /api/mkdir?root=screensavers&name=walls HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "POST /api/mkdir?root=screensavers&name=walls HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(resp.starts_with(b"HTTP/1.1 400"));
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"POST /api/move?root=screensavers&src_dir=&name=cover.png&dst_dir= HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "POST /api/move?root=screensavers&src_dir=&name=cover.png&dst_dir= HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(resp.starts_with(b"HTTP/1.1 400"));
@@ -1580,8 +1837,10 @@ mod tests {
         // same way the device scan does, and a bogus root is rejected.
         let _ = std::fs::write(ss_dir.join("._cover.jpg"), b"finder junk");
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"GET /api/list?root=screensavers HTTP/1.1\r\nHost: t\r\n\r\n")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "GET /api/list?root=screensavers HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         let resp_str = String::from_utf8_lossy(&resp);
@@ -1598,8 +1857,10 @@ mod tests {
         );
 
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"GET /api/list?root=/etc HTTP/1.1\r\nHost: t\r\n\r\n")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "GET /api/list?root=/etc HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(
@@ -1610,8 +1871,11 @@ mod tests {
 
         // Test /api/file download & preview
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"GET /api/file?dir=Sci-Fi&name=Dune.epub HTTP/1.1\r\nHost: t\r\n\r\n")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "GET /api/file?dir=Sci-Fi&name=Dune.epub HTTP/1.1\r\nHost: t\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(
@@ -1623,8 +1887,11 @@ mod tests {
 
         // Delete works in the screensavers root too.
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        c.write_all(b"POST /api/delete?root=screensavers&dir=&name=cover.png HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
-            .unwrap();
+        c.write_all(
+            with_pin(&pin, "POST /api/delete?root=screensavers&dir=&name=cover.png HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
         let mut resp = Vec::new();
         c.read_to_end(&mut resp).unwrap();
         assert!(resp.starts_with(b"HTTP/1.1 200"));
@@ -1646,6 +1913,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let mut srv = ReceiveServer::start(Arc::clone(&stop)).expect("server");
         let port = srv.port();
+        let pin = srv.token().to_string();
 
         // Claim 1 byte, stream 100 KB. The body writer must cap the write
         // to the declared length — before the fix `remaining -= n`
@@ -1654,7 +1922,11 @@ mod tests {
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         c.write_all(
-            b"POST /upload?name=onebyte.epub HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n",
+            with_pin(
+                &pin,
+                "POST /upload?name=onebyte.epub HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n",
+            )
+            .as_bytes(),
         )
         .unwrap();
         // The 100-continue round-trip makes the header phase provably
@@ -1699,9 +1971,11 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let mut srv = ReceiveServer::start(Arc::clone(&stop)).expect("server");
         let port = srv.port();
+        let pin = srv.token().to_string();
 
-        let delete = format!(
-            "POST /api/delete?dir=&name=My%20Clippings.txt HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n"
+        let delete = with_pin(
+            &pin,
+            "POST /api/delete?dir=&name=My%20Clippings.txt HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n",
         );
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         c.write_all(delete.as_bytes()).unwrap();
@@ -1710,8 +1984,9 @@ mod tests {
         assert!(resp.starts_with(b"HTTP/1.1 400"), "delete: {}", String::from_utf8_lossy(&resp));
         assert_eq!(std::fs::read(dir.join("My Clippings.txt")).unwrap(), b"keep me");
 
-        let mv = format!(
-            "POST /api/move?src_dir=&name=My%20Clippings.txt&dst_dir=Old HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n"
+        let mv = with_pin(
+            &pin,
+            "POST /api/move?src_dir=&name=My%20Clippings.txt&dst_dir=Old HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n",
         );
         let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
         c.write_all(mv.as_bytes()).unwrap();
@@ -1725,13 +2000,97 @@ mod tests {
     }
 
     #[test]
+    fn unauthenticated_requests_are_gated() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join("yb-receive-auth-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("YB_SAVE_DIR", dir.to_str().unwrap());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut srv = ReceiveServer::start(Arc::clone(&stop)).expect("server");
+        let port = srv.port();
+        let pin = srv.token().to_string();
+
+        // Bare address (typed, not scanned): the pairing page, never the
+        // file manager.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let body = String::from_utf8_lossy(&resp);
+        assert!(body.starts_with("HTTP/1.1 403"), "{}", body);
+        assert!(body.contains("name=\"t\""), "pairing form missing: {}", body);
+
+        // Wrong pin: same fate.
+        let wrong = if pin == "000000" { "111111" } else { "000000" };
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(with_pin(wrong, "GET / HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes())
+            .unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(resp.starts_with(b"HTTP/1.1 403"));
+
+        // APIs reject pinless requests too — plain text, not HTML.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(b"GET /api/list HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(resp.starts_with(b"HTTP/1.1 403"));
+        assert!(!resp.windows(9).any(|w| w == b"text/html"));
+
+        // X-YB-Token is the header alternative (curl / scripts).
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let h = format!("GET / HTTP/1.1\r\nHost: t\r\nX-YB-Token: {}\r\n\r\n", pin);
+        c.write_all(h.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(
+            resp.starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&resp)
+        );
+
+        srv.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pin_helpers() {
+        // Shape: six digits.
+        let a = generate_pin();
+        assert_eq!(a.len(), PIN_LEN, "{a}");
+        assert!(a.chars().all(|c| c.is_ascii_digit()), "{a}");
+
+        // Transcription tolerance: spaces, dashes and case fold away.
+        assert_eq!(normalize_code("482 913"), "482913");
+        assert_eq!(normalize_code("482-913"), "482913");
+        assert_eq!(normalize_code("ab12"), "AB12");
+
+        // Compare: exact true; single-digit difference false; length
+        // mismatch false.
+        assert!(tokens_match("482913", "482913"));
+        assert!(!tokens_match("482913", "482914"));
+        assert!(!tokens_match("482913", "4829"));
+
+        // Gate decisions: query param, header, transcription tolerance,
+        // wrong value, absence.
+        assert!(authorized("482913", "dir=&t=482913", None));
+        assert!(authorized("482913", "dir=x&t=482%20913", None));
+        assert!(authorized("482913", "", Some(" 482-913")));
+        assert!(!authorized("482913", "dir=&t=111111", None));
+        assert!(!authorized("482913", "dir=&root=books", None));
+    }
+
+    #[test]
     fn renders_receive_screen_to_png() {
         let font = yui::font::Font::load().unwrap();
         let mut s = ReceiveScreen::new();
-        let url = "http://192.168.1.50:8080/".to_string();
+        let url = "http://192.168.1.50:8080/?t=482913".to_string();
         s.qr = QrCode::new(url.as_bytes()).ok();
         s.phase = Phase::Ready {
             url,
+            pin: "482913".to_string(),
             ssid: Some("HomeStudio_5G".to_string()),
         };
         let mut canvas = vec![0u8; 1236 * 1648];
@@ -1746,8 +2105,9 @@ mod tests {
             &font,
         );
         s.draw(&mut p);
-        let artifact_path = "/tmp/dev_artifacts/receive_screen_device.png";
-        let file = std::fs::File::create(artifact_path).unwrap();
+        // Temp dir, not a personal path: this test must run on any machine.
+        let artifact_path = std::env::temp_dir().join("yb_receive_screen_device.png");
+        let file = std::fs::File::create(&artifact_path).unwrap();
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
         enc.set_color(png::ColorType::Grayscale);
         enc.set_depth(png::BitDepth::Eight);
