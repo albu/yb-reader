@@ -193,7 +193,6 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                         contrast,
                         white_cutoff: white_cut,
                         invert,
-                        refresh_interval: 10,
                         show_header: true,
                     });
                 }

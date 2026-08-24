@@ -263,8 +263,6 @@ pub struct ReaderSettings {
     pub white_cutoff: u8,
     /// Night mode (inverted grayscale)
     pub invert: bool,
-    /// Full e-ink refresh interval in page turns (0 = manual only, 5, 10, 20)
-    pub refresh_interval: usize,
     /// Show top status header (Clock + Battery + Book title)
     pub show_header: bool,
 }
@@ -279,7 +277,6 @@ impl Default for ReaderSettings {
             contrast: ContrastMode::Normal,
             white_cutoff: 0,
             invert: false,
-            refresh_interval: 10,
             show_header: true,
         }
     }

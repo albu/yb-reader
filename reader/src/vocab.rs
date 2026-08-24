@@ -226,46 +226,115 @@ pub fn clean_word(w: &str) -> String {
         .to_lowercase()
 }
 
-/// Simple rule-based English lemmatization for high recall.
+/// Rule-based English lemmatization for dictionary fallback lookups.
+/// Handles regular inflectional suffixes (-s, -es, -ies, -ves, -ed, -ied, -ing, -ying, -ly, -ily, -ally)
+/// and guards against over-stemming non-inflected words.
 pub fn generate_lemmas(w: &str) -> Vec<String> {
-    let mut lemmas = Vec::new();
     let len = w.len();
-
-    // Plurals / Verb 3rd person (-ies -> -y, -es -> -, -s -> -)
-    if w.ends_with("ies") && len > 4 {
-        lemmas.push(format!("{}y", &w[..len - 3]));
-    }
-    if w.ends_with("es") && len > 3 {
-        lemmas.push(w[..len - 2].to_string());
-    }
-    if w.ends_with('s') && !w.ends_with("ss") && len > 2 {
-        lemmas.push(w[..len - 1].to_string());
+    if len < 3 {
+        return Vec::new();
     }
 
-    // Past / Adjectives (-ied -> -y, -ed -> -e, -ed -> -)
-    if w.ends_with("ied") && len > 4 {
-        lemmas.push(format!("{}y", &w[..len - 3]));
-    }
-    if w.ends_with("ed") && len > 3 {
-        lemmas.push(format!("{}e", &w[..len - 2]));
-        lemmas.push(w[..len - 2].to_string());
+    // Common non-inflected English words that should not have terminal suffixes stripped
+    const S_STOP_WORDS: &[&str] = &[
+        "as", "is", "us", "was", "his", "this", "thus", "yes", "gas", "bus", "plus",
+        "lens", "always", "news", "series", "species", "crisis", "basis", "analysis",
+        "thesis", "genius", "status", "focus", "virus", "canvas", "chaos", "abyss",
+    ];
+    const LY_STOP_WORDS: &[&str] = &[
+        "only", "early", "ugly", "holy", "daily", "jelly", "silly", "belly",
+        "ally", "rely", "apply", "supply", "fly", "family", "imply", "italy",
+    ];
+    const ED_STOP_WORDS: &[&str] = &[
+        "red", "bed", "fed", "led", "shed", "bleed", "breed", "feed", "need", "seed", "speed", "steed", "weed",
+    ];
+    const ING_STOP_WORDS: &[&str] = &[
+        "king", "ring", "wing", "sing", "bring", "spring", "string", "thing", "during", "morning", "evening", "ceiling", "bling",
+    ];
+
+    let mut lemmas = Vec::new();
+
+    // Helper to test if a consonant is doubled (e.g. "stopped", "running")
+    let is_double_consonant = |s: &str| -> bool {
+        let b = s.as_bytes();
+        let l = b.len();
+        if l >= 2 && b[l - 1] == b[l - 2] {
+            !matches!(b[l - 1], b'a' | b'e' | b'i' | b'o' | b'u' | b's' | b'y')
+        } else {
+            false
+        }
+    };
+
+    // 1. Plurals & 3rd-person verbs
+    if !S_STOP_WORDS.contains(&w) && !w.ends_with("ss") {
+        if w.ends_with("ies") && len > 4 {
+            lemmas.push(format!("{}y", &w[..len - 3]));
+            lemmas.push(format!("{}ie", &w[..len - 3]));
+        } else if w.ends_with("ves") && len > 4 {
+            lemmas.push(format!("{}fe", &w[..len - 3]));
+            lemmas.push(format!("{}f", &w[..len - 3]));
+        } else if (w.ends_with("sses") || w.ends_with("shes") || w.ends_with("ches") || w.ends_with("xes") || w.ends_with("zes")) && len > 4 {
+            lemmas.push(w[..len - 2].to_string());
+        } else if w.ends_with("es") && len > 3 {
+            lemmas.push(w[..len - 1].to_string()); // makes -> make
+            lemmas.push(w[..len - 2].to_string()); // heroes -> hero
+        } else if w.ends_with('s') && len > 3 {
+            lemmas.push(w[..len - 1].to_string());
+        }
     }
 
-    // Participles (-ing -> -e, -ing -> -)
-    if w.ends_with("ing") && len > 4 {
-        lemmas.push(format!("{}e", &w[..len - 3]));
-        lemmas.push(w[..len - 3].to_string());
+    // 2. Past tense & adjectives
+    if !ED_STOP_WORDS.contains(&w) {
+        if w.ends_with("ied") && len > 4 {
+            lemmas.push(format!("{}y", &w[..len - 3]));
+            lemmas.push(format!("{}ie", &w[..len - 3]));
+        } else if w.ends_with("ed") && len > 3 {
+            let base = &w[..len - 2];
+            if is_double_consonant(base) {
+                lemmas.push(base[..base.len() - 1].to_string()); // stopped -> stop
+            }
+            lemmas.push(format!("{}e", base)); // created -> create
+            lemmas.push(base.to_string()); // walked -> walk
+        }
     }
 
-    // Adverbs (-ly -> -)
-    if w.ends_with("ly") && len > 3 {
-        lemmas.push(w[..len - 2].to_string());
+    // 3. Present participles (-ing)
+    if !ING_STOP_WORDS.contains(&w) {
+        if w.ends_with("ying") && len > 4 {
+            lemmas.push(format!("{}ie", &w[..len - 4])); // lying -> lie
+        } else if w.ends_with("ing") && len > 4 {
+            let base = &w[..len - 3];
+            if is_double_consonant(base) {
+                lemmas.push(base[..base.len() - 1].to_string()); // running -> run
+            }
+            lemmas.push(format!("{}e", base)); // making -> make
+            lemmas.push(base.to_string()); // walking -> walk
+        }
     }
 
-    lemmas
+    // 4. Adverbs (-ly)
+    if !LY_STOP_WORDS.contains(&w) {
+        if w.ends_with("ily") && len > 4 {
+            lemmas.push(format!("{}y", &w[..len - 3])); // happily -> happy
+        } else if w.ends_with("ally") && len > 5 {
+            lemmas.push(w[..len - 4].to_string()); // basically -> basic
+            lemmas.push(w[..len - 2].to_string()); // legally -> legal
+        } else if w.ends_with("ly") && len > 4 {
+            lemmas.push(w[..len - 2].to_string()); // quickly -> quick
+        }
+    }
+
+    // Retain only unique, non-empty lemmas that differ from the input
+    let mut out = Vec::new();
+    for l in lemmas {
+        if !l.is_empty() && l != w && !out.contains(&l) {
+            out.push(l);
+        }
+    }
+    out
 }
 
-/// User's persistent vocabulary profile and adaptive learning model.
+/// User's persistent vocabulary profile and reading difficulty tracker.
 #[derive(Debug, Clone)]
 pub struct VocabProfile {
     /// Estimated user vocabulary level (0..100). Default: 65 (B2)
@@ -545,21 +614,46 @@ mod tests {
         assert_eq!(clean_word("Ubiquitous!"), "ubiquitous");
         assert_eq!(clean_word("half-hearted,"), "half-hearted");
 
-        let lemmas = generate_lemmas("tenaciously");
-        assert!(lemmas.contains(&"tenacious".to_string()));
+        // Non-inflected stop words must never be stripped
+        for stop in ["was", "this", "his", "news", "series", "species", "crisis", "only", "early", "ugly", "king"] {
+            let lemmas = generate_lemmas(stop);
+            assert!(lemmas.is_empty(), "stop word '{stop}' should not produce stripped lemmas: {lemmas:?}");
+        }
 
-        let lemmas = generate_lemmas("computed");
-        assert!(lemmas.contains(&"compute".to_string()));
+        // Regular plurals and verbs
+        assert!(generate_lemmas("addresses").contains(&"address".to_string()));
+        assert!(generate_lemmas("processes").contains(&"process".to_string()));
+        assert!(generate_lemmas("parties").contains(&"party".to_string()));
+        assert!(generate_lemmas("knives").contains(&"knife".to_string()));
+        assert!(generate_lemmas("makes").contains(&"make".to_string()));
+
+        // Past tense & participles
+        assert!(generate_lemmas("stopped").contains(&"stop".to_string()));
+        assert!(generate_lemmas("running").contains(&"run".to_string()));
+        assert!(generate_lemmas("computed").contains(&"compute".to_string()));
+        assert!(generate_lemmas("making").contains(&"make".to_string()));
+
+        // Adverbs
+        assert!(generate_lemmas("tenaciously").contains(&"tenacious".to_string()));
+        assert!(generate_lemmas("happily").contains(&"happy".to_string()));
+        assert!(generate_lemmas("basically").contains(&"basic".to_string()));
     }
 
     #[test]
     fn test_vocab_db_lookup() {
-        let bin_path = "tools/build_vocab/vocab.bin";
-        if !Path::new(bin_path).exists() {
+        let default_bin = concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/build_vocab/vocab.bin");
+        let bin_path = std::env::var("YB_VOCAB_PATH").unwrap_or_else(|_| {
+            if Path::new(VOCAB_PATH).exists() {
+                VOCAB_PATH.to_string()
+            } else {
+                default_bin.to_string()
+            }
+        });
+        if !Path::new(&bin_path).exists() {
             return;
         }
 
-        let db = VocabDb::open_path(bin_path).expect("open vocab.bin");
+        let db = VocabDb::open_path(&bin_path).expect("open vocab.bin");
         assert!(db.count > 10000);
 
         let entry = db.lookup("ubiquitous").expect("lookup ubiquitous");
