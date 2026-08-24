@@ -49,6 +49,7 @@ pub struct LayoutGeom {
 
 impl LayoutGeom {
     /// `w`/`h` are the VISUAL dims of the target buffer.
+    #[allow(dead_code)]
     pub fn new(
         settings: &ReaderSettings,
         bounds: mupdf::Rect,
