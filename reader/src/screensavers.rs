@@ -156,37 +156,6 @@ impl ScreensaversScreen {
         !self.disabled.contains(name)
     }
 
-    fn toggle(&mut self, name: &str) {
-        if self.disabled.contains(name) {
-            self.disabled.remove(name);
-        } else {
-            self.disabled.insert(name.to_string());
-        }
-        save_disabled(&self.disabled);
-    }
-
-    fn resolve_full_path(&self, name: &str) -> Option<std::path::PathBuf> {
-        for d in screensaver_dirs() {
-            let candidate = std::path::Path::new(&d).join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        None
-    }
-
-    fn delete(&mut self, name: &str) {
-        if let Some(p) = self.resolve_full_path(name) {
-            let _ = std::fs::remove_file(p);
-        }
-        self.disabled.remove(name);
-        save_disabled(&self.disabled);
-        self.files = scan();
-        if self.offset >= self.files.len() {
-            self.offset = self.files.len().saturating_sub(self.per_page);
-        }
-    }
-
     /// Pure row-index math, host-testable.
     fn row_at(&self, y: i32) -> Option<usize> {
         if y < pt(ROWS_TOP_PT) {
