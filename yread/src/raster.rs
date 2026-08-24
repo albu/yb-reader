@@ -150,6 +150,7 @@ impl Rasterizer {
                         *size_pt,
                         crate::model::FontStyle::Bold,
                         face,
+                        0,
                         fb,
                         stride,
                         p_width,
@@ -170,6 +171,7 @@ impl Rasterizer {
                         *size_pt,
                         crate::model::FontStyle::Regular,
                         face,
+                        0,
                         fb,
                         stride,
                         p_width,
@@ -315,6 +317,7 @@ impl Rasterizer {
                         baseline_y
                     };
 
+                    let fg = style.color.unwrap_or(0);
                     self.render_shaped_word(
                         shaped,
                         cur_x,
@@ -322,6 +325,7 @@ impl Rasterizer {
                         run_size,
                         style.font_style,
                         face,
+                        fg,
                         fb,
                         stride,
                         p_width,
@@ -337,6 +341,7 @@ impl Rasterizer {
                 } => {
                     let run_size = base_font_size * style.size_mult;
                     let face = fonts.face_for_style(style.font_style);
+                    let fg = style.color.unwrap_or(0);
                     self.render_shaped_word(
                         prefix_shaped,
                         cur_x,
@@ -344,6 +349,7 @@ impl Rasterizer {
                         run_size,
                         style.font_style,
                         face,
+                        fg,
                         fb,
                         stride,
                         p_width,
@@ -374,6 +380,7 @@ impl Rasterizer {
                                 run_size,
                                 style.font_style,
                                 face,
+                                fg,
                                 fb,
                                 stride,
                                 p_width,
@@ -399,6 +406,7 @@ impl Rasterizer {
         size_pt: f32,
         font_style: FontStyle,
         face: &crate::font::FontFace,
+        fg_color: u8,
         fb: &mut [u8],
         stride: usize,
         p_width: usize,
@@ -498,7 +506,8 @@ impl Rasterizer {
                             let alpha = EINK_ALPHA_LUT[coverage as usize] as u32;
                             if alpha > 0 {
                                 let curr = *dst_pixel as u32;
-                                let blended = ((255 - alpha) * curr) / 255;
+                                let fg = fg_color as u32;
+                                let blended = ((255 - alpha) * curr + alpha * fg) / 255;
                                 *dst_pixel = blended as u8;
                             }
                         }

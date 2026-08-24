@@ -473,10 +473,14 @@ impl<R: Read + Seek> EpubParser<R> {
                             match heading_level {
                                 1 => 1.35,
                                 2 => 1.20,
-                                _ => 1.10,
+                                _ => 1.12,
                             }
                         };
-                        block_align = parse_align_from_attrs(e).unwrap_or(TextAlign::Center);
+                        block_align = if heading_level <= 1 {
+                            TextAlign::Center
+                        } else {
+                            parse_align_from_attrs(e).unwrap_or(TextAlign::Left)
+                        };
                         current_style.align = block_align;
                     } else if n.eq_ignore_ascii_case(b"b") || n.eq_ignore_ascii_case(b"strong") {
                         push_capped(&mut style_stack, current_style.clone(), MAX_NEST_DEPTH);

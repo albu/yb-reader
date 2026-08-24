@@ -189,16 +189,23 @@ fn spawn_poller_thread(
         let mut fail_count: u32 = 0;
 
         loop {
-            let sleep_dur = if fail_count > 0 {
-                let multiplier = 1u64 << (fail_count.min(5) - 1);
-                Duration::from_millis((1500 * multiplier).min(30_000))
+            // While offline and Wi-Fi is still associating, sleep shortly (400ms)
+            // without increasing fail_count or wasting seconds on TCP connect.
+            let is_wifi_ready = ybdev::sysinfo::wifi_up();
+
+            let sleep_dur = if !is_wifi_ready {
+                Duration::from_millis(400)
+            } else if fail_count > 0 {
+                // Modest backoff while screen is active: 1.2s -> 1.6s -> 2.0s -> max 2.8s
+                Duration::from_millis(1200 + (fail_count.min(4) as u64) * 400)
             } else {
-                Duration::from_millis(1400)
+                Duration::from_millis(1200)
             };
 
             match cmd_rx.recv_timeout(sleep_dur) {
                 Ok(PollerCmd::Stop) => break,
                 Ok(PollerCmd::SetSource(mode)) => {
+                    fail_count = 0;
                     if let Some(h) = &host {
                         let mut temp_conn = Conn::new(h, port);
                         temp_conn.set_secret(secret.clone());
@@ -209,6 +216,7 @@ fn spawn_poller_thread(
                     }
                 }
                 Ok(PollerCmd::StepTurn(delta)) => {
+                    fail_count = 0;
                     let target_idx = match current_turn_idx {
                         None => {
                             if delta < 0 {
@@ -243,15 +251,23 @@ fn spawn_poller_thread(
                     continue;
                 }
                 Ok(PollerCmd::GoLive) => {
+                    fail_count = 0;
                     current_turn_idx = None;
                     last_rev = 0;
                 }
-                Ok(PollerCmd::PollNow) => {}
+                Ok(PollerCmd::PollNow) => {
+                    fail_count = 0;
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             }
 
             if current_turn_idx.is_some() {
+                continue;
+            }
+
+            if !is_wifi_ready {
+                let _ = msg_tx.send(PollerMsg::ConnectionStatus(false));
                 continue;
             }
 
@@ -422,9 +438,7 @@ impl AiStreamScreen {
 
     #[allow(dead_code)]
     fn save_host(host: &str) {
-        let _ = std::fs::create_dir_all("/mnt/us/extensions/mirror");
-        let content = format!("SERVER=http://{}:{}\n", host, AI_STREAM_PORT);
-        let _ = std::fs::write(CONF_PATH, content);
+        ybdev::config::write_server(CONF_PATH, &format!("http://{}:{}", host, AI_STREAM_PORT));
     }
 
     /// Change AI source on Mac server.
@@ -980,14 +994,9 @@ impl Screen for AiStreamScreen {
     }
 
     fn tick_interval(&self) -> Duration {
-        // A live connection or a running turn needs the responsive 500 ms
-        // drain; a screen that is neither (offline/idle) wakes 4× less
-        // often instead of ticking pointlessly.
-        if self.connected || self.turn.status == "running" {
-            Duration::from_millis(500)
-        } else {
-            Duration::from_secs(2)
-        }
+        // 500 ms responsiveness while active so newly arriving turns or
+        // connection changes paint immediately without multi-second delays.
+        Duration::from_millis(500)
     }
 
     fn on_tick(&mut self) -> Action {

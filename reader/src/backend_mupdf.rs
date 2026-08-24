@@ -11,6 +11,15 @@ use crate::positions;
 use crate::render::{self, render_page};
 use crate::split::ReaderSettings;
 
+struct CachedPage {
+    page_no: usize,
+    zoom_bits: u32,
+    bounds: mupdf::Rect,
+    pixmap: mupdf::Pixmap,
+    text_page: Option<mupdf::TextPage>,
+    links: Vec<(crate::split::RectF, String)>,
+}
+
 pub struct PdfBackend {
     path: PathBuf,
     loading: Option<Receiver<Result<BookReady, String>>>,
@@ -25,6 +34,7 @@ pub struct PdfBackend {
     /// during open vanish silently — the yread engine queues, this one
     /// must too.
     queued_turns: i32,
+    cached_page: Option<CachedPage>,
 }
 
 impl PdfBackend {
@@ -52,6 +62,7 @@ impl PdfBackend {
             total: pos.total.max(1),
             sub_box_count: 1,
             queued_turns: 0,
+            cached_page: None,
         }
     }
 }
@@ -207,42 +218,91 @@ impl ReaderBackend for PdfBackend {
         };
         self.sub_box_count = settings.split.sub_boxes().len().max(1);
 
-        // One load_page feeds ink, words and links — a second load per
-        // frame was measurable on cold page turns.
+        let t0 = std::time::Instant::now();
         let mut words = Vec::new();
         let mut links = Vec::new();
-        let gray = match doc.load_page(self.page_no as i32) {
-            Err(e) => {
-                ybdev::log::plog(&format!("render: load_page {}: {}", self.page_no, e));
-                None
-            }
-            Ok(p) => match p.bounds() {
-                Err(e) => {
-                    ybdev::log::plog(&format!("render: page {} bounds: {}", self.page_no, e));
-                    None
-                }
-                Ok(bounds) => match render::LayoutGeom::new(settings, bounds, self.sub_idx, vw, vh)
-                {
-                    None => {
-                        // Degenerate page box (zero width/height) — a
-                        // mupdf failure must be distinguishable from a
-                        // blank page in the log, not a silent white screen.
-                        ybdev::log::plog(&format!(
-                            "render: page {} has a degenerate box {:?}",
-                            self.page_no, bounds
-                        ));
-                        None
-                    }
-                    Some(geom) => {
-                        if let Ok(tp) = p.to_text_page(mupdf::TextPageFlags::empty()) {
-                            words = render::words_from_text_page(&tp, &geom);
+
+        // 1. Intra-page cache hit (e.g. sub 0 -> sub 1 in 2-split mode):
+        let mut gray = None;
+        if let Some(cached) = &self.cached_page {
+            if cached.page_no == self.page_no {
+                if let Some(geom) = render::LayoutGeom::new(settings, cached.bounds, self.sub_idx, vw, vh) {
+                    if geom.zoom.to_bits() == cached.zoom_bits {
+                        if let Some(tp) = &cached.text_page {
+                            words = render::words_from_text_page(tp, &geom);
                         }
-                        links = render::links_from_page(&p, &geom);
-                        render::render_page_on(&p, &geom, self.sub_idx, settings, vw, vh)
+                        links = cached.links.clone();
+                        let sliced = render::slice_pixmap(&cached.pixmap, &geom, self.sub_idx, settings, vw, vh);
+                        let elapsed = t0.elapsed().as_millis();
+                        ybdev::log::plog(&format!(
+                            "pdf intra-page slice p{} s{} in {}ms",
+                            self.page_no,
+                            self.sub_idx,
+                            elapsed
+                        ));
+                        gray = Some(sliced);
                     }
+                }
+            }
+        }
+
+        // 2. Cold full render if not cached:
+        if gray.is_none() {
+            match doc.load_page(self.page_no as i32) {
+                Err(e) => {
+                    ybdev::log::plog(&format!("render: load_page {}: {}", self.page_no, e));
+                }
+                Ok(p) => match p.bounds() {
+                    Err(e) => {
+                        ybdev::log::plog(&format!("render: page {} bounds: {}", self.page_no, e));
+                    }
+                    Ok(bounds) => match render::LayoutGeom::new(settings, bounds, self.sub_idx, vw, vh) {
+                        None => {
+                            ybdev::log::plog(&format!(
+                                "render: page {} has a degenerate box {:?}",
+                                self.page_no, bounds
+                            ));
+                        }
+                        Some(geom) => {
+                            let tp = p.to_text_page(mupdf::TextPageFlags::empty()).ok();
+                            if let Some(ref text_page) = tp {
+                                words = render::words_from_text_page(text_page, &geom);
+                            }
+                            links = render::links_from_page(&p, &geom);
+
+                            mupdf::Context::get().set_text_aa_level(render::TEXT_AA_LEVEL);
+                            let mut m = mupdf::Matrix::IDENTITY;
+                            m.scale(geom.zoom, geom.zoom);
+                            match p.to_pixmap(&m, &mupdf::Colorspace::device_gray(), false, true) {
+                                Err(e) => {
+                                    ybdev::log::plog(&format!("render: to_pixmap failed: {}", e));
+                                }
+                                Ok(pm) => {
+                                    let sliced = render::slice_pixmap(&pm, &geom, self.sub_idx, settings, vw, vh);
+                                    let elapsed = t0.elapsed().as_millis();
+                                    ybdev::log::plog(&format!(
+                                        "pdf full render p{} s{} in {}ms (rss={})",
+                                        self.page_no,
+                                        self.sub_idx,
+                                        elapsed,
+                                        crate::document::rss_mib()
+                                    ));
+                                    self.cached_page = Some(CachedPage {
+                                        page_no: self.page_no,
+                                        zoom_bits: geom.zoom.to_bits(),
+                                        bounds,
+                                        pixmap: pm,
+                                        text_page: tp,
+                                        links: links.clone(),
+                                    });
+                                    gray = Some(sliced);
+                                }
+                            }
+                        }
+                    },
                 },
-            },
-        };
+            }
+        }
 
         RenderOutput {
             gray,
@@ -330,6 +390,7 @@ impl ReaderBackend for PdfBackend {
         _vw: u32,
         _vh: u32,
     ) -> bool {
+        self.cached_page = None;
         true
     }
 
@@ -339,6 +400,7 @@ impl ReaderBackend for PdfBackend {
         vw: u32,
         vh: u32,
     ) -> Option<Vec<u8>> {
+        self.cached_page = None;
         self.doc
             .as_ref()
             .and_then(|doc| render_page(doc.as_ref(), self.page_no, self.sub_idx, settings, vw, vh))

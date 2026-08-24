@@ -261,10 +261,14 @@ impl<R: BufRead> Fb2Parser<R> {
                 }
 
                 let mut style = Style::default();
-                if tag_name == "subtitle" {
-                    style.size_mult = 1.2;
+                if self.in_title {
+                    style.size_mult = 1.35;
                     style.font_style = FontStyle::Bold;
                     style.align = TextAlign::Center;
+                } else if tag_name == "subtitle" {
+                    style.size_mult = 1.20;
+                    style.font_style = FontStyle::Bold;
+                    style.align = TextAlign::Left;
                 } else if tag_name == "v" {
                     style.indent = true;
                     style.align = TextAlign::Left;

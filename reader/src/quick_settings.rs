@@ -364,7 +364,13 @@ impl Screen for QuickSettingsSheet {
                 let bx = w - pad - (4 - i as i32) * (s_btn_w + pt(4.0));
                 let br = Rect::new(bx, y, s_btn_w, pt(BTN_H_PT));
                 if br.contains(vx, vy) {
-                    self.settings.split = SplitConfig::for_preset(*preset);
+                    let old_split = self.settings.split;
+                    let mut new_split = SplitConfig::for_preset(*preset);
+                    new_split.margin_left = old_split.margin_left;
+                    new_split.margin_top = old_split.margin_top;
+                    new_split.margin_right = old_split.margin_right;
+                    new_split.margin_bottom = old_split.margin_bottom;
+                    self.settings.split = new_split;
                     return self.apply_change();
                 }
             }

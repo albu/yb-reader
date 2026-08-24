@@ -31,27 +31,48 @@ def clean_gloss(raw_def):
     return definition.capitalize()
 
 
-def parse_wordnet_file(z, filename):
-    entries = {}
-    content = z.read(filename).decode("utf-8", errors="ignore")
-    for line in content.splitlines():
-        if line.startswith("  ") or not line.strip():
-            continue
-        parts = line.split(" | ")
-        if len(parts) >= 2:
-            gloss = clean_gloss(parts[1].strip())
-            meta = parts[0].split()
-            if len(meta) >= 5:
-                try:
-                    w_count = int(meta[3], 16)
-                    for i in range(w_count):
-                        word = meta[4 + i * 2].lower().replace("_", "-")
-                        w_clean = clean_word(word)
-                        if w_clean and w_clean not in entries:
-                            entries[w_clean] = gloss
-                except:
-                    pass
-    return entries
+def parse_wordnet(z):
+    # 1. Parse all synset glosses by (pos, offset)
+    synset_glosses = {}
+    for pos, fname in [('n', 'wordnet/data.noun'), ('v', 'wordnet/data.verb'), ('a', 'wordnet/data.adj'), ('r', 'wordnet/data.adv')]:
+        content = z.read(fname).decode('utf-8', errors='ignore')
+        for line in content.splitlines():
+            if line.startswith('  ') or not line.strip():
+                continue
+            parts = line.split(' | ')
+            if len(parts) >= 2:
+                offset = line[:8]
+                gloss = clean_gloss(parts[1].strip())
+                synset_glosses[(pos, offset)] = gloss
+
+    # 2. Parse index files where synset offsets are listed in order of frequency (Sense 1 first)
+    word_defs = {}  # word -> (gloss, tagsense_cnt, pos_priority)
+    pos_priority = {'n': 4, 'v': 3, 'a': 2, 'r': 1}
+    for pos, fname in [('n', 'wordnet/index.noun'), ('v', 'wordnet/index.verb'), ('a', 'wordnet/index.adj'), ('r', 'wordnet/index.adv')]:
+        content = z.read(fname).decode('utf-8', errors='ignore')
+        for line in content.splitlines():
+            if line.startswith('  ') or not line.strip():
+                continue
+            parts = line.split()
+            lemma = clean_word(parts[0].replace('_', '-'))
+            if not lemma:
+                continue
+            p_cnt = int(parts[3])
+            tagsense_cnt = int(parts[4 + p_cnt + 1])
+            offset_idx = 4 + p_cnt + 2
+            if offset_idx < len(parts):
+                first_offset = parts[offset_idx]
+                gloss = synset_glosses.get((pos, first_offset), '')
+                if gloss:
+                    current = word_defs.get(lemma)
+                    if current is None:
+                        word_defs[lemma] = (gloss, tagsense_cnt, pos_priority[pos])
+                    else:
+                        cur_gloss, cur_tag_cnt, cur_prio = current
+                        if tagsense_cnt > cur_tag_cnt or (tagsense_cnt == cur_tag_cnt and pos_priority[pos] > cur_prio):
+                            word_defs[lemma] = (gloss, tagsense_cnt, pos_priority[pos])
+
+    return {w: v[0] for w, v in word_defs.items()}
 
 def build():
     print("Building vocabulary database...")
@@ -65,10 +86,7 @@ def build():
     with open(tmp_wn, "rb") as f:
         z = zipfile.ZipFile(io.BytesIO(f.read()))
 
-    all_defs = {}
-    for fname in ["wordnet/data.noun", "wordnet/data.verb", "wordnet/data.adj", "wordnet/data.adv"]:
-        d = parse_wordnet_file(z, fname)
-        all_defs.update(d)
+    all_defs = parse_wordnet(z)
     print(f"Loaded {len(all_defs)} clean WordNet definitions.")
 
     # 2. Download Frequency Rankings

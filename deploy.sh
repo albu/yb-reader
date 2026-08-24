@@ -61,19 +61,7 @@ ssh_deploy() {
     # is the truth, not the flag — the curtain card can arm the flag from
     # a stock session, and boot.sh there would race start.sh's unfreeze
     # of cvm (and a second reader).
-    $SSHC "$HOST" "mv -f $DST.new $DST && chmod +x $DST && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails; killall reader 2>/dev/null || true; sleep 1; killall -9 reader 2>/dev/null || true"
-    sleep 1
-    if $SSHC "$HOST" "initctl status yb-reader 2>/dev/null | grep -q 'start/running'" 2>/dev/null; then
-        $SSHC "$HOST" "initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1"
-    elif $SSHC "$HOST" "test -e /mnt/us/DONT_START_FRAMEWORK" 2>/dev/null; then
-        # Takeover with the job stopped (a normal exit left it that way):
-        # start the job so boot.sh owns the flag and the exit-42 handoff.
-        # Falling back to start.sh here would strand the device frozen on
-        # "Exit to Kindle" (start.sh does not start the framework).
-        $SSHC "$HOST" "initctl start yb-reader </dev/null >/dev/null 2>&1 || nohup /mnt/us/extensions/reader/bin/boot.sh </dev/null >/dev/null 2>&1 &"
-    else
-        $SSHC "$HOST" "nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 &"
-    fi
+    $SSHC "$HOST" "mv -f $DST.new $DST && chmod +x $DST && { cp -f $DST /mnt/us/kmc/kpm/packages/yb-reader/bin/reader 2>/dev/null || true; }; rm -f /var/local/yb-reader/fails && touch /var/local/yb-reader/last && pkill -9 -f 'boot\.sh' 2>/dev/null || true; killall -9 reader 2>/dev/null || true; sleep 1; if test -e /mnt/us/DONT_START_FRAMEWORK; then initctl restart yb-reader </dev/null >/dev/null 2>&1 || initctl start yb-reader </dev/null >/dev/null 2>&1; else nohup /mnt/us/extensions/reader/bin/start.sh </dev/null >/dev/null 2>&1 & fi"
     # Post-verification: the deploy is not done when the bytes land, it is
     # done when the new binary is the one running (rc=0 TERM exits are
     # "normal" to the job, so nothing else guarantees the relaunch).

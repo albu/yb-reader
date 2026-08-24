@@ -19,8 +19,8 @@ use mupdf::{Colorspace, Document, Matrix};
 
 use crate::split::{ReaderSettings, RectF};
 
-pub const HEADER_H: u32 = 92; // px (covers clock/battery status header)
-pub const FOOTER_H: u32 = 50; // px (covers progress track and footer)
+pub const HEADER_H: u32 = 98; // px (covers clock/battery status header with clean top margin)
+pub const FOOTER_H: u32 = 72; // px (covers progress track and page number without text overlap)
 pub const TEXT_AA_LEVEL: i32 = 8;
 
 #[allow(dead_code)]
@@ -260,14 +260,8 @@ pub fn render_page_on(
     // rasterizes picks the knob up (contexts are per-thread clones).
     mupdf::Context::get().set_text_aa_level(TEXT_AA_LEVEL);
 
-    let config = &settings.split;
-    let sub_box = geom.sub_box;
-    let zoom = geom.zoom;
-
-    let mut out = vec![255u8; (w as usize) * (h as usize)];
-
     let mut m = Matrix::IDENTITY;
-    m.scale(zoom, zoom);
+    m.scale(geom.zoom, geom.zoom);
     let pm = match page.to_pixmap(&m, &Colorspace::device_gray(), false, true) {
         Ok(pm) => pm,
         Err(e) => {
@@ -275,6 +269,25 @@ pub fn render_page_on(
             return None;
         }
     };
+
+    Some(slice_pixmap(&pm, geom, sub_idx, settings, w, h))
+}
+
+/// Slices a sub-box from an existing full-page pixmap and applies LUT/contrast,
+/// enabling instant (<3ms) sub-page turns without re-rasterizing the PDF page.
+pub fn slice_pixmap(
+    pm: &mupdf::Pixmap,
+    geom: &LayoutGeom,
+    sub_idx: usize,
+    settings: &ReaderSettings,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    let config = &settings.split;
+    let sub_box = geom.sub_box;
+    let zoom = geom.zoom;
+
+    let mut out = vec![255u8; (w as usize) * (h as usize)];
 
     let pm_w = pm.width() as usize;
     let pm_h = pm.height() as usize;
@@ -288,7 +301,7 @@ pub fn render_page_on(
 
     if rw == 0 || rh == 0 {
         settings.apply_lut(&mut out);
-        return Some(out);
+        return out;
     }
 
     let (vis_ox, vis_oy) = (geom.vis_ox, geom.vis_oy);
@@ -338,7 +351,7 @@ pub fn render_page_on(
     // Apply Contrast / Whitening / Invert LUT
     settings.apply_lut(&mut out);
 
-    Some(out)
+    out
 }
 
 #[cfg(test)]
@@ -376,6 +389,32 @@ mod tests {
         let r1 = render_page(&doc, 20, 1, &settings, 1648, 1236);
         assert!(r1.is_some());
         assert_eq!(r1.unwrap().len(), 1648 * 1236);
+    }
+
+    #[test]
+    fn test_slice_pixmap_matches_render_page() {
+        if !std::path::Path::new(PDF).exists() {
+            return;
+        }
+        let doc = Document::open(PDF).expect("open doc");
+        let page = doc.load_page(20).expect("load page");
+        let bounds = page.bounds().expect("bounds");
+        let mut settings = ReaderSettings::default();
+        settings.split = SplitConfig::for_preset(SplitPreset::Horizontal2);
+
+        let geom0 = LayoutGeom::new(&settings, bounds, 0, 1648, 1236).unwrap();
+        let mut m = Matrix::IDENTITY;
+        m.scale(geom0.zoom, geom0.zoom);
+        let pm = page.to_pixmap(&m, &Colorspace::device_gray(), false, true).unwrap();
+
+        let slice0 = slice_pixmap(&pm, &geom0, 0, &settings, 1648, 1236);
+        let full0 = render_page(&doc, 20, 0, &settings, 1648, 1236).unwrap();
+        assert_eq!(slice0, full0);
+
+        let geom1 = LayoutGeom::new(&settings, bounds, 1, 1648, 1236).unwrap();
+        let slice1 = slice_pixmap(&pm, &geom1, 1, &settings, 1648, 1236);
+        let full1 = render_page(&doc, 20, 1, &settings, 1648, 1236).unwrap();
+        assert_eq!(slice1, full1);
     }
 
     #[test]

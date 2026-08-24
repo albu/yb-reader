@@ -214,6 +214,61 @@ impl Screen for CropDialog {
             y += dash + gap;
         }
 
+        // 3b. Render internal split guide line(s) for the current preset inside the cropped box (x0..x1, y0..y1)
+        match self.settings.split.preset {
+            crate::split::SplitPreset::Horizontal2 => {
+                let mid_y = (y0 + y1) / 2;
+                let mut sx = x0;
+                while sx < x1 {
+                    let seg_w = dash.min(x1 - sx);
+                    p.rect(Rect::new(sx, mid_y, seg_w, 1), 100);
+                    sx += dash + gap;
+                }
+                p.text_center_in(x0, x1, mid_y - pt(4.0), 6.5, 80, "2-Split Cut");
+            }
+            crate::split::SplitPreset::Horizontal3 => {
+                let step = (y1 - y0) / 3;
+                for i in 1..=2 {
+                    let sy = y0 + i * step;
+                    let mut sx = x0;
+                    while sx < x1 {
+                        let seg_w = dash.min(x1 - sx);
+                        p.rect(Rect::new(sx, sy, seg_w, 1), 100);
+                        sx += dash + gap;
+                    }
+                }
+                p.text_center_in(x0, x1, y0 + step - pt(4.0), 6.5, 80, "3-Split Cuts");
+            }
+            crate::split::SplitPreset::Vertical2 => {
+                let mid_x = (x0 + x1) / 2;
+                let mut sy = y0;
+                while sy < y1 {
+                    let seg_h = dash.min(y1 - sy);
+                    p.rect(Rect::new(mid_x, sy, 1, seg_h), 100);
+                    sy += dash + gap;
+                }
+                p.text_center_in(mid_x - pt(30.0), mid_x + pt(30.0), (y0 + y1) / 2, 6.5, 80, "2-Col");
+            }
+            crate::split::SplitPreset::Grid4 => {
+                let mid_x = (x0 + x1) / 2;
+                let mid_y = (y0 + y1) / 2;
+                let mut sx = x0;
+                while sx < x1 {
+                    let seg_w = dash.min(x1 - sx);
+                    p.rect(Rect::new(sx, mid_y, seg_w, 1), 100);
+                    sx += dash + gap;
+                }
+                let mut sy = y0;
+                while sy < y1 {
+                    let seg_h = dash.min(y1 - sy);
+                    p.rect(Rect::new(mid_x, sy, 1, seg_h), 100);
+                    sy += dash + gap;
+                }
+                p.text_center_in(x0, x1, mid_y - pt(4.0), 6.5, 80, "4-Grid Cuts");
+            }
+            _ => {}
+        }
+
         // 4. Bold corner brackets ⌜ ⌝ ⌞ ⌟ around the active crop box
         let clen = pt(14.0);
         let cth = 3;

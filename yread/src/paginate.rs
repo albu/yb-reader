@@ -40,8 +40,8 @@ impl LayoutConfig {
             page_height: vh,
             margin_left: margin_pad,
             margin_right: margin_pad,
-            margin_top: margin_pad + if show_header { 92 } else { 0 },
-            margin_bottom: margin_pad + 50,
+            margin_top: margin_pad + if show_header { 98 } else { 0 },
+            margin_bottom: margin_pad + 72,
             font_size,
             line_spacing,
             paragraph_spacing: 0.25,
@@ -193,7 +193,8 @@ pub fn paginate_chapter_with_images(
 ) -> (ChapterPageTable, Vec<PageLayout>) {
     let content_w = config.content_width();
     let content_h = config.content_height();
-    let indent_px = config.indent_em * config.font_size * (300.0 / 72.0);
+    let em_px = config.font_size * (300.0 / 72.0);
+    let indent_px = config.indent_em * em_px;
 
     let mut pages = Vec::new();
     let mut page_breaks = Vec::new();
@@ -222,7 +223,6 @@ pub fn paginate_chapter_with_images(
                 bullet_prefix,
                 is_quote,
             } => {
-                let em_px = config.font_size * (300.0 / 72.0);
                 let left_margin_px = *left_margin_em * em_px;
 
                 let (bullet_shaped, is_circle_bullet, bullet_adv) = if let Some(ref bullet_str) =
@@ -241,11 +241,18 @@ pub fn paginate_chapter_with_images(
                 };
 
                 let avail_w = (content_w - left_margin_px - bullet_adv).max(100.0);
-                let first_indent = if *indent && bullet_prefix.is_none() {
-                    indent_px
-                } else {
-                    0.0
-                };
+                // The paragraph that directly follows a heading opens the
+                // section and is set flush-left (no first-line indent).
+                let follows_heading = matches!(
+                    chapter.blocks.get(b_idx.wrapping_sub(1)),
+                    Some(Block::Heading { .. })
+                );
+                let first_indent =
+                    if *indent && bullet_prefix.is_none() && !follows_heading {
+                        indent_px
+                    } else {
+                        0.0
+                    };
 
                 let lines = break_paragraph_lines_streaming(
                     &chapter.text,
@@ -370,16 +377,15 @@ pub fn paginate_chapter_with_images(
                 }
 
                 // Paragraph spacing
-                cur_y += config.font_size * config.paragraph_spacing;
+                cur_y += em_px * config.paragraph_spacing;
             }
             Block::CodeBlock { code } => {
-                let em_px = config.font_size * (300.0 / 72.0);
                 let left_margin_px = em_px * 0.8;
                 let code_size = config.font_size * 0.82;
                 let line_h = code_size * (300.0 / 72.0) * 1.25;
                 let block_start_y = cur_y;
 
-                cur_y += config.font_size * 0.3; // Space before code block
+                cur_y += em_px * 0.35; // Space before code block
 
                 for c_line in code.lines() {
                     if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
@@ -423,9 +429,18 @@ pub fn paginate_chapter_with_images(
                     });
                 }
 
-                cur_y += config.font_size * 0.5; // Space after code block
+                cur_y += em_px * 0.45; // Space after code block
             }
-            Block::Heading { level: _, runs } => {
+            Block::Heading { level, runs } => {
+                // Reader-side heading hierarchy: chapter titles (<h1>)
+                // centered, section headings flush-left. Overrides the
+                // book's own heading alignment — the reader ignores source
+                // CSS, so this is closer to typical book intent anyway.
+                let heading_align = if *level <= 1 {
+                    TextAlign::Center
+                } else {
+                    TextAlign::Left
+                };
                 let lines = break_paragraph_lines_streaming(
                     &chapter.text,
                     runs,
@@ -433,7 +448,7 @@ pub fn paginate_chapter_with_images(
                     content_w,
                     config.font_size,
                     1.2,
-                    TextAlign::Center,
+                    heading_align,
                     fonts,
                     cache,
                     None,
@@ -441,10 +456,9 @@ pub fn paginate_chapter_with_images(
                     &mut cur_char_offset,
                 );
 
-                let em_px = config.font_size * (300.0 / 72.0);
                 let body_line_h = em_px * config.line_spacing;
                 let heading_h: f32 =
-                    lines.iter().map(|l| l.height).sum::<f32>() + config.font_size * 0.9;
+                    lines.iter().map(|l| l.height).sum::<f32>() + em_px * 0.9;
                 let min_heading_room = heading_h + 2.0 * body_line_h;
 
                 // Heading keep_with_next: must have room for heading + at least 2 body lines
@@ -470,7 +484,17 @@ pub fn paginate_chapter_with_images(
                     cur_block_idx = b_idx;
                 }
 
-                cur_y += config.font_size * 0.5; // Space before heading
+                // Space before heading: generous (1.5em) to detach it from
+                // the section above, but only mid-page — a heading that opens
+                // a page or the chapter sits flush at the top margin.
+                if cur_y > 0.0 {
+                    let space_before = match *level {
+                        1 => em_px * 1.8,
+                        2 => em_px * 1.5,
+                        _ => em_px * 1.2,
+                    };
+                    cur_y += space_before;
+                }
                 for line in lines {
                     if cur_page_start_char == usize::MAX {
                         cur_page_start_char = line.start_char;
@@ -486,7 +510,7 @@ pub fn paginate_chapter_with_images(
                         y: baseline,
                     });
                 }
-                cur_y += config.font_size * 0.4; // Space after heading
+                cur_y += em_px * 0.35; // Space after heading
             }
             Block::Spacer(px) => {
                 if cur_y > 0.0 && cur_y + (*px as f32) < content_h {
@@ -570,7 +594,7 @@ pub fn paginate_chapter_with_images(
                     width: draw_w,
                     height: draw_h,
                 });
-                cur_y += draw_h + config.font_size * 0.5;
+                cur_y += draw_h + em_px * 0.40;
             }
         }
     }

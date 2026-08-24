@@ -121,30 +121,12 @@ fn test_glyph_weight_consistency_across_chapters() {
 
     for elem in &layouts[0].elements {
         if let yread::paginate::PageElement::Line { line, x, y } = elem {
-            let mut cur_x = origin_x + x;
-            let mut extra_space_per_gap = 0.0f32;
-            match line.align {
-                yread::model::TextAlign::Center => {
-                    let slack = (line.max_width - line.width).max(0.0);
-                    cur_x += slack / 2.0;
-                }
-                yread::model::TextAlign::Right => {
-                    let slack = (line.max_width - line.width).max(0.0);
-                    cur_x += slack;
-                }
-                yread::model::TextAlign::Justify => {
-                    if !line.is_last_in_paragraph && line.width < line.max_width {
-                        let space_count = line.items.iter().filter(|it| it.is_space()).count();
-                        if space_count > 0 {
-                            let slack = line.max_width - line.width;
-                            if slack < line.max_width * 0.40 {
-                                extra_space_per_gap = slack / space_count as f32;
-                            }
-                        }
-                    }
-                }
-                yread::model::TextAlign::Left => {}
-            }
+            // Single source of truth for the pen adjustment — a copy of
+            // alignment_adjust in this test drifted from the raster and the
+            // word-rect extractor once already (dictionary taps hit the
+            // wrong word on justified lines).
+            let (align_off, extra_space_per_gap) = yread::raster::alignment_adjust(line);
+            let mut cur_x = origin_x + x + align_off;
 
             for item in &line.items {
                 match item {

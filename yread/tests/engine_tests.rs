@@ -877,3 +877,15 @@ fn test_epub_malformed_chapter_degrades_not_dies() {
     let c2 = &book.chapters[1];
     assert!(c2.text.contains("Surviving chapter text"));
 }
+
+#[test]
+fn test_parse_real_sample_fb2() {
+    let p = std::path::Path::new("/tmp/sample.fb2");
+    if !p.exists() {
+        return;
+    }
+    let book = yread::fb2::parse_fb2_path(p).expect("parse SAMPLE fb2");
+    assert_eq!(book.meta.title, "A Sample Book");
+    assert!(!book.chapters.is_empty());
+    println!("Parsed SAMPLE.fb2: {} chapters, {} images", book.chapters.len(), book.images.len());
+}

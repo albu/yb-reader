@@ -51,6 +51,8 @@ pub struct Style {
     pub is_code: bool,
     /// Is this run a footnote reference link?
     pub footnote_ref: Option<String>,
+    /// Foreground gray color (0 = black, 255 = white). Defaults to 0 (pure black).
+    pub color: Option<u8>,
 }
 
 impl Default for Style {
@@ -64,6 +66,7 @@ impl Default for Style {
             is_sub: false,
             is_code: false,
             footnote_ref: None,
+            color: None,
         }
     }
 }
