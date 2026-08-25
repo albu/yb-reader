@@ -5,6 +5,7 @@
 
 pub mod atomic;
 pub mod config;
+pub mod devices;
 pub mod frontlight;
 pub mod img;
 pub mod input;

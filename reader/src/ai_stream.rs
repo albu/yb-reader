@@ -173,6 +173,28 @@ pub enum PollerMsg {
     ConnectionStatus(bool),
 }
 
+/// Resolve the credential for a host: the discovery-derived secret (or its
+/// per-host store lookup) first; conf.secret LAST, and only for the
+/// explicitly configured host — trust-by-config. A discovery fallback that
+/// merely raced the broadcast fastest must never collect the static shared
+/// secret.
+fn effective_secret(
+    active: Option<&String>,
+    store: &ybdev::devices::DeviceStore,
+    host: &str,
+    configured_host: Option<&String>,
+    conf_secret: Option<&String>,
+) -> Option<String> {
+    active
+        .cloned()
+        .or_else(|| store.find_by_ip_for_control(host).map(|d| d.token.clone()))
+        .or_else(|| {
+            (configured_host.map(|c| c.as_str()) == Some(host))
+                .then(|| conf_secret.cloned())
+                .flatten()
+        })
+}
+
 #[allow(dead_code)]
 fn spawn_poller_thread(
     initial_host: Option<String>,
@@ -182,12 +204,23 @@ fn spawn_poller_thread(
     msg_tx: std::sync::mpsc::Sender<PollerMsg>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // SERVER= is pinned only after a host proves itself with a
+        // successful /live exchange (see the ok branch below) — a rogue
+        // responder that merely wins the UDP discovery race stays
+        // session-scoped. conf_secret flows only to the configured host.
+        let conf_secret = secret.clone();
+        let configured_host = initial_host.clone();
+        let mut persisted_host = initial_host.clone();
         let mut host = initial_host;
         let mut conn: Option<Conn> = None;
-        let secret = secret;
+        let mut active_secret = secret;
         let mut last_rev: u64 = 0;
         let mut current_turn_idx: Option<i32> = None;
         let mut fail_count: u32 = 0;
+        let devices_path = ybdev::devices::devices_path();
+        let kindle_id_path = ybdev::devices::kindle_id_path();
+        let profile = ybdev::devices::KindleProfile::load_or_create(&kindle_id_path, ybdev::devices::KindleProfile::DEFAULT_PW5_W, ybdev::devices::KindleProfile::DEFAULT_PW5_H);
+        let mut store = ybdev::devices::DeviceStore::load(&devices_path);
 
         loop {
             // While offline and Wi-Fi is still associating, sleep shortly (400ms)
@@ -209,7 +242,10 @@ fn spawn_poller_thread(
                     fail_count = 0;
                     if let Some(h) = &host {
                         let mut temp_conn = Conn::new(h, port);
-                        temp_conn.set_secret(secret.clone());
+                        let eff_sec =
+                            effective_secret(active_secret.as_ref(), &store, h, configured_host.as_ref(), conf_secret.as_ref());
+                        temp_conn.set_secret(eff_sec);
+                        temp_conn.set_kindle_id(Some(profile.id.clone()));
                         let path = format!("/source?set={}", mode);
                         let _ = temp_conn.request("POST", &path, &mut |_| true);
                         current_turn_idx = None;
@@ -230,7 +266,10 @@ fn spawn_poller_thread(
                     };
                     if let Some(h) = &host {
                         let mut temp_conn = Conn::new(h, port);
-                        temp_conn.set_secret(secret.clone());
+                        let eff_sec =
+                            effective_secret(active_secret.as_ref(), &store, h, configured_host.as_ref(), conf_secret.as_ref());
+                        temp_conn.set_secret(eff_sec);
+                        temp_conn.set_kindle_id(Some(profile.id.clone()));
                         let path = format!("/turn?idx={}", target_idx);
                         let mut body = Vec::new();
                         if let Ok(resp) = temp_conn.request("GET", &path, &mut |chunk| {
@@ -273,9 +312,10 @@ fn spawn_poller_thread(
             }
 
             if host.is_none() {
-                if let Some((h, _)) = protocol::discover(Duration::from_millis(500)) {
-                    AiStreamScreen::save_host(&h);
-                    host = Some(h);
+                store = ybdev::devices::DeviceStore::load(&devices_path);
+                if let Some((srv, tok)) = protocol::discover_trusted(Duration::from_millis(600), Some(&profile.id), &store) {
+                    host = Some(srv.ip);
+                    active_secret = tok;
                 } else {
                     fail_count += 1;
                     let _ = msg_tx.send(PollerMsg::ConnectionStatus(false));
@@ -303,8 +343,17 @@ fn spawn_poller_thread(
             }
 
             if !ok {
+                store = ybdev::devices::DeviceStore::load(&devices_path);
                 let mut fresh_conn = Conn::new(&current_host, port);
-                fresh_conn.set_secret(secret.clone());
+                let eff_sec = effective_secret(
+                    active_secret.as_ref(),
+                    &store,
+                    &current_host,
+                    configured_host.as_ref(),
+                    conf_secret.as_ref(),
+                );
+                fresh_conn.set_secret(eff_sec);
+                fresh_conn.set_kindle_id(Some(profile.id.clone()));
                 body.clear();
                 if let Ok(resp) = fresh_conn.request("GET", "/live", &mut |chunk| {
                     body.extend_from_slice(chunk);
@@ -318,14 +367,24 @@ fn spawn_poller_thread(
                     }
                 } else {
                     conn = None;
-                    if let Some((new_h, _p)) = protocol::discover(Duration::from_millis(400)) {
-                        host = Some(new_h);
+                    if let Some((srv, tok)) = protocol::discover_trusted(Duration::from_millis(400), Some(&profile.id), &store) {
+                        host = Some(srv.ip);
+                        active_secret = tok;
                     }
                 }
             }
 
             if ok {
                 fail_count = 0;
+                // Pin SERVER= only now: this host returned a successful
+                // (and, when it enforces one, secret-authenticated) /live
+                // response. Discovery alone never persists.
+                if let Some(h) = &host {
+                    if persisted_host.as_deref() != Some(h.as_str()) {
+                        AiStreamScreen::save_host(h);
+                        persisted_host = Some(h.clone());
+                    }
+                }
                 let _ = msg_tx.send(PollerMsg::ConnectionStatus(true));
                 if let Ok(turn_data) = parse_json_turn(&body) {
                     if turn_data.revision != last_rev {
@@ -2331,6 +2390,41 @@ mod tests {
         assert!(matches!(s.on_tick(), Action::Redraw));
         assert_eq!(s.turn.assistant, "Claude Code");
         assert_eq!(s.turn.status, "idle");
+    }
+
+    #[test]
+    fn conf_secret_only_reaches_configured_host() {
+        let mut store = ybdev::devices::DeviceStore::default();
+        store.add_or_update(ybdev::devices::TrustedDevice::new(
+            "mac_paired",
+            "Paired Mac",
+            "tok_mac",
+            Some("10.0.0.9"),
+            "all",
+        ));
+        let configured = Some("10.0.0.5".to_string());
+        let secret = Some("s3cret".to_string());
+        let (cfg, sec) = (configured.as_ref(), secret.as_ref());
+
+        // Anonymous discovery racer at an unknown IP: no active secret, no
+        // store match, not the configured host → NOTHING (not conf.secret).
+        assert_eq!(effective_secret(None, &store, "10.0.0.99", cfg, sec), None);
+
+        // Configured host without pairing: trust-by-config, secret flows.
+        assert_eq!(effective_secret(None, &store, "10.0.0.5", cfg, sec).as_deref(), Some("s3cret"));
+
+        // Paired control device at its stored IP: its token, not conf.secret.
+        assert_eq!(effective_secret(None, &store, "10.0.0.9", cfg, sec).as_deref(), Some("tok_mac"));
+
+        // Active (discovery-derived) secret takes priority on any host.
+        assert_eq!(
+            effective_secret(Some(&"tok_live".to_string()), &store, "10.0.0.1", cfg, sec).as_deref(),
+            Some("tok_live")
+        );
+
+        // No configured host at all: conf.secret reaches nobody new.
+        assert_eq!(effective_secret(None, &store, "10.0.0.9", None, sec).as_deref(), Some("tok_mac"));
+        assert_eq!(effective_secret(None, &store, "10.0.0.99", None, sec), None);
     }
 }
 

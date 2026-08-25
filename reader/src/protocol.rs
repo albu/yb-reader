@@ -58,6 +58,8 @@ pub struct Conn {
     /// on every request when set. None = wire-identical to the
     /// unauthenticated protocol.
     secret: Option<String>,
+    /// Optional Kindle identity sent as `X-YB-Kindle-Id`.
+    kindle_id: Option<String>,
 }
 
 impl Conn {
@@ -72,6 +74,7 @@ impl Conn {
             deadline: None,
             budget: REQUEST_BUDGET,
             secret: None,
+            kindle_id: None,
         }
     }
 
@@ -80,6 +83,11 @@ impl Conn {
     /// server opts in by requiring that header — see SECURITY.md.
     pub fn set_secret(&mut self, secret: Option<String>) {
         self.secret = secret;
+    }
+
+    /// Attach the Kindle device identifier; sent as `X-YB-Kindle-Id` on requests.
+    pub fn set_kindle_id(&mut self, kindle_id: Option<String>) {
+        self.kindle_id = kindle_id;
     }
 
     /// Override the per-request wall-clock budget (tests shrink it).
@@ -142,16 +150,17 @@ impl Conn {
             && !self.open() {
                 return Err(Stage::Connect);
             }
-        let req = match &self.secret {
-            Some(sec) => format!(
-                "{} {} HTTP/1.1\r\nHost: {}:{}\r\nX-YB-Secret: {}\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
-                method, path, self.host, self.port, sec
-            ),
-            None => format!(
-                "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
-                method, path, self.host, self.port
-            ),
-        };
+        let mut req = format!(
+            "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\nContent-Length: 0\r\n",
+            method, path, self.host, self.port
+        );
+        if let Some(sec) = &self.secret {
+            req.push_str(&format!("X-YB-Secret: {}\r\n", sec));
+        }
+        if let Some(kid) = &self.kindle_id {
+            req.push_str(&format!("X-YB-Kindle-Id: {}\r\n", kid));
+        }
+        req.push_str("\r\n");
         {
             let Some(s) = self.stream.as_mut() else {
                 return Err(Stage::Connect);
@@ -355,10 +364,92 @@ impl Conn {
     }
 }
 
-/// Broadcast a probe; the first ybmirror server to answer wins. The Mac's
-/// IP is the reply's *source address*; its tcp port comes from the reply
-/// text. Tries the limited broadcast first, then the local /24.
-pub fn discover(timeout: Duration) -> Option<(String, u16)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredServer {
+    pub ip: String,
+    pub port: u16,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+}
+
+pub fn parse_discovery_response(src_ip: &str, text: &str) -> Option<DiscoveredServer> {
+    let rest = text.strip_prefix("ybmirror")?.trim_start();
+    let (port_str, rest) = match rest.split_once(char::is_whitespace) {
+        Some((p, r)) => (p, r.trim_start()),
+        None => (rest, ""),
+    };
+    let port = port_str.parse::<u16>().ok()?;
+
+    let mut device_id = None;
+    let mut device_name = None;
+
+    let mut s = rest;
+    while !s.is_empty() {
+        if let Some(tail) = s.strip_prefix("id=") {
+            let (val, next) = parse_quoted_or_token(tail);
+            if !val.is_empty() {
+                device_id = Some(val);
+            }
+            s = next.trim_start();
+        } else if let Some(tail) = s.strip_prefix("name=") {
+            let (val, next) = parse_quoted_or_token(tail);
+            if !val.is_empty() {
+                device_name = Some(val);
+            }
+            s = next.trim_start();
+        } else {
+            // Skip unrecognized token until whitespace
+            s = match s.split_once(char::is_whitespace) {
+                Some((_, r)) => r.trim_start(),
+                None => "",
+            };
+        }
+    }
+
+    Some(DiscoveredServer {
+        ip: src_ip.to_string(),
+        port,
+        device_id,
+        device_name,
+    })
+}
+
+fn parse_quoted_or_token(s: &str) -> (String, &str) {
+    if let Some(stripped) = s.strip_prefix('"') {
+        if let Some(end_idx) = stripped.find('"') {
+            return (stripped[..end_idx].to_string(), &stripped[end_idx + 1..]);
+        }
+    }
+    match s.split_once(char::is_whitespace) {
+        Some((tok, rest)) => (tok.trim_matches('"').to_string(), rest),
+        None => (s.trim_matches('"').to_string(), ""),
+    }
+}
+
+/// Merge a discovered server response into the list of known servers.
+/// If an entry for (ip, port) already exists, fill in device_id / name when
+/// the new reply carries them and the existing entry lacks them.
+pub fn merge_reply(servers: &mut Vec<DiscoveredServer>, srv: DiscoveredServer) -> bool {
+    if let Some(existing) = servers.iter_mut().find(|e| e.ip == srv.ip && e.port == srv.port) {
+        let mut merged = false;
+        if existing.device_id.is_none() && srv.device_id.is_some() {
+            existing.device_id = srv.device_id;
+            merged = true;
+        }
+        if existing.device_name.is_none() && srv.device_name.is_some() {
+            existing.device_name = srv.device_name;
+            merged = true;
+        }
+        merged
+    } else {
+        servers.push(srv);
+        true
+    }
+}
+
+/// Broadcast discovery probes and return all servers that reply within timeout.
+pub fn discover_all(timeout: Duration, kindle_id: Option<&str>) -> Vec<DiscoveredServer> {
+    let mut servers: Vec<DiscoveredServer> = Vec::new();
     let mut targets = vec!["255.255.255.255".to_string()];
     // Best-effort local subnet broadcast, like the Lua version.
     if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
@@ -381,27 +472,100 @@ pub fn discover(timeout: Duration) -> Option<(String, u16)> {
         }
     }
 
+    let p1 = b"ybmirror-discover".to_vec();
+    let p2 = match kindle_id {
+        Some(id) if !id.trim().is_empty() => format!("ybmirror-discover id={}", id.trim()).into_bytes(),
+        _ => Vec::new(),
+    };
+    let payloads: Vec<&[u8]> = if p2.is_empty() {
+        vec![&p1]
+    } else {
+        vec![&p1, &p2]
+    };
+
     for bcast in targets {
         if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
             let _ = s.set_broadcast(true);
             let _ = s.set_read_timeout(Some(timeout));
-            if s.send_to(b"ybmirror-discover", (bcast.as_str(), DISCOVER_PORT))
-                .is_ok()
-            {
-                let mut buf = [0u8; 128];
-                if let Ok((n, src)) = s.recv_from(&mut buf) {
-                    let text = String::from_utf8_lossy(&buf[..n]);
-                    let port = text
-                        .strip_prefix("ybmirror")
-                        .and_then(|rest| rest.split_whitespace().next())
-                        .and_then(|p| p.parse::<u16>().ok())
-                        .unwrap_or(DEFAULT_PORT);
-                    return Some((src.ip().to_string(), port));
+            for payload in &payloads {
+                let _ = s.send_to(payload, (bcast.as_str(), DISCOVER_PORT));
+            }
+            let mut buf = [0u8; 256];
+            while let Ok((n, src)) = s.recv_from(&mut buf) {
+                let text = String::from_utf8_lossy(&buf[..n]);
+                if let Some(srv) = parse_discovery_response(&src.ip().to_string(), &text) {
+                    merge_reply(&mut servers, srv);
                 }
             }
         }
     }
-    None
+
+    servers
+}
+
+/// Decide whether a discovery reply has earned a stored control token.
+///
+/// Trust requires BOTH the reply's UDP source IP to resolve to a registered
+/// control-scope device AND the reply's claimed device_id to match that
+/// stored record. Neither alone is enough:
+///   - an IP is not an identity — DHCP hands a lapsed lease to the next
+///     host, so a bare legacy reply (`ybmirror 8765`, no `id=`) from a
+///     trusted IP gets NO token;
+///   - a claimed id is not proof — any LAN host can type `id=<victim>`.
+/// Only the pairing channel (PIN-verified /api/pair) mints trust.
+pub fn trust_reply(srv: &DiscoveredServer, store: &ybdev::devices::DeviceStore) -> Option<String> {
+    let dev = store.find_by_ip_for_control(&srv.ip)?;
+    match &srv.device_id {
+        Some(claimed) if &dev.id != claimed => None, // impersonator or reinstalled host
+        Some(_) => Some(dev.token.clone()),
+        None => None, // legacy id-less reply: IP alone is not identity
+    }
+}
+
+/// Discovers servers and resolves the target's credential from DeviceStore.
+/// Cross-checks the reply IP and device_id against registered control
+/// devices to prevent LAN hosts from harvesting tokens.
+pub fn discover_trusted(
+    timeout: Duration,
+    kindle_id: Option<&str>,
+    store: &ybdev::devices::DeviceStore,
+) -> Option<(DiscoveredServer, Option<String>)> {
+    let servers = discover_all(timeout, kindle_id);
+    if servers.is_empty() {
+        return None;
+    }
+
+    // 1. Attach a stored token only to replies that pass the trust check
+    if !store.devices.is_empty() {
+        for s in &servers {
+            if let Some(token) = trust_reply(s, store) {
+                return Some((s.clone(), Some(token)));
+            }
+        }
+        // Diagnosability, not a trust grant: a reply claiming a registered
+        // control id from an unrecognized IP is the DHCP-move signature.
+        // Without this, a lease reshuffle silently downgrades the device to
+        // unauthenticated with no on-device hint.
+        if let Some(s) = servers.iter().find(|s| {
+            s.device_id
+                .as_ref()
+                .is_some_and(|id| store.find_by_id_for_control(id).is_some())
+        }) {
+            static IP_MISMATCH_PLOGGED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !IP_MISMATCH_PLOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                ybdev::log::plog(&format!(
+                    "mirror: trusted device '{}' answered from new IP {} — open the receive page once from that device (or re-pair) to refresh its IP",
+                    s.device_id.as_deref().unwrap_or("?"),
+                    s.ip
+                ));
+            }
+        }
+    }
+
+    // 2. Fallback to first discovered server (unauthenticated)
+    let first = servers.first()?.clone();
+    Some((first, None))
 }
 
 #[cfg(test)]
@@ -529,5 +693,129 @@ mod tests {
             c.request("GET", "/frame.png", &mut sink).err(),
             Some(Stage::Status)
         );
+    }
+
+    #[test]
+    fn parses_discovery_replies() {
+        // Pure parser test — no UDP: broadcasting in a unit test both spams
+        // the LAN and flips this assertion to flaky on any machine that
+        // happens to run a yb-mirror responder. Trust routing is covered by
+        // trust_reply_requires_ip_and_id_match below.
+        let raw1 = "ybmirror 8765 id=mac_m3 name=\"MacBook\"";
+        let parsed1 = parse_discovery_response("192.168.1.10", raw1).unwrap();
+        assert_eq!(parsed1.ip, "192.168.1.10");
+        assert_eq!(parsed1.port, 8765);
+        assert_eq!(parsed1.device_id.as_deref(), Some("mac_m3"));
+        assert_eq!(parsed1.device_name.as_deref(), Some("MacBook"));
+
+        let raw2 = "ybmirror 9000";
+        let parsed2 = parse_discovery_response("192.168.1.20", raw2).unwrap();
+        assert_eq!(parsed2.ip, "192.168.1.20");
+        assert_eq!(parsed2.port, 9000);
+        assert_eq!(parsed2.device_id, None);
+
+        // Malformed port is rejected, not defaulted.
+        assert!(parse_discovery_response("192.168.1.30", "ybmirror notaport").is_none());
+        // Missing the protocol prefix is rejected.
+        assert!(parse_discovery_response("192.168.1.30", "8765").is_none());
+    }
+
+    #[test]
+    fn packet_order_discovery_merge() {
+        let legacy_reply = "ybmirror 8765";
+        let new_reply = "ybmirror 8765 id=mac_studio name=\"Studio Mac\"";
+
+        let mut servers: Vec<DiscoveredServer> = Vec::new();
+
+        // 1. Legacy reply arrives first
+        let srv1 = parse_discovery_response("192.168.1.50", legacy_reply).unwrap();
+        assert_eq!(srv1.device_id, None);
+        assert!(merge_reply(&mut servers, srv1));
+
+        // 2. New id-bearing reply arrives second: merge_reply upgrades the existing entry
+        let srv2 = parse_discovery_response("192.168.1.50", new_reply).unwrap();
+        assert_eq!(srv2.device_id.as_deref(), Some("mac_studio"));
+        assert!(merge_reply(&mut servers, srv2));
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].device_id.as_deref(), Some("mac_studio"));
+        assert_eq!(servers[0].device_name.as_deref(), Some("Studio Mac"));
+
+        // 3. A later name-only reply still fills a missing name (id already present)
+        let mut named: Vec<DiscoveredServer> = vec![DiscoveredServer {
+            ip: "192.168.1.60".to_string(),
+            port: 8765,
+            device_id: Some("mac_air".to_string()),
+            device_name: None,
+        }];
+        let name_only = parse_discovery_response("192.168.1.60", "ybmirror 8765 name=\"Mac Air\"").unwrap();
+        assert!(merge_reply(&mut named, name_only));
+        assert_eq!(named[0].device_name.as_deref(), Some("Mac Air"));
+        assert_eq!(named[0].device_id.as_deref(), Some("mac_air"));
+    }
+
+    #[test]
+    fn trust_reply_requires_ip_and_id_match() {
+        let mut store = ybdev::devices::DeviceStore::default();
+        store.add_or_update(ybdev::devices::TrustedDevice::new(
+            "victim_mac",
+            "Victim's Mac",
+            "tok_victim_secret",
+            Some("192.168.1.100"),
+            "all",
+        ));
+        store.add_or_update(ybdev::devices::TrustedDevice::new(
+            "phone_inbound",
+            "Phone",
+            "tok_phone",
+            Some("192.168.1.101"),
+            "inbound",
+        ));
+
+        // Attacker at another IP claiming the victim's id: no token.
+        let spoofed_id = DiscoveredServer {
+            ip: "192.168.1.200".to_string(),
+            port: 8765,
+            device_id: Some("victim_mac".to_string()),
+            device_name: None,
+        };
+        assert_eq!(trust_reply(&spoofed_id, &store), None);
+
+        // Legacy id-less reply from the victim's (or a reassigned) IP: IP
+        // alone is not an identity — no token.
+        let legacy_at_trusted_ip = DiscoveredServer {
+            ip: "192.168.1.100".to_string(),
+            port: 8765,
+            device_id: None,
+            device_name: None,
+        };
+        assert_eq!(trust_reply(&legacy_at_trusted_ip, &store), None);
+
+        // Right IP with the WRONG id (reinstalled host / impersonator): no token.
+        let wrong_id = DiscoveredServer {
+            ip: "192.168.1.100".to_string(),
+            port: 8765,
+            device_id: Some("someone_else".to_string()),
+            device_name: None,
+        };
+        assert_eq!(trust_reply(&wrong_id, &store), None);
+
+        // Inbound-scope device claiming control at its own IP with its own id: no token.
+        let inbound = DiscoveredServer {
+            ip: "192.168.1.101".to_string(),
+            port: 8765,
+            device_id: Some("phone_inbound".to_string()),
+            device_name: None,
+        };
+        assert_eq!(trust_reply(&inbound, &store), None);
+
+        // IP + id match on a control-scope device: token attached.
+        let legit = DiscoveredServer {
+            ip: "192.168.1.100".to_string(),
+            port: 8765,
+            device_id: Some("victim_mac".to_string()),
+            device_name: Some("Victim's Mac".to_string()),
+        };
+        assert_eq!(trust_reply(&legit, &store), Some("tok_victim_secret".to_string()));
     }
 }

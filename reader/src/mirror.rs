@@ -150,6 +150,10 @@ pub struct MirrorScreen {
     conf: ServerConf,
     conn: Option<Conn>,
     server: Option<String>,
+    /// SERVER= as currently pinned in mirror.conf — a discovered server is
+    /// persisted only after a successful exchange (see fetch), never on the
+    /// mere say-so of a UDP reply.
+    persisted_server: Option<String>,
     host: Option<String>,
     port: u16,
     frame_count: u32,
@@ -184,12 +188,14 @@ impl MirrorScreen {
     pub fn new(w: u32, h: u32) -> MirrorScreen {
         let conf = config::read(CONF_PATH);
         let preset = TurnPreset::from_conf(&conf.turn_keys);
+        let persisted_server = conf.server.clone();
         MirrorScreen {
             w,
             h,
             conf,
             conn: None,
             server: None,
+            persisted_server,
             host: None,
             port: protocol::DEFAULT_PORT,
             frame_count: 0,
@@ -212,18 +218,27 @@ impl MirrorScreen {
     }
 
     /// Connect, using the remembered address if it still works, discovering
-    /// the Mac otherwise.
+    /// the Mac otherwise with trusted device credentials.
     fn ensure_conn(&mut self) -> bool {
         if self.conn.is_some() {
             return true;
         }
         wifi::ensure_wifi();
 
+        let devices_path = ybdev::devices::devices_path();
+        let kindle_id_path = ybdev::devices::kindle_id_path();
+        let store = ybdev::devices::DeviceStore::load(&devices_path);
+        let profile = ybdev::devices::KindleProfile::load_or_create(&kindle_id_path, self.w, self.h);
+
         if let Some(s) = self.conf.server.clone() {
             let (host, port) = config::parse_server(&s);
             if let Some(host) = host {
                 let mut conn = Conn::new(&host, port);
-                conn.set_secret(self.conf.secret.clone());
+                let secret = self.conf.secret.clone().or_else(|| {
+                    store.find_by_ip_for_control(&host).map(|d| d.token.clone())
+                });
+                conn.set_secret(secret);
+                conn.set_kindle_id(Some(profile.id.clone()));
                 if conn.open() {
                     self.conn = Some(conn);
                     self.host = Some(host);
@@ -234,21 +249,39 @@ impl MirrorScreen {
             }
         }
 
-        match protocol::discover(Duration::from_secs(1)) {
-            Some((ip, port)) => {
-                let mut conn = Conn::new(&ip, port);
-                conn.set_secret(self.conf.secret.clone());
+        match protocol::discover_trusted(Duration::from_secs(1), Some(&profile.id), &store) {
+            Some((srv, trusted_token)) => {
+                let mut conn = Conn::new(&srv.ip, srv.port);
+                // conf.secret flows to the discovery fallback ONLY when it
+                // re-confirms the explicitly configured host (trust-by-config).
+                // An anonymous racer that merely answered the broadcast faster
+                // gets nothing — it must not collect a long-lived credential.
+                let configured_host = self
+                    .conf
+                    .server
+                    .as_deref()
+                    .and_then(|s| config::parse_server(s).0);
+                let secret = trusted_token.or_else(|| {
+                    (Some(&srv.ip) == configured_host.as_ref())
+                        .then(|| self.conf.secret.clone())
+                        .flatten()
+                });
+                conn.set_secret(secret);
+                conn.set_kindle_id(Some(profile.id.clone()));
                 if conn.open() {
-                    let server = format!("http://{}:{}", ip, port);
+                    let server = format!("http://{}:{}", srv.ip, srv.port);
                     self.conn = Some(conn);
-                    self.host = Some(ip);
-                    self.port = port;
+                    self.host = Some(srv.ip.clone());
+                    self.port = srv.port;
                     self.server = Some(server.clone());
-                    config::write_server(CONF_PATH, &server);
+                    // NOTE: SERVER= is NOT persisted here. Persistence happens
+                    // in fetch() after the host proves itself with a real
+                    // exchange — a rogue responder that merely wins the UDP
+                    // discovery race must stay session-scoped.
                     plog(&format!("discovered Mac at {}", server));
                     return true;
                 }
-                plog(&format!("discovered {} but connect failed", ip));
+                plog(&format!("discovered {} but connect failed", srv.ip));
             }
             None => {
                 plog(&format!(
@@ -265,8 +298,17 @@ impl MirrorScreen {
         let Some(host) = self.host.clone() else {
             return false;
         };
+        let devices_path = ybdev::devices::devices_path();
+        let kindle_id_path = ybdev::devices::kindle_id_path();
+        let store = ybdev::devices::DeviceStore::load(&devices_path);
+        let profile = ybdev::devices::KindleProfile::load_or_create(&kindle_id_path, self.w, self.h);
+
         let mut conn = Conn::new(&host, self.port);
-        conn.set_secret(self.conf.secret.clone());
+        let secret = self.conf.secret.clone().or_else(|| {
+            store.find_by_ip_for_control(&host).map(|d| d.token.clone())
+        });
+        conn.set_secret(secret);
+        conn.set_kindle_id(Some(profile.id));
         if !conn.open() {
             return false;
         }
@@ -360,6 +402,16 @@ impl MirrorScreen {
         ));
         match r {
             Some(resp) if resp.status == 200 => {
+                // Pin SERVER= only now — after the host proved itself with a
+                // real (and, when the server enforces it, secret-authenticated)
+                // exchange. A rogue first-responder can win one UDP race; it
+                // cannot fake a working frame stream.
+                if let Some(server) = &self.server {
+                    if self.persisted_server.as_deref() != Some(server.as_str()) {
+                        config::write_server(CONF_PATH, server);
+                        self.persisted_server = Some(server.clone());
+                    }
+                }
                 self.last_frame = Some(buf);
                 Some(resp)
             }

@@ -12,16 +12,16 @@ use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
 const PAD_PT: f32 = 18.0;
-const TITLE_BASE_PT: f32 = 30.0;
+const TITLE_BASE_PT: f32 = 28.0;
 const TITLE_SIZE_PT: f32 = 13.0;
-const INFO_BASE_PT: f32 = 47.0;
+const INFO_BASE_PT: f32 = 44.0;
 
-const CARD_TOP_PT: f32 = 66.0;
-const CARD_H_PT: f32 = 34.0;
-const CARD_GAP_PT: f32 = 8.0;
+const CARD_TOP_PT: f32 = 56.0;
+const CARD_H_PT: f32 = 32.0;
+const CARD_GAP_PT: f32 = 6.0;
 
-const REFRESH_TITLE_PT: f32 = 330.0;
-const REFRESH_PILL_PT: f32 = 346.0;
+const REFRESH_TITLE_PT: f32 = 334.0;
+const REFRESH_PILL_PT: f32 = 348.0;
 
 const DIM: u8 = 110;
 const INK: u8 = 0;
@@ -44,6 +44,8 @@ pub struct SystemScreen {
     /// wasteful flash walk. Refreshed on entry (the manager screen re-
     /// entering re-scans).
     ss_count: usize,
+    /// Cached count of paired trusted devices.
+    dev_count: usize,
 }
 
 fn draw_box_text(p: &mut Painter, r: Rect, size_pt: f32, color: u8, text: &str) {
@@ -60,6 +62,7 @@ impl SystemScreen {
             h: 1648,
             wifi_on: None,
             ss_count: 0,
+            dev_count: 0,
         }
     }
 
@@ -117,10 +120,12 @@ impl Default for SystemScreen {
 
 impl Screen for SystemScreen {
     fn on_enter(&mut self) -> Action {
-        // Snapshot the slow facts (lipc round trip, dir scans) once per
+        // Snapshot the slow facts (lipc round trip, dir scans, devices) once per
         // entry, not on every draw.
         self.wifi_on = crate::wifi::wifi_state();
         self.ss_count = crate::screensavers::scan().len();
+        let devices_path = ybdev::devices::devices_path();
+        self.dev_count = ybdev::devices::DeviceStore::load(&devices_path).devices.len();
         Action::RedrawFull
     }
 
@@ -158,7 +163,7 @@ impl Screen for SystemScreen {
         });
         p.text(pad, pt(INFO_BASE_PT), 7.0, DIM, &bits.join("   ·   "));
 
-        // Card stack: boot mode / Wi-Fi / reboot.
+        // Card stack: boot mode / Wi-Fi / devices / usb / screensavers / reboot / exit.
         let cw = w - 2 * pad;
         let ch = pt(CARD_H_PT);
         let gap = pt(CARD_GAP_PT);
@@ -193,6 +198,21 @@ impl Screen for SystemScreen {
             wifi_on,
         );
 
+        // Trusted devices card: shows count of paired laptops/phones.
+        let dev_label = match self.dev_count {
+            0 => "None yet".to_string(),
+            1 => "1 device".to_string(),
+            n => format!("{n} devices"),
+        };
+        let (dv, ds) = (dev_label.as_str(), "Tap to view or revoke");
+        SystemScreen::draw_card(
+            p,
+            Rect::new(pad, top + 2 * (ch + gap), cw, ch),
+            "TRUSTED DEVICES",
+            dv,
+            ds,
+            self.dev_count > 0,
+        );
         // USB mode: charging keeps the reader's own disk from being
         // exported under it (see usbmode.rs); transfer is stock drive
         // mode, opted into.
@@ -204,7 +224,7 @@ impl Screen for SystemScreen {
         };
         SystemScreen::draw_card(
             p,
-            Rect::new(pad, top + 2 * (ch + gap), cw, ch),
+            Rect::new(pad, top + 3 * (ch + gap), cw, ch),
             "USB MODE",
             uv,
             us,
@@ -213,13 +233,14 @@ impl Screen for SystemScreen {
 
         // Screensaver rotation manager — copy images over USB transfer
         // mode / web manager, then pick which ones rotate (screensavers.rs).
-        let (sv, ss) = match self.ss_count {
-            0 => ("None yet", "Copy images, tap to manage"),
-            n => (&*format!("{n} images"), "Tap to manage the rotation"),
+        let ss_label = match self.ss_count {
+            0 => "None yet".to_string(),
+            n => format!("{n} images"),
         };
+        let (sv, ss) = (ss_label.as_str(), "Tap to manage the rotation");
         SystemScreen::draw_card(
             p,
-            Rect::new(pad, top + 3 * (ch + gap), cw, ch),
+            Rect::new(pad, top + 4 * (ch + gap), cw, ch),
             "SCREENSAVERS",
             sv,
             ss,
@@ -229,7 +250,7 @@ impl Screen for SystemScreen {
         let next = if os_boot { "yb OS" } else { "Stock Kindle" };
         SystemScreen::draw_action_card(
             p,
-            Rect::new(pad, top + 4 * (ch + gap), cw, ch),
+            Rect::new(pad, top + 5 * (ch + gap), cw, ch),
             "REBOOT",
             "Reboot now",
             &format!("Next boot: {next}"),
@@ -248,7 +269,7 @@ impl Screen for SystemScreen {
         };
         SystemScreen::draw_card(
             p,
-            Rect::new(pad, top + 5 * (ch + gap), cw, ch),
+            Rect::new(pad, top + 6 * (ch + gap), cw, ch),
             "EXIT",
             ev,
             es,
@@ -326,20 +347,61 @@ impl Screen for SystemScreen {
                     return Action::Redraw;
                 }
 
+                // Trusted devices tap handler
+                let r_dev = Rect::new(pad, top + 2 * (ch + gap), cw, ch);
+                if r_dev.contains(x, y) {
+                    let devices_path = ybdev::devices::devices_path();
+                    let store = ybdev::devices::DeviceStore::load(&devices_path);
+                    if store.devices.is_empty() {
+                        return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                            "No Paired Devices",
+                            "Pair your phone or PC by scanning the QR code in 'Receive over Wi-Fi' or connecting with yb-mirror.",
+                            "OK",
+                            None,
+                            |_| Action::Pop,
+                        )));
+                    } else {
+                        let mut msg = String::new();
+                        for (i, d) in store.devices.iter().enumerate() {
+                            if i > 0 {
+                                msg.push('\n');
+                            }
+                            let ip_str = d.last_ip.as_deref().unwrap_or("Never connected");
+                            msg.push_str(&format!("{}. {} ({})", i + 1, d.name, ip_str));
+                        }
+                        return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                            &format!("Trusted Devices ({})", store.devices.len()),
+                            &format!("{}\n\nTap 'Revoke All' to forget all paired devices.", msg),
+                            "Revoke All",
+                            None,
+                            move |act| {
+                                if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
+                                    match ybdev::devices::with_store_mut(|s| {
+                                        s.devices.clear();
+                                    }) {
+                                        Ok(_) => plog("system: all trusted devices revoked"),
+                                        Err(e) => plog(&format!("system: revoke all FAILED: {}", e)),
+                                    }
+                                }
+                                Action::Pop
+                            },
+                        )));
+                    }
+                }
                 // USB mode: flip between charge-only (mass-storage kernel
                 // modules stay out) and stock transfer mode.
-                let r_usb = Rect::new(pad, top + 2 * (ch + gap), cw, ch);
+                let r_usb = Rect::new(pad, top + 3 * (ch + gap), cw, ch);
                 if r_usb.contains(x, y) {
                     crate::usbmode::set_transfer(!crate::usbmode::transfer_mode());
                     return Action::Redraw;
                 }
 
-                let r_ss = Rect::new(pad, top + 3 * (ch + gap), cw, ch);
+                let r_ss = Rect::new(pad, top + 4 * (ch + gap), cw, ch);
                 if r_ss.contains(x, y) {
                     return Action::Push(Box::new(crate::screensavers::ScreensaversScreen::new()));
                 }
 
-                let r_reboot = Rect::new(pad, top + 4 * (ch + gap), cw, ch);
+                let r_reboot = Rect::new(pad, top + 5 * (ch + gap), cw, ch);
                 if r_reboot.contains(x, y) {
                     // Plain `reboot` rides the same init cascade as a
                     // long-press power (TERM -> reader guard restores
@@ -363,7 +425,7 @@ impl Screen for SystemScreen {
                                 let spawned =
                                     std::process::Command::new("reboot").spawn().or_else(|_| {
                                         std::process::Command::new("/sbin/reboot").spawn()
-                                    });
+                                     });
                                 if spawned.is_err() {
                                     plog("system: reboot command failed");
                                 }
@@ -373,7 +435,7 @@ impl Screen for SystemScreen {
                     )));
                 }
 
-                let r_exit = Rect::new(pad, top + 5 * (ch + gap), cw, ch);
+                let r_exit = Rect::new(pad, top + 6 * (ch + gap), cw, ch);
                 if r_exit.contains(x, y) {
                     let (title, body, yes) = if crate::home::takeover() {
                         (

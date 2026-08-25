@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use qrcode::{Color, QrCode};
 use ybdev::config::{sanitize_fetch_name, urldecode};
+use ybdev::devices::{DeviceStore, KindleProfile};
 use ybdev::input::Gesture;
 use ybdev::log::{now_ms, plog};
 
@@ -87,6 +88,10 @@ const MAX_CONNS: usize = 8;
 /// See SECURITY.md.
 const PIN_LEN: usize = 6;
 const AUTH_FAIL_DELAY: Duration = Duration::from_millis(800);
+static FAILED_PAIR_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+static LAST_PAIR_FAIL_SECS: AtomicUsize = AtomicUsize::new(0);
+const MAX_PAIR_ATTEMPTS: usize = 10;
+const PAIR_LOCKOUT_WINDOW_SECS: usize = 300; // 5 minutes decay
 
 /// Digits only, unbiased: draws at or above the largest multiple of 10⁶
 /// are redrawn so `% 1_000_000` stays flat. Falls back to a time/pid mix
@@ -145,53 +150,189 @@ fn tokens_match(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// Every request — static page included — must present the pin, either
-/// as `?t=` (the QR URL supplies it once; the page echoes it thereafter,
-/// and the pairing form submits it) or `X-YB-Token:` (curl and scripts).
-fn authorized(session_pin: &str, query_str: &str, header_token: Option<&str>) -> bool {
+/// Every request — static page included — must present the session PIN
+/// or a registered persistent device token (via cookie, header, or ?t=).
+fn authorized(
+    session_pin: &str,
+    query_str: &str,
+    header_token: Option<&str>,
+    cookie_token: Option<&str>,
+    devices: &DeviceStore,
+) -> bool {
     let candidate = match header_token {
-        Some(h) => normalize_code(h),
-        None => match query_param(query_str, "t") {
-            Some(t) => normalize_code(&t),
-            None => return false,
-        },
+        Some(h) => Some(normalize_code(h)),
+        None => query_param(query_str, "t").map(|t| normalize_code(&t)),
     };
-    tokens_match(session_pin, &candidate)
+    if let Some(cand) = &candidate {
+        if tokens_match(session_pin, cand) {
+            return true;
+        }
+    }
+    if let Some(cand) = query_param(query_str, "t") {
+        if devices.find_by_token_for_inbound(&cand).is_some() {
+            return true;
+        }
+    }
+    if let Some(h) = header_token {
+        if devices.find_by_token_for_inbound(h.trim()).is_some() {
+            return true;
+        }
+    }
+    if let Some(c) = cookie_token {
+        if devices.find_by_token_for_inbound(c.trim()).is_some() {
+            return true;
+        }
+    }
+    false
 }
 
-/// Served to a browser that arrived without (or with a wrong) pin —
-/// typically someone typing the bare address instead of scanning the
-/// QR. One field, submits `GET /?t=…`, zero JavaScript.
+/// Served to a browser that arrived without (or with a wrong) pin / token.
+/// Provides a clean pairing form with optional persistent trust and mirror auto-link.
 const PAIR_PAGE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>yb-reader</title>
+<title>yb-reader &mdash; Pair Device</title>
 <style>
 body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
-       background:#0d0e12; color:#f3f4f6; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; }
-.card { background:#16181f; border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:28px 24px; width:min(340px,90vw); text-align:center; }
-h1 { font-size:1.05rem; margin:0 0 6px; }
-p { color:#9ca3af; font-size:.85rem; margin:0 0 18px; }
-input { width:100%; box-sizing:border-box; padding:12px; font-size:1.4rem; letter-spacing:.35em; text-align:center;
-        background:#0d0e12; color:#f3f4f6; border:1px solid rgba(255,255,255,.15); border-radius:10px; outline:none; }
-input:focus { border-color:#3b82f6; }
-button { margin-top:14px; width:100%; padding:11px; font-size:.95rem; font-weight:600;
-         background:#3b82f6; color:#fff; border:none; border-radius:10px; cursor:pointer; }
-.err { color:#ef4444; margin-top:12px; font-size:.8rem; }
+       background:#0d0e12; color:#f3f4f6; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Inter','Segoe UI',Roboto,sans-serif; padding:16px; box-sizing:border-box; }
+.card { background:#16181f; border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:32px 26px; width:min(380px,94vw); text-align:center; box-sizing:border-box; }
+.badge { display:inline-flex; align-items:center; gap:6px; font-size:0.75rem; font-weight:600; color:#9ca3af; background:rgba(255,255,255,0.06); padding:4px 10px; border-radius:20px; margin-bottom:14px; border:1px solid rgba(255,255,255,0.08); }
+.dot { width:6px; height:6px; border-radius:50%; background:#10b981; }
+h1 { font-size:1.25rem; font-weight:700; margin:0 0 6px; letter-spacing:-0.3px; }
+p { color:#9ca3af; font-size:.85rem; margin:0 0 20px; line-height:1.4; }
+input.pin { width:100%; box-sizing:border-box; padding:13px; font-size:1.5rem; letter-spacing:.35em; text-align:center;
+        background:#0d0e12; color:#f3f4f6; border:1px solid rgba(255,255,255,.15); border-radius:12px; outline:none; font-family:monospace; font-weight:700; }
+input.pin:focus { border-color:#3b82f6; }
+.opts { margin-top:18px; text-align:left; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.06); border-radius:12px; padding:14px; font-size:0.85rem; }
+.row { display:flex; align-items:flex-start; gap:10px; cursor:pointer; user-select:none; }
+.row input[type="checkbox"] { margin-top:3px; accent-color:#3b82f6; width:16px; height:16px; cursor:pointer; }
+.row-label { font-weight:600; color:#f3f4f6; display:block; margin-bottom:2px; }
+.row-sub { font-size:0.75rem; color:#9ca3af; }
+.dev-input { width:100%; box-sizing:border-box; margin-top:10px; padding:9px 12px; font-size:0.85rem; background:#0d0e12; color:#f3f4f6; border:1px solid rgba(255,255,255,0.12); border-radius:8px; outline:none; }
+.dev-input:focus { border-color:#3b82f6; }
+.mirror-opt { margin-top:12px; padding-top:10px; border-top:1px solid rgba(255,255,255,0.06); }
+button { margin-top:20px; width:100%; padding:12px; font-size:.95rem; font-weight:600;
+         background:#3b82f6; color:#fff; border:none; border-radius:12px; cursor:pointer; }
+button:hover { background:#2563eb; }
+.err { color:#ef4444; margin-top:12px; font-size:.8rem; display:none; }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>yb-reader</h1>
-  <p>Type the 6-digit code shown on your Kindle.</p>
-  <form action="/" method="get">
-    <input name="t" inputmode="numeric" pattern="[0-9 ]*" maxlength="9"
+  <div class="badge"><span class="dot"></span> <span id="kname">Kindle Paperwhite</span></div>
+  <h1>Pair &amp; Connect</h1>
+  <p>Type the 6-digit code shown on your Kindle screen.</p>
+  <form id="pairForm" action="/" method="get">
+    <input name="t" id="pinInput" class="pin" inputmode="numeric" pattern="[0-9 ]*" maxlength="9"
            autocomplete="off" autofocus placeholder="••••••" required>
-    <button>Open</button>
+    <div class="opts">
+      <label class="row">
+        <input type="checkbox" id="rememberBox" checked>
+        <div>
+          <span class="row-label">Trust this browser</span>
+          <span class="row-sub">Instant book uploads without entering PIN</span>
+        </div>
+      </label>
+      <input type="text" id="devName" class="dev-input" placeholder="Device Name (e.g. MacBook Pro)">
+      <div class="mirror-opt">
+        <label class="row">
+          <input type="checkbox" id="linkMirror">
+          <div>
+            <span class="row-label">Also link yb-mirror</span>
+            <span class="row-sub">Auto-sync token if running on this Mac</span>
+          </div>
+        </label>
+      </div>
+    </div>
+    <button id="submitBtn">Open Book Manager</button>
+    <div id="errMsg" class="err">Invalid code. Please check your Kindle screen.</div>
   </form>
 </div>
+<script>
+(function() {
+  const ua = navigator.userAgent;
+  let defName = 'Browser';
+  if (ua.includes('Macintosh')) defName = 'MacBook';
+  else if (ua.includes('Windows')) defName = 'Windows PC';
+  else if (ua.includes('Linux')) defName = 'Linux PC';
+  else if (ua.includes('iPhone')) defName = 'iPhone';
+  else if (ua.includes('iPad')) defName = 'iPad';
+  else if (ua.includes('Android')) defName = 'Android Device';
+  document.getElementById('devName').value = defName;
+
+  fetch('/api/handshake').then(r => r.json()).then(d => {
+    if (d && d.kindle_name) document.getElementById('kname').textContent = d.kindle_name;
+  }).catch(() => {});
+
+  const form = document.getElementById('pairForm');
+  const pinInput = document.getElementById('pinInput');
+  const rememberBox = document.getElementById('rememberBox');
+  const devName = document.getElementById('devName');
+  const linkMirror = document.getElementById('linkMirror');
+  const errMsg = document.getElementById('errMsg');
+  const submitBtn = document.getElementById('submitBtn');
+
+  form.addEventListener('submit', async function(e) {
+    if (!rememberBox.checked) {
+      return;
+    }
+    e.preventDefault();
+    errMsg.style.display = 'none';
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Pairing...';
+    try {
+      const pin = pinInput.value.replace(/\s+/g, '');
+      const name = devName.value.trim() || defName;
+      let devId = localStorage.getItem('yb_device_id') || ('dev_' + Math.random().toString(36).substring(2, 10));
+      localStorage.setItem('yb_device_id', devId);
+
+      const scope = linkMirror.checked ? 'all' : 'inbound';
+      const res = await fetch('/api/pair', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin, name, id: devId, scope })
+      });
+
+      if (!res.ok) {
+        if (res.status === 429) throw new Error('Too many failed attempts — wait 5 minutes or restart receive mode.');
+        if (res.status === 500) throw new Error('Pairing failed on the Kindle — try again.');
+        throw new Error('Invalid PIN');
+      }
+
+      const data = await res.json();
+      if (data && data.token) {
+        // No client-side document.cookie: the server's Set-Cookie already
+        // carries the token with HttpOnly (JS must not be able to read it
+        // back). data.token is used in-memory for the mirror-link POST only.
+        if (linkMirror.checked) {
+          try {
+            await fetch('http://localhost:8765/api/pair', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                token: data.token,
+                kindle_id: data.kindle_id,
+                kindle_name: data.kindle_name
+              })
+            }).catch(() => {});
+          } catch (_) {}
+        }
+
+        location.href = '/';
+        return;
+      }
+      throw new Error('Pairing failed');
+    } catch (err) {
+      errMsg.textContent = err.message || 'Invalid PIN code';
+      errMsg.style.display = 'block';
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Open Book Manager';
+    }
+  });
+})();
+</script>
 </body>
 </html>
 "#;
@@ -232,9 +373,18 @@ impl ReceiveServer {
         listener.set_nonblocking(true).ok()?;
         firewall_port(port, true);
 
+        FAILED_PAIR_ATTEMPTS.store(0, Ordering::Relaxed);
+        LAST_PAIR_FAIL_SECS.store(0, Ordering::Relaxed);
+
         let last = Arc::new(Mutex::new(None));
         let received = Arc::new(AtomicUsize::new(0));
         let token = Arc::new(generate_pin());
+        let profile = Arc::new(KindleProfile::load_or_create(
+            &ybdev::devices::kindle_id_path(),
+            KindleProfile::DEFAULT_PW5_W,
+            KindleProfile::DEFAULT_PW5_H,
+        ));
+
         // Live connection seats, handed out below and reclaimed by
         // ConnSlot's Drop.
         let active = Arc::new(AtomicUsize::new(0));
@@ -244,6 +394,7 @@ impl ReceiveServer {
         let active_t = Arc::clone(&active);
         let stop_t = Arc::clone(&stop);
         let token_t = Arc::clone(&token);
+        let profile_t = Arc::clone(&profile);
         let handle = std::thread::spawn(move || {
             while !stop_t.load(Ordering::Relaxed) {
                 match listener.accept() {
@@ -271,10 +422,11 @@ impl ReceiveServer {
                         let last = Arc::clone(&last_t);
                         let recv = Arc::clone(&recv_t);
                         let token = Arc::clone(&token_t);
+                        let profile = Arc::clone(&profile_t);
                         let slot = ConnSlot(Arc::clone(&active_t));
                         std::thread::spawn(move || {
                             let _slot = slot;
-                            handle_conn(stream, &last, &recv, &token);
+                            handle_conn(stream, &last, &recv, &token, &profile);
                         });
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
@@ -511,6 +663,7 @@ fn handle_conn(
     last: &Arc<Mutex<Option<String>>>,
     received: &Arc<AtomicUsize>,
     pin: &str,
+    profile: &Arc<KindleProfile>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
@@ -552,6 +705,8 @@ fn handle_conn(
     let mut expect_continue = false;
     let mut dup_cl = false;
     let mut hdr_token: Option<String> = None;
+    let mut cookie_token: Option<String> = None;
+
     for line in lines {
         let Some((k, v)) = line.split_once(':') else {
             continue;
@@ -567,8 +722,20 @@ fn handle_conn(
             }
         } else if k == "expect" && v.trim().eq_ignore_ascii_case("100-continue") {
             expect_continue = true;
-        } else if k == "x-yb-token" {
+        } else if k == "x-yb-token" || k == "x-yb-device-token" {
             hdr_token = Some(v.trim().to_string());
+        } else if k == "authorization" {
+            if let Some(rest) = v.trim().strip_prefix("Bearer ") {
+                hdr_token = Some(rest.trim().to_string());
+            }
+        } else if k == "cookie" {
+            for pair in v.split(';') {
+                if let Some((ck, cv)) = pair.trim().split_once('=') {
+                    if ck.trim() == "yb_token" {
+                        cookie_token = Some(cv.trim().to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -585,17 +752,99 @@ fn handle_conn(
 
     let (raw_path, query_str) = path.split_once('?').unwrap_or((path, ""));
 
-    // Gate before any dispatch: the firewall rule only scopes exposure
-    // to the LAN; this scopes it to whoever can present the pin. A miss
-    // parks its connection seat for a beat — through MAX_CONNS that is
-    // the whole anti-guessing budget, so it runs before anything else.
-    if !authorized(pin, query_str, hdr_token.as_deref()) {
+    // Handshake info is available to any LAN client to discover device details.
+    if method == "GET" && raw_path == "/api/handshake" {
+        let free_gb = ybdev::sysinfo::storage_free_gb().unwrap_or(0.0);
+        let resp = format!(
+            "{{\"kindle_id\":\"{}\",\"kindle_name\":\"{}\",\"width\":{},\"height\":{},\"bpp\":{},\"free_gb\":{:.1}}}",
+            ybdev::devices::json_escape(&profile.id),
+            ybdev::devices::json_escape(&profile.name),
+            profile.width,
+            profile.height,
+            profile.bpp,
+            free_gb
+        );
+        respond(&mut stream, 200, "OK", "application/json; charset=utf-8", &resp);
+        return;
+    }
+
+    // Pairing endpoint: verifies PIN, generates persistent device token and sets cookie.
+    if method == "POST" && raw_path == "/api/pair" {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as usize)
+            .unwrap_or(0);
+        let last_fail = LAST_PAIR_FAIL_SECS.load(Ordering::Relaxed);
+        if last_fail != 0 && now.saturating_sub(last_fail) > PAIR_LOCKOUT_WINDOW_SECS {
+            FAILED_PAIR_ATTEMPTS.store(0, Ordering::Relaxed);
+            LAST_PAIR_FAIL_SECS.store(0, Ordering::Relaxed);
+        }
+        if FAILED_PAIR_ATTEMPTS.load(Ordering::Relaxed) >= MAX_PAIR_ATTEMPTS {
+            plog("receive: pairing locked out due to too many failed attempts");
+            std::thread::sleep(AUTH_FAIL_DELAY);
+            respond(&mut stream, 429, "Too Many Requests", "application/json", "{\"error\":\"too many failed attempts - locked out\"}");
+            return;
+        }
+
+        let body_bytes = read_small_body(&mut stream, &buf[hdr_end + 4..], content_length, 16384).unwrap_or_default();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        let cand_pin = extract_param_str(&body_str, "pin").unwrap_or_default();
+        if !tokens_match(pin, &normalize_code(&cand_pin)) {
+            FAILED_PAIR_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+            LAST_PAIR_FAIL_SECS.store(now, Ordering::Relaxed);
+            static PAIR_MISS_PLOGGED: AtomicBool = AtomicBool::new(false);
+            if !PAIR_MISS_PLOGGED.swap(true, Ordering::Relaxed) {
+                plog("receive: pair request with invalid pin");
+            }
+            std::thread::sleep(AUTH_FAIL_DELAY);
+            respond(&mut stream, 403, "Forbidden", "application/json", "{\"error\":\"invalid pin\"}");
+            return;
+        }
+        FAILED_PAIR_ATTEMPTS.store(0, Ordering::Relaxed);
+        LAST_PAIR_FAIL_SECS.store(0, Ordering::Relaxed);
+
+        let dev_name = extract_param_str(&body_str, "name").unwrap_or_else(|| "Browser".to_string());
+        let dev_id = extract_param_str(&body_str, "id").unwrap_or_else(|| format!("dev_{}", ybdev::devices::generate_random_hex(4)));
+        let scope = match extract_param_str(&body_str, "scope").as_deref() {
+            Some("all") => "all".to_string(),
+            _ => "inbound".to_string(),
+        };
+        let new_token = ybdev::devices::generate_token();
+        let peer_ip = stream.peer_addr().ok().map(|a| a.ip().to_string());
+        let dev = ybdev::devices::TrustedDevice::new(&dev_id, &dev_name, &new_token, peer_ip.as_deref(), &scope);
+        if let Err(e) = ybdev::devices::with_store_mut(|store| {
+            store.add_or_update(dev);
+        }) {
+            // Returning 200 here would hand the client a token that was never
+            // persisted — it would 403 on every subsequent request.
+            plog(&format!("receive: failed to persist paired device: {}", e));
+            respond(&mut stream, 500, "Internal Server Error", "application/json", "{\"error\":\"could not persist pairing\"}");
+            return;
+        }
+        plog(&format!("receive: device paired successfully ('{}')", dev_name));
+        let resp_body = format!(
+            "{{\"status\":\"ok\",\"token\":\"{}\",\"device_id\":\"{}\",\"kindle_name\":\"{}\",\"kindle_id\":\"{}\"}}",
+            ybdev::devices::json_escape(&new_token),
+            ybdev::devices::json_escape(&dev_id),
+            ybdev::devices::json_escape(&profile.name),
+            ybdev::devices::json_escape(&profile.id)
+        );
+        let cookie_hdr = format!("Set-Cookie: yb_token={}; Path=/; Max-Age=315360000; SameSite=Lax; HttpOnly", new_token);
+        respond_with_headers(&mut stream, 200, "OK", "application/json; charset=utf-8", &resp_body, &[&cookie_hdr]);
+        return;
+    }
+
+    // Gate before dispatch: always reload store from disk so UI revokes take immediate effect.
+    let current_store = DeviceStore::load(&ybdev::devices::devices_path());
+    let is_auth = authorized(pin, query_str, hdr_token.as_deref(), cookie_token.as_deref(), &current_store);
+
+    if !is_auth {
         // Log the first miss only: a sustained brute force must leave a
         // trace, but one plog line per guess would burn flash writes for
         // noise (same latch pattern as SHED_PLOGGED).
         static AUTH_MISS_PLOGGED: AtomicBool = AtomicBool::new(false);
         if !AUTH_MISS_PLOGGED.swap(true, Ordering::Relaxed) {
-            plog("receive: auth miss — wrong or missing pin (further misses not logged)");
+            plog("receive: auth miss — wrong or missing pin/token (further misses not logged)");
         }
         std::thread::sleep(AUTH_FAIL_DELAY);
         if method == "GET" && (raw_path == "/" || raw_path == "/index.html") {
@@ -604,6 +853,27 @@ fn handle_conn(
             respond(&mut stream, 403, "Forbidden", "text/plain", "forbidden");
         }
         return;
+    }
+
+    // Refresh client last_ip if authorized via persistent device token.
+    // Gate on the freshly-loaded store: only a real device token can match,
+    // so guest-PIN sessions (whose ?t= is the 6-digit PIN) never touch the
+    // flash-write path. refresh_device_ip persists only when the IP changed.
+    let q_tok = query_param(query_str, "t");
+    let used_token = cookie_token.as_deref()
+        .or(hdr_token.as_deref())
+        .or(q_tok.as_deref());
+    if let (Some(tok), Ok(peer_addr)) = (used_token, stream.peer_addr()) {
+        if current_store.find_by_token(tok).is_some() {
+            let peer_ip = peer_addr.ip().to_string();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Err(e) = ybdev::devices::refresh_device_ip(&ybdev::devices::devices_path(), tok, &peer_ip, now) {
+                plog(&format!("receive: device ip refresh failed: {}", e));
+            }
+        }
     }
 
     if method == "GET" {
@@ -719,7 +989,7 @@ fn handle_conn(
                 json.push('"');
             }
             let free_gb = ybdev::sysinfo::storage_free_gb().unwrap_or(0.0);
-            json.push_str(&format!("],\"free_gb\":{:.2}", free_gb));
+            json.push_str(&format!("],\"free_gb\":{:.2},\"kindle_name\":\"{}\"", free_gb, ybdev::devices::json_escape(&profile.name)));
             json.push('}');
 
             respond(
@@ -1248,16 +1518,70 @@ fn write_body(
 }
 
 fn respond(stream: &mut TcpStream, code: u16, reason: &str, ctype: &str, body: &str) {
-    let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    respond_with_headers(stream, code, reason, ctype, body, &[]);
+}
+
+fn respond_with_headers(
+    stream: &mut TcpStream,
+    code: u16,
+    reason: &str,
+    ctype: &str,
+    body: &str,
+    extra_headers: &[&str],
+) {
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         code,
         reason,
         ctype,
         body.len()
     );
+    for h in extra_headers {
+        head.push_str(h);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body.as_bytes());
     let _ = stream.flush();
+}
+
+fn read_small_body(
+    stream: &mut TcpStream,
+    initial: &[u8],
+    content_length: Option<u64>,
+    max_len: usize,
+) -> Option<Vec<u8>> {
+    let mut body = initial.to_vec();
+    let needed = match content_length {
+        Some(cl) => {
+            if cl as usize > max_len {
+                return None;
+            }
+            cl as usize
+        }
+        None => initial.len(),
+    };
+    while body.len() < needed {
+        let mut chunk = [0u8; 1024];
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                body.extend_from_slice(&chunk[..n]);
+                if body.len() > max_len {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(body)
+}
+
+fn extract_param_str(body: &str, key: &str) -> Option<String> {
+    if let Some(v) = ybdev::devices::extract_json_str(body, key) {
+        return Some(v);
+    }
+    query_param(body, key)
 }
 
 fn current_ssid() -> Option<String> {
@@ -1563,6 +1887,7 @@ impl Screen for ReceiveScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ybdev::devices::TrustedDevice;
 
     /// The socket tests mutate process-global env (YB_SAVE_DIR / YB_SS_DIR)
     /// and start real listeners, so they must not run concurrently.
@@ -2076,13 +2401,146 @@ mod tests {
         assert!(!tokens_match("482913", "482914"));
         assert!(!tokens_match("482913", "4829"));
 
+        let mut devices = DeviceStore::default();
+        devices.add_or_update(TrustedDevice::new(
+            "test_dev",
+            "Test Device",
+            "tok_sec_trusted_token_123",
+            None,
+            "inbound",
+        ));
+
         // Gate decisions: query param, header, transcription tolerance,
-        // wrong value, absence.
-        assert!(authorized("482913", "dir=&t=482913", None));
-        assert!(authorized("482913", "dir=x&t=482%20913", None));
-        assert!(authorized("482913", "", Some(" 482-913")));
-        assert!(!authorized("482913", "dir=&t=111111", None));
-        assert!(!authorized("482913", "dir=&root=books", None));
+        // wrong value, absence, device store tokens, cookie tokens.
+        assert!(authorized("482913", "dir=&t=482913", None, None, &devices));
+        assert!(authorized("482913", "dir=x&t=482%20913", None, None, &devices));
+        assert!(authorized("482913", "", Some(" 482-913"), None, &devices));
+        assert!(authorized("482913", "", None, Some("tok_sec_trusted_token_123"), &devices));
+        assert!(authorized("482913", "dir=&t=tok_sec_trusted_token_123", None, None, &devices));
+        assert!(!authorized("482913", "dir=&t=111111", None, None, &devices));
+        assert!(!authorized("482913", "dir=&root=books", None, None, &devices));
+    }
+
+    #[test]
+    fn handshake_and_pairing_api() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("yb_handshake_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("YB_SAVE_DIR", dir.to_str().unwrap());
+        let dev_file = dir.join("devices.json");
+        let kindle_file = dir.join("kindle_id.json");
+        std::env::set_var("YB_DEVICES_PATH", dev_file.to_str().unwrap());
+        std::env::set_var("YB_KINDLE_ID_PATH", kindle_file.to_str().unwrap());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut srv = ReceiveServer::start(Arc::clone(&stop)).expect("server");
+        let port = srv.port();
+        let pin = srv.token().to_string();
+
+        // 1. GET /api/handshake works unauthenticated
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(b"GET /api/handshake HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"), "{}", resp_str);
+        assert!(resp_str.contains("kindle_id"));
+        assert!(resp_str.contains("kindle_name"));
+
+        // 2. POST /api/pair with valid PIN registers device
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let pair_body = format!("{{\"pin\":\"{}\",\"name\":\"MacBook Air\",\"id\":\"mac_air_1\"}}", pin);
+        let req = format!(
+            "POST /api/pair HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            pair_body.len(),
+            pair_body
+        );
+        c.write_all(req.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"), "{}", resp_str);
+        assert!(resp_str.contains("Set-Cookie: yb_token="));
+        assert!(resp_str.contains("HttpOnly"), "session cookie must be HttpOnly");
+        let token = ybdev::devices::extract_json_str(&resp_str, "token").unwrap();
+
+        // 3. GET / with cookie token is immediately authorized (200, not 403 pairing page)
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req = format!("GET / HTTP/1.1\r\nHost: t\r\nCookie: yb_token={}\r\n\r\n", token);
+        c.write_all(req.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"), "{}", resp_str);
+        assert!(resp_str.contains("Kindle File Manager"));
+
+        // 4. Revoking devices on disk immediately blocks the token on the running server
+        let empty_store = DeviceStore::default();
+        empty_store.save(dev_file.to_str().unwrap()).unwrap();
+
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req = format!("GET / HTTP/1.1\r\nHost: t\r\nCookie: yb_token={}\r\n\r\n", token);
+        c.write_all(req.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 403 Forbidden"), "revoked token was not rejected: {}", resp_str);
+
+        // 5. Pairing rate limiter locks out after too many failed attempts
+        let now_sec = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as usize)
+            .unwrap_or(0);
+        LAST_PAIR_FAIL_SECS.store(now_sec, Ordering::Relaxed);
+        FAILED_PAIR_ATTEMPTS.store(MAX_PAIR_ATTEMPTS, Ordering::Relaxed);
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let bad_body = "{\"pin\":\"000000\",\"name\":\"Attacker\"}";
+        let req = format!(
+            "POST /api/pair HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            bad_body.len(),
+            bad_body
+        );
+        c.write_all(req.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 429 Too Many Requests"), "lockout failed: {}", resp_str);
+
+        // 6. Pairing after Revoke All registers new device without resurrecting the revoked one
+        FAILED_PAIR_ATTEMPTS.store(0, Ordering::Relaxed);
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let pair_body2 = format!("{{\"pin\":\"{}\",\"name\":\"Linux PC\",\"id\":\"linux_pc_1\"}}", pin);
+        let req2 = format!(
+            "POST /api/pair HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            pair_body2.len(),
+            pair_body2
+        );
+        c.write_all(req2.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str2 = String::from_utf8_lossy(&resp);
+        assert!(resp_str2.starts_with("HTTP/1.1 200 OK"), "{}", resp_str2);
+        let token2 = ybdev::devices::extract_json_str(&resp_str2, "token").unwrap();
+
+        // New token works
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req = format!("GET / HTTP/1.1\r\nHost: t\r\nCookie: yb_token={}\r\n\r\n", token2);
+        c.write_all(req.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(resp.starts_with(b"HTTP/1.1 200 OK"));
+
+        // Old revoked token is still rejected (never resurrected)
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let req = format!("GET / HTTP/1.1\r\nHost: t\r\nCookie: yb_token={}\r\n\r\n", token);
+        c.write_all(req.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(resp.starts_with(b"HTTP/1.1 403 Forbidden"), "revoked token was resurrected!");
+
+        srv.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -530,7 +530,7 @@ body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webki
       <div class="brand-title">yb-reader</div>
       <div class="device-tag">
         <div class="status-dot"></div>
-        <span>Kindle Paperwhite</span>
+        <span id="kindleNameTag">Kindle Paperwhite</span>
       </div>
     </div>
 
@@ -710,12 +710,15 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-// Session credential: arrived via the QR URL (?t=…) or the pairing form —
-// either way it is in location.search. Every API call and download link
-// must echo it back; the server rejects anything else.
-const TOKEN = new URLSearchParams(location.search).get('t') || '';
+const urlToken = new URLSearchParams(location.search).get('t');
+
 function withToken(path) {
-  return path + (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(TOKEN);
+  // Only append ?t= if we explicitly arrived with a guest session PIN in query string.
+  // Paired devices rely on the cookie and do not leak credentials into URLs/history.
+  if (urlToken) {
+    return path + (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(urlToken);
+  }
+  return path;
 }
 
 async function load(dir = '') {
@@ -729,6 +732,10 @@ async function load(dir = '') {
     
     if (data.free_gb !== undefined) {
       storageText.textContent = data.free_gb.toFixed(1) + ' GB Free';
+    }
+    if (data.kindle_name) {
+      const tag = document.getElementById('kindleNameTag');
+      if (tag) tag.textContent = data.kindle_name;
     }
     
     renderBreadcrumbs(data.current_dir);
