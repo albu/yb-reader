@@ -183,6 +183,20 @@ reason.
 - The Wi-Fi manual-off latch outranks wake intents and survives reboot.
 - The persistent log never receives credentials (the receive PIN is
   explicitly excluded).
+- A hang watchdog (separate process) SIGKILLs a reader whose heartbeat
+  went stale while awake. SIGKILL skips the guard's restore: a leaked
+  iptables ACCEPT rule without a listener is inert, and the respawned
+  instance re-derives USB/Wi-Fi state; the frontlight may stay where the
+  hung instance left it. Accepted — the alternative is an unrevivable
+  hung device.
+- USB mass storage is **fully stock and always armed** — never
+  manipulated from our side, so plug = Kindle drive in any state (the
+  absolute recovery floor). Consequence, deliberate: the drive —
+  including the reader's own launch path (flag, boot.sh, binary) — is
+  exposed to any computer the device is plugged into, at any time, and
+  plugging kills the running reader (the export unmounts its home
+  partition; boot.sh manages the aftermath). Credential material does
+  not live there (see token storage above).
 
 ## Reporting
 

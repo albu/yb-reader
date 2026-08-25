@@ -37,6 +37,14 @@ pub struct App {
     /// Lets the app observe async-signal-safe flags (a TERM/INT handoff)
     /// from normal context instead of inside a signal handler.
     quit_check: Option<Box<dyn Fn() -> bool>>,
+    /// Called every loop iteration: proof the loop itself is alive.
+    /// A device watchdog (outside this process) reads the touch it makes
+    /// to tell a hung UI from a suspended one.
+    heartbeat: Option<Box<dyn Fn()>>,
+    /// Called when the top of the stack enters/leaves the sleep screen.
+    /// Lets the app persist "suspending" state so a boot-time audit can
+    /// tell a battery death in sleep from an awake hang.
+    sleep_state: Option<Box<dyn Fn(bool)>>,
 }
 
 /// A wall-clock gap this much larger than the poll budget means the SoC
@@ -46,6 +54,13 @@ pub struct App {
 /// absorbs scheduler jitter and small clock steps.
 pub fn gap_is_suspend(expected: std::time::Duration, wall: std::time::Duration) -> bool {
     wall > expected + std::time::Duration::from_secs(5)
+}
+
+/// Pure edge, host-testable: the sleep_state hook fires only on
+/// transitions — `Some(true)` entering the sleep screen, `Some(false)`
+/// leaving it, `None` when nothing changed.
+pub fn sleep_edge(prev: bool, cur: bool) -> Option<bool> {
+    (prev != cur).then_some(cur)
 }
 
 /// No input for this long → the sleep screen (whose tick suspends).
@@ -72,7 +87,14 @@ impl App {
             overlay: None,
             resume: None,
             quit_check: None,
+            heartbeat: None,
+            sleep_state: None,
         })
+    }
+
+    /// Is the sleep screen currently on top of the stack?
+    fn is_sleep_top(&self) -> bool {
+        self.stack.last().is_some_and(|s| s.is_sleep())
     }
 
     /// Replace the edge-gesture overlay with a custom screen factory.
@@ -93,6 +115,21 @@ impl App {
         self
     }
 
+    /// Called every loop iteration: the app's liveness proof. Whatever
+    /// it touches (a tmpfs mtime) is what an external watchdog reads.
+    pub fn with_heartbeat(mut self, f: Box<dyn Fn()>) -> App {
+        self.heartbeat = Some(f);
+        self
+    }
+
+    /// Called with `true` when the sleep screen becomes the top of the
+    /// stack and `false` when it leaves. Edges only — a sleeping device
+    /// must not pay a call per 300 ms tick.
+    pub fn with_sleep_state(mut self, f: Box<dyn Fn(bool)>) -> App {
+        self.sleep_state = Some(f);
+        self
+    }
+
     pub fn dims(&self) -> (u32, u32) {
         (self.panel.width, self.panel.height)
     }
@@ -109,12 +146,20 @@ impl App {
         // the idle measurement across exactly the sleeps this timer
         // exists to enforce.
         let mut last_input = std::time::SystemTime::now();
+        // Sleep-state edge tracking for the sleep_state hook. Starts
+        // false: the root screen is never the sleep screen.
+        let mut asleep = false;
         while !self.stack.is_empty() {
             // A TERM/INT flag (async-signal-safe store in a signal
             // handler) winds the loop down here, so the app's restore
             // runs from normal context — never inside a signal frame.
             if self.quit_check.as_ref().is_some_and(|f| f()) {
                 break;
+            }
+            // Liveness proof for the external watchdog — same spot as
+            // the quit poll, so a loop that can check TERM can touch.
+            if let Some(f) = &self.heartbeat {
+                f();
             }
             let interval = self
                 .stack
@@ -184,6 +229,23 @@ impl App {
                 && !self.apply(Action::Push(Box::new(crate::widgets::SleepScreen::new()))) {
                     break;
                 }
+            // Sleep-state edges fire here, at iteration end, so both the
+            // power-button dispatch and the idle-timer push above are
+            // seen. Mid-iteration breaks (apply → false) leave the
+            // marker alone; the post-loop reset below covers the exit.
+            if let Some(edge) = sleep_edge(asleep, self.is_sleep_top()) {
+                asleep = edge;
+                if let Some(f) = &self.sleep_state {
+                    f(edge);
+                }
+            }
+        }
+        // The app is on its way out; by definition it no longer sleeps.
+        // Without this, an exit from inside the sleep screen (TERM while
+        // suspended) would leave a stale "sleeping" marker that a later
+        // boot audit could misread.
+        if let Some(f) = &self.sleep_state {
+            f(false);
         }
         self.panel.refresh_full();
     }
@@ -354,6 +416,14 @@ mod tests {
         assert!(gap_is_suspend(e, e + Duration::from_secs(6)));
         // A suspend-scale gap: yes.
         assert!(gap_is_suspend(e, Duration::from_secs(900)));
+    }
+
+    #[test]
+    fn sleep_edges_fire_only_on_transitions() {
+        assert_eq!(sleep_edge(false, true), Some(true)); // entering sleep
+        assert_eq!(sleep_edge(true, false), Some(false)); // waking
+        assert_eq!(sleep_edge(false, false), None); // awake stays quiet
+        assert_eq!(sleep_edge(true, true), None); // asleep stays quiet
     }
 
     /// Screen that records its lifecycle calls into a shared log and never

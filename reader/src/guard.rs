@@ -66,10 +66,8 @@ fn restore() {
     }
     // Pre-sleep frontlight (if we died sleeping with it zeroed), Wi-Fi
     // back to the framework default, and the receive listener's firewall
-    // rule plus any half-written upload gone. USB mass-storage comes
-    // back too — whoever runs next (stock framework on the exit-42
-    // handoff, the launcher in stock mode) must find working drive mode.
+    // rule plus any half-written upload gone. USB is left entirely
+    // alone — stock stack, plug = drive, always (see watchdog.rs).
     yui::widgets::emergency_wake_restore();
     crate::receive::emergency_cleanup();
-    crate::usbmode::restore_modules();
 }

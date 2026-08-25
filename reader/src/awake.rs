@@ -167,15 +167,7 @@ fn loop_fn() {
         if vbus_plugged(prev_vbus, vbus) {
             plog("awake: usb power — re-asserting frontlight (charge-and-read)");
             reassert_frontlight();
-            // The plug edge is exactly when the USB state changes —
-            // heal it now instead of waiting out the rest of the tick.
-            crate::usbmode::tick();
         }
-        // USB healer pass: what used to be a dedicated 1 Hz watchdog
-        // thread. Its work is edge-driven and rare; 5 s cadence (plus
-        // the immediate edge call above) covers everything a human can
-        // perceive, for 1/5 the wakeup rate.
-        crate::usbmode::tick();
         prev_vbus = vbus;
         tick = tick.wrapping_add(1);
         if !tick.is_multiple_of(6) {

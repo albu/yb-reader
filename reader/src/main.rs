@@ -8,6 +8,7 @@ mod backend;
 mod backend_mupdf;
 mod backend_yread;
 mod books;
+mod bootaudit;
 mod cache;
 mod chrome;
 mod confirm_dialog;
@@ -34,8 +35,8 @@ mod selection;
 mod split;
 mod system;
 mod toc_dialog;
-mod usbmode;
 mod vocab;
+mod watchdog;
 mod wifi;
 mod word_dialog;
 
@@ -61,6 +62,27 @@ fn main() {
         i += 1;
     }
     log::set_path(&log_path);
+    // Service subcommands dispatch before any hardware is touched: the
+    // watchdog and boot audit must survive (and stay cheap) even when
+    // the panel/input setup paths of a broken build would not. They are
+    // the recovery rungs for exactly that binary.
+    if args.len() >= 2 {
+        match args[1].as_str() {
+            "bootaudit" => std::process::exit(bootaudit::run()),
+            "--watchdog" => {
+                let pid = args
+                    .get(2)
+                    .and_then(|p| p.parse::<i32>().ok())
+                    .unwrap_or(0);
+                if pid <= 0 {
+                    eprintln!("yb-reader: --watchdog <pid>");
+                    std::process::exit(2);
+                }
+                std::process::exit(watchdog::run(pid));
+            }
+            _ => {}
+        }
+    }
     // From here on, any panic or TERM/INT leaves a reason in the log and
     // the hardware (frontlight, Wi-Fi, firewall) in a sane state.
     guard::install();
@@ -103,12 +125,24 @@ fn main() {
     }
     .with_edge_overlay(Box::new(|| Box::new(CurtainScreen::new())))
     .with_resume(Box::new(awake::on_resume))
-    .with_quit_check(Box::new(guard::pending));
+    .with_quit_check(Box::new(guard::pending))
+    .with_heartbeat(Box::new(watchdog::heartbeat_touch))
+    .with_sleep_state(Box::new(|asleep| {
+        // Persistent sleep-state marker: lets the boot audit tell an
+        // overnight battery death in suspend from an awake hang. One
+        // tiny write per sleep/wake edge — never per tick.
+        let marker = std::path::Path::new(bootaudit::STATE_DIR).join("sleeping");
+        if asleep {
+            let _ = std::fs::create_dir_all(bootaudit::STATE_DIR);
+            let _ = std::fs::write(&marker, b"");
+        } else {
+            let _ = std::fs::remove_file(&marker);
+        }
+    }));
     let (w, h) = app.dims();
 
     awake::spawn();
     awake::boot_restore();
-    usbmode::init();
     screensavers::prewarm();
     let root = HomeScreen::new(w, h);
     app.run(Box::new(root));

@@ -2,9 +2,9 @@
 //! image the sleep screen's picker can draw (yui::widgets owns the
 //! rotation) with a checkbox per row: deselected images leave the
 //! rotation immediately — the picker rereads the list on every sleep.
-//! Images get onto the device the boring ways: USB transfer mode (the
-//! mounted drive's `screensavers/` folder — the picker's first-choice
-//! dir), the web manager, or scp.
+//! Images get onto the device the boring ways: USB (the mounted drive's
+//! `screensavers/` folder — the picker's first-choice dir), the web
+//! manager, or scp.
 
 use std::collections::HashSet;
 
@@ -265,7 +265,7 @@ impl Screen for ScreensaversScreen {
                 h / 2 + pt(28.0),
                 8.0,
                 DIM,
-                "(USB transfer mode, the web manager, or scp)",
+                "(USB drive, the web manager, or scp)",
             );
             return;
         }

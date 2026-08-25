@@ -135,7 +135,7 @@ into the library at power-on. Three pieces:
 |---|---|---|
 | enable flag | `/mnt/us/DONT_START_FRAMEWORK` | Amazon's own `framework.conf` pre-start check. Touch to enable, remove to disable. USB-visible partition — no ssh needed to flip it. |
 | upstart job | `/etc/upstart/yb-reader.conf` | `start on stopped framework`; no-op without the flag (shutdown ghost-starts land there harmlessly). Copy from `packages/yb-reader/upstart/` (rootfs remount-rw for the copy), then `initctl reload`. |
-| boot script | `/mnt/us/extensions/reader/bin/boot.sh` | ssh lifeline, crash counter, GUI freeze, reader exec. Deploy atomically (stage + verify + `mv`): a live shell mid-`wait` reads its remaining lines from a rewritten file. |
+| boot script | `/mnt/us/extensions/reader/bin/boot.sh` | ssh lifeline, boot audit, crash counter, GUI freeze, reader + hang watchdog. Deploy atomically (stage + verify + `mv`): a live shell mid-`wait` reads its remaining lines from a rewritten file. |
 
 Verified surviving without cvm: **powerd** (owns `/sys/power/state`, t1/t2
 idle timers, battery monitor), **wifid** + wpa_supplicant + udhcpc
@@ -145,19 +145,37 @@ Never starts / gets SIGSTOPped: Xorg, awesome, lxinit, pillow, kb,
 KPPMainApp, webreader, kfxreader (keyed on `framework_ready` /
 `started lab126_gui`, or frozen — start.sh's proven semantics).
 
-**Fallback ladder** — nothing below rung 4 needs more than the power button:
+**Fallback ladder** — nothing below rung 5 needs more than the power button:
 
-1. boot.sh crash counter: 3 consecutive fast failures of the *same*
+1. **Hang watchdog** (in-session): the reader's loop touches
+   `/tmp/yb-heartbeat` (≤1 utimensat per 5 s, tmpfs); a second copy of
+   the binary (`reader --watchdog <pid>`, one 30 s pass, zero cost
+   while suspended) kills it when the heartbeat is 3 min stale with a
+   healthy self-gap (a large gap means the SoC slept — suspend looks
+   exactly like a hang to a naive observer). upstart respawns a fresh
+   instance; a transient hang self-heals with no user-visible symptom.
+2. **Boot audit** (power-hold reboot): only SoC-level death leaves the
+   `running` marker behind (boot.sh removes it after every exit it
+   observes). `reader bootaudit` classifies the previous end: died
+   *suspended* (overnight battery) → nothing; died *awake* → append a
+   decaying strike. 4 strikes within 1 h → stock fallback (the strike
+   ledger exists because the crash counter's 60 s self-clear would wipe
+   a slow-developing hang's evidence every cycle — the infinite
+   hang→reboot→hang loop). USB needs no arming at any rung: it is fully
+   stock, so **plug is always the recovery session** — the drive mounts
+   for any computer, in any state, no network needed.
+3. boot.sh crash counter: 3 consecutive fast failures of the *same*
    binary (a replaced binary resets the count — deploys don't count;
    deploy.sh clears it too) → CONT the frozen GUI, remove the flag,
    `initctl start framework`. Tested live with `kill -9`: stock GUI back
    in under 30 s.
-2. Amazon's own net under that: 3 framework restarts → 2 reboots →
+4. Amazon's own net under that: 3 framework restarts → 2 reboots →
    airplane-mode retry → halt with a customer-service page.
-3. Long-press power = clean shutdown cascade (`stopping lab126_gui` →
+5. Long-press power = clean shutdown cascade (`stopping lab126_gui` →
    job stop → TERM → reader guard restores frontlight/wifi/firewall;
-   observed as reader rc=143).
-4. ssh over Wi-Fi, then remove the flag. Serial getty on `ttymxc0` is
+   observed as reader rc=143) — and with rung 2, even the *forced*
+   power-hold variant lands in an accounted, recoverable state.
+6. ssh over Wi-Fi, then remove the flag. Serial getty on `ttymxc0` is
    the absolute floor (never needed so far).
 
 **Exit to stock**: the Exit row (relabelled "Exit to Kindle") and the
@@ -354,12 +372,22 @@ Same files as the Lua plugin, same semantics:
   *forever* (nobody else will suspend it), and 20+ min idle on the library
   screen showed no autonomous suspend either — powerd's idle timers appear
   to need arming by someone. Idle policy is the reader's job now.
-- USB cable in takeover mode: charging + **file access** — volumd
-  auto-configures `g_mass_storage` on plug (framework-free), so the
-  userstore (flag, boot.sh, binary) is editable from any computer. But
-  nothing holds the device awake on USB: it suspends ~100 s after plug
-  and the connection dies. (`ENABLE_USBNET`/usbnetd is a dead path on
-  this FW — the job exists, the binary doesn't.)
+- USB cable in takeover mode: **file access, always** — USB is fully
+  stock (we never touch the mass-storage modules), so volumd
+  auto-configures `g_mass_storage` on plug (framework-free) and the
+  userstore (flag, boot.sh, binary) is editable from any computer. The
+  cost is deliberate: the export unmounts /mnt/us under the running
+  reader, so **the reader dies on plug by design** — boot.sh waits out
+  the cable and upstart respawns a fresh instance on unplug (the app
+  also self-exits on resume if the mount changed under it, so a
+  plug-while-suspended can't corrupt positions through stale handles).
+  A wall charger may or may not trip the same path — it depends on
+  whether volumd engages drive mode on vbus alone or only when a USB
+  host actually enumerates (untested on hardware; the plug test will
+  settle it). If it does, nightly charging means a dead reader until
+  morning's unplug — the price of an absolute recovery floor.
+  (`ENABLE_USBNET`/usbnetd is a dead path on this FW — the job exists,
+  the binary doesn't.)
 - Touch device is discovered from `/proc/bus/input/devices`
   (`ABS_MT_POSITION_X`); if discovery fails it falls back to
   `/dev/input/touch`. The `probe` output will confirm the real path.

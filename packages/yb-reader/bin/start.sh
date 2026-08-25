@@ -38,8 +38,6 @@ cleanup() {
     killall -CONT webreader kfxreader kfxview awesome cvm 2>/dev/null
     lipc-set-prop com.lab126.pillow disableEnablePillow enable 2>/dev/null
     lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home 2>/dev/null
-    modprobe usb_f_mass_storage 2>/dev/null || true
-    modprobe g_mass_storage 2>/dev/null || true
     rm -rf "$LOCK" 2>/dev/null
 }
 trap cleanup EXIT INT TERM

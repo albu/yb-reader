@@ -1,6 +1,6 @@
 //! The System screen — device-level controls that are *not* daily use:
-//! boot mode, reboot, Wi-Fi, USB mode, the E-Ink refresh cadence, and
-//! status trivia. Reached from the home rows. The curtain keeps the
+//! boot mode, reboot, Wi-Fi, trusted devices, the E-Ink refresh cadence,
+//! and status trivia. Reached from the home rows. The curtain keeps the
 //! daily controls (clock, statuses, light) and nothing else — this
 //! screen is where the rare stuff went when the curtain grew too heavy.
 
@@ -20,8 +20,8 @@ const CARD_TOP_PT: f32 = 56.0;
 const CARD_H_PT: f32 = 32.0;
 const CARD_GAP_PT: f32 = 6.0;
 
-const REFRESH_TITLE_PT: f32 = 334.0;
-const REFRESH_PILL_PT: f32 = 348.0;
+const REFRESH_TITLE_PT: f32 = 296.0;
+const REFRESH_PILL_PT: f32 = 310.0;
 
 const DIM: u8 = 110;
 const INK: u8 = 0;
@@ -213,26 +213,9 @@ impl Screen for SystemScreen {
             ds,
             self.dev_count > 0,
         );
-        // USB mode: charging keeps the reader's own disk from being
-        // exported under it (see usbmode.rs); transfer is stock drive
-        // mode, opted into.
-        let transfer = crate::usbmode::transfer_mode();
-        let (uv, us) = if transfer {
-            ("Transfer", "Disk on next plug · Tap: charging only")
-        } else {
-            ("Charging", "No USB disk while reading · Tap: transfer")
-        };
-        SystemScreen::draw_card(
-            p,
-            Rect::new(pad, top + 3 * (ch + gap), cw, ch),
-            "USB MODE",
-            uv,
-            us,
-            transfer,
-        );
-
-        // Screensaver rotation manager — copy images over USB transfer
-        // mode / web manager, then pick which ones rotate (screensavers.rs).
+        // Screensaver rotation manager — copy images over USB (the
+        // drive always mounts on plug) or the web manager, then pick
+        // which ones rotate (screensavers.rs).
         let ss_label = match self.ss_count {
             0 => "None yet".to_string(),
             n => format!("{n} images"),
@@ -240,7 +223,7 @@ impl Screen for SystemScreen {
         let (sv, ss) = (ss_label.as_str(), "Tap to manage the rotation");
         SystemScreen::draw_card(
             p,
-            Rect::new(pad, top + 4 * (ch + gap), cw, ch),
+            Rect::new(pad, top + 3 * (ch + gap), cw, ch),
             "SCREENSAVERS",
             sv,
             ss,
@@ -250,7 +233,7 @@ impl Screen for SystemScreen {
         let next = if os_boot { "yb OS" } else { "Stock Kindle" };
         SystemScreen::draw_action_card(
             p,
-            Rect::new(pad, top + 5 * (ch + gap), cw, ch),
+            Rect::new(pad, top + 4 * (ch + gap), cw, ch),
             "REBOOT",
             "Reboot now",
             &format!("Next boot: {next}"),
@@ -269,7 +252,7 @@ impl Screen for SystemScreen {
         };
         SystemScreen::draw_card(
             p,
-            Rect::new(pad, top + 6 * (ch + gap), cw, ch),
+            Rect::new(pad, top + 5 * (ch + gap), cw, ch),
             "EXIT",
             ev,
             es,
@@ -388,20 +371,12 @@ impl Screen for SystemScreen {
                         )));
                     }
                 }
-                // USB mode: flip between charge-only (mass-storage kernel
-                // modules stay out) and stock transfer mode.
-                let r_usb = Rect::new(pad, top + 3 * (ch + gap), cw, ch);
-                if r_usb.contains(x, y) {
-                    crate::usbmode::set_transfer(!crate::usbmode::transfer_mode());
-                    return Action::Redraw;
-                }
-
-                let r_ss = Rect::new(pad, top + 4 * (ch + gap), cw, ch);
+                let r_ss = Rect::new(pad, top + 3 * (ch + gap), cw, ch);
                 if r_ss.contains(x, y) {
                     return Action::Push(Box::new(crate::screensavers::ScreensaversScreen::new()));
                 }
 
-                let r_reboot = Rect::new(pad, top + 5 * (ch + gap), cw, ch);
+                let r_reboot = Rect::new(pad, top + 4 * (ch + gap), cw, ch);
                 if r_reboot.contains(x, y) {
                     // Plain `reboot` rides the same init cascade as a
                     // long-press power (TERM -> reader guard restores
@@ -435,7 +410,7 @@ impl Screen for SystemScreen {
                     )));
                 }
 
-                let r_exit = Rect::new(pad, top + 6 * (ch + gap), cw, ch);
+                let r_exit = Rect::new(pad, top + 5 * (ch + gap), cw, ch);
                 if r_exit.contains(x, y) {
                     let (title, body, yes) = if crate::home::takeover() {
                         (
@@ -530,8 +505,9 @@ mod tests {
         // exists to catch a gray/black full-screen fill, not card count.
         assert!(lit > 1248 * 1648 * 88 / 100, "page is not white: {lit}");
         ink("title", 90, 170, 60);
-        ink("cards", 270, 1290, 150);
-        // Pills at REFRESH_PILL_PT (346pt ≈ 1442px at 4.17 px/pt).
-        ink("refresh", 1400, 1520, 40);
+        ink("cards", 270, 1180, 150);
+        // Refresh section at REFRESH_TITLE_PT 296pt / REFRESH_PILL_PT
+        // 310pt (≈ 1234 / 1293 px at 4.17 px/pt).
+        ink("refresh", 1200, 1380, 40);
     }
 }
