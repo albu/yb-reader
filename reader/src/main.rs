@@ -35,6 +35,7 @@ mod selection;
 mod split;
 mod system;
 mod toc_dialog;
+mod usb_screen;
 mod vocab;
 mod watchdog;
 mod wifi;
@@ -127,6 +128,10 @@ fn main() {
     .with_resume(Box::new(awake::on_resume))
     .with_quit_check(Box::new(guard::pending))
     .with_heartbeat(Box::new(watchdog::heartbeat_touch))
+    .with_usb_exit(
+        Box::new(|| Box::new(usb_screen::UsbScreen::new())),
+        Box::new(awake::usb_plugged),
+    )
     .with_sleep_state(Box::new(|asleep| {
         // Persistent sleep-state marker: lets the boot audit tell an
         // overnight battery death in suspend from an awake hang. One
@@ -154,6 +159,15 @@ fn main() {
     // rc 0, and a shutdown cascade must not look like the crash fallback.
     if guard::pending() {
         guard::graceful_exit(0);
+    }
+    // USB bow-out: the cable wants the disk. Exit 43 — boot.sh's plug
+    // branch parks at its unplug wait (never respawning against an
+    // exported disk) and upstart restarts exactly one fresh instance
+    // after the cable is out. Not in the upstart "normal exit" list on
+    // purpose: a fast plug-pull with no park still deserves a respawn.
+    if awake::usb_plugged() {
+        log::plog("usb: cable owns the disk — bowing out (43)");
+        guard::graceful_exit(43);
     }
     // Takeover mode: leaving the app means "back to the stock Kindle" —
     // exit 42 is boot.sh's cue to remove the flag and start the

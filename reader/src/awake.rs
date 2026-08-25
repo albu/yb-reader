@@ -34,6 +34,18 @@ use crate::wifi;
 /// One heal at a time: a wedged wifid must not stack heal threads.
 static HEAL_BUSY: AtomicBool = AtomicBool::new(false);
 
+/// USB power observed since this session's start (edge-latched by the
+/// policy thread; initialized to the state at spawn so a boot-time plug
+/// counts too). The app's quit path reads this: a plug means the stock
+/// drive-mode dance wants the disk, and the reader bows out gracefully
+/// — screen painted, positions flushed — instead of being evicted by
+/// the forced unmount minutes later.
+static USB_PLUGGED: AtomicBool = AtomicBool::new(false);
+
+pub fn usb_plugged() -> bool {
+    USB_PLUGGED.load(Ordering::Relaxed)
+}
+
 /// Pure decision, host-testable: a screen's live reason, USB power, or
 /// the Wi-Fi link being up (reachable ⇒ awake — a sleeping device
 /// can't be deployed to, and it shouldn't silently drop off the network
@@ -112,6 +124,17 @@ pub fn reassert_frontlight() {
                 fl.tone_set(t);
             }
         }
+        return;
+    }
+    // Fresh session, nothing set in memory yet: fall back to the
+    // persisted custom point. powerd's charge policy kills the light on
+    // plug and never restores it — without this fallback, a reader that
+    // hasn't touched the curtain this session stays dark through the
+    // whole plug cycle (field report 2026-08-25).
+    if let Some((cb, cw)) = crate::curtain::load_custom() {
+        if let Ok(mut fl) = ybdev::frontlight::Frontlight::open() {
+            fl.apply_levels(cb, cw);
+        }
     }
 }
 
@@ -160,6 +183,7 @@ fn loop_fn() {
     // lands within one blink of powerd's plug-time light-off, while the
     // hold/heal policy work keeps its 30 s cadence (every 6th tick).
     let mut prev_vbus = sysinfo::vbus();
+    USB_PLUGGED.store(prev_vbus, Ordering::Relaxed);
     let mut tick: u32 = 0;
     loop {
         std::thread::sleep(Duration::from_secs(5));
@@ -167,6 +191,9 @@ fn loop_fn() {
         if vbus_plugged(prev_vbus, vbus) {
             plog("awake: usb power — re-asserting frontlight (charge-and-read)");
             reassert_frontlight();
+        }
+        if vbus {
+            USB_PLUGGED.store(true, Ordering::Relaxed);
         }
         prev_vbus = vbus;
         tick = tick.wrapping_add(1);

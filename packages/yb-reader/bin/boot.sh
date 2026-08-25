@@ -53,10 +53,13 @@ vbus() {
     [ "$(cat /sys/class/power_supply/bd71827_ac/online 2>/dev/null)" = "1" ]
 }
 
-# Stock drive mode engaged (volumd loads exactly this module on plug and
-# removes it on unplug — the kdb TURN_ON/TURN_OFF recipe).
+# Stock drive mode actually engaged: a host has the gadget configured.
+# NOT /proc-modules presence — the module stays resident for life on
+# some boots, and matching on it alone classified every non-0/42 death
+# as an export death (each deploy's killall took the plug branch and
+# cleared the fails ledger — found live 2026-08-25).
 drive_mode() {
-    grep -q '^g_mass_storage' /proc/modules 2>/dev/null
+    grep -qx configured /sys/class/udc/*/state 2>/dev/null
 }
 
 # Wait out the cable. 5 s polls — a plug session is minutes-to-hours,
@@ -199,13 +202,16 @@ echo "$(date) reader exited rc=$rc" >> "$LOG"
 # death a second time.
 rm -f "$STATE/running"
 # Export death (the common one: plug pulled the disk from under the
-# reader). Expected by design — don't let it near the failure ledgers.
-# Park until the cable is out and the disk is back, then exit 1 (NOT 0:
-# 0 is in the job's "normal exit" list and would not respawn) so upstart
-# starts exactly one fresh instance, post-unplug. The vbus||drive_mode
-# test is deliberately coarse: a GENUINE crash while on a wall charger
-# parks until unplug too — conservative, self-correcting, and the price
-# of never respawning against a possibly-exported disk.
+# reader) OR the graceful bow-out (rc 43 — the reader saw USB power,
+# painted its farewell screen and exited so the stock drive-mode dance
+# gets a free disk; same park applies). Expected by design — don't let
+# either near the failure ledgers. Park until the cable is out and the
+# disk is back, then exit 1 (NOT 0: 0 is in the job's "normal exit"
+# list and would not respawn) so upstart starts exactly one fresh
+# instance, post-unplug. The vbus||drive_mode test is deliberately
+# coarse: a GENUINE crash while on a wall charger parks until unplug
+# too — conservative, self-correcting, and the price of never
+# respawning against a possibly-exported disk.
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 42 ] && { vbus || drive_mode; }; then
     echo "$(date) usb: reader died to the export (rc=$rc)" >> "$LOG"
     wait_unplug "export death"

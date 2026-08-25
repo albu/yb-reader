@@ -52,8 +52,9 @@ pub fn pending() -> bool {
 }
 
 /// Clean exit through the same restore path the TERM guard uses, with a
-/// caller-chosen code. 42 is the takeover "return to stock" handshake:
-/// boot.sh removes the flag and starts the framework when it sees it.
+/// caller-chosen code. Handshakes: 42 = "return to stock" (boot.sh
+/// removes the flag and starts the framework); 43 = "USB owns the disk"
+/// (boot.sh parks at its unplug wait; see usb_screen.rs).
 pub fn graceful_exit(code: i32) -> ! {
     ybdev::log::plog(&format!("graceful exit ({code})"));
     restore();

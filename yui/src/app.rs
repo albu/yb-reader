@@ -45,6 +45,15 @@ pub struct App {
     /// Lets the app persist "suspending" state so a boot-time audit can
     /// tell a battery death in sleep from an awake hang.
     sleep_state: Option<Box<dyn Fn(bool)>>,
+    /// Polled every loop iteration: when true, the factory's screen is
+    /// pushed once (it paints a farewell frame and quits on its next
+    /// tick) and the app winds down. The device-owned use: USB power
+    /// arriving means the stock drive-mode dance wants the disk — the
+    /// app bows out gracefully instead of being evicted by the forced
+    /// unmount.
+    usb_check: Option<Box<dyn Fn() -> bool>>,
+    usb_screen: Option<Box<dyn Fn() -> Box<dyn Screen>>>,
+    usb_shown: bool,
 }
 
 /// A wall-clock gap this much larger than the poll budget means the SoC
@@ -89,6 +98,9 @@ impl App {
             quit_check: None,
             heartbeat: None,
             sleep_state: None,
+            usb_check: None,
+            usb_screen: None,
+            usb_shown: false,
         })
     }
 
@@ -130,6 +142,20 @@ impl App {
         self
     }
 
+    /// Graceful bow-out: `check` is polled every iteration; the first
+    /// true pushes `make`'s screen once — paint a farewell frame, quit
+    /// on a short tick — and the loop winds down through normal exit
+    /// paths (never mid-paint).
+    pub fn with_usb_exit(
+        mut self,
+        make: Box<dyn Fn() -> Box<dyn Screen>>,
+        check: Box<dyn Fn() -> bool>,
+    ) -> App {
+        self.usb_screen = Some(make);
+        self.usb_check = Some(check);
+        self
+    }
+
     pub fn dims(&self) -> (u32, u32) {
         (self.panel.width, self.panel.height)
     }
@@ -160,6 +186,18 @@ impl App {
             // the quit poll, so a loop that can check TERM can touch.
             if let Some(f) = &self.heartbeat {
                 f();
+            }
+            // USB bow-out: the first true pushes the farewell screen
+            // (the transition paints it at once); its short tick then
+            // winds the loop down through the ordinary Quit path — the
+            // exit never lands mid-paint or mid-gesture.
+            if !self.usb_shown && self.usb_check.as_ref().is_some_and(|f| f()) {
+                self.usb_shown = true;
+                if let Some(make) = &self.usb_screen {
+                    if !self.apply(Action::Push(make())) {
+                        break;
+                    }
+                }
             }
             let interval = self
                 .stack

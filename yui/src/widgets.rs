@@ -2,7 +2,10 @@
 //! tap-to-dismiss message overlay. Geometry is ported verbatim from the
 //! ad-hoc ui.rs screens (pt-authored).
 
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+
+static ROTATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static LAST_PICK_INDEX: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 use ybdev::input::{Gesture, SwipeDir};
 
@@ -295,15 +298,34 @@ fn pick_random_screensaver() -> Option<Vec<u8>> {
             }
         }
     }
-    let files = enabled_screensavers(files, &disabled_screensaver_names());
+    let mut files = enabled_screensavers(files, &disabled_screensaver_names());
     if files.is_empty() {
         return None;
     }
-    let seed = std::time::SystemTime::now()
+    files.sort();
+
+    let count = ROTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let sys_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    let choice = &files[pick_index(seed, files.len())];
+    let seed = sys_nanos.wrapping_add(count.wrapping_mul(0x9E3779B97F4A7C15));
+
+    let choice_idx = if files.len() > 1 {
+        let last_idx = LAST_PICK_INDEX.load(Ordering::Relaxed);
+        let offset = 1 + (pick_index(seed, files.len() - 1));
+        let next = if last_idx < files.len() {
+            (last_idx + offset) % files.len()
+        } else {
+            pick_index(seed, files.len())
+        };
+        LAST_PICK_INDEX.store(next, Ordering::Relaxed);
+        next
+    } else {
+        0
+    };
+
+    let choice = &files[choice_idx];
     std::fs::read(choice).ok()
 }
 
@@ -543,6 +565,29 @@ mod tests {
                 "5 sleeps covered only {} images: {w:?}",
                 s.len()
             );
+        }
+    }
+
+    #[test]
+    fn consecutive_screensaver_picks_never_repeat() {
+        let mut last = LAST_PICK_INDEX.load(Ordering::Relaxed);
+        let len = 10;
+        let mut history = Vec::new();
+        for i in 0..100 {
+            let count = ROTATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let seed = (i as u64 * 1_000_000_000).wrapping_add(count.wrapping_mul(0x9E3779B97F4A7C15));
+            let offset = 1 + (pick_index(seed, len - 1));
+            let next = if last < len {
+                (last + offset) % len
+            } else {
+                pick_index(seed, len)
+            };
+            LAST_PICK_INDEX.store(next, Ordering::Relaxed);
+            last = next;
+            history.push(next);
+        }
+        for w in history.windows(2) {
+            assert_ne!(w[0], w[1], "consecutive duplicate pick detected: {w:?}");
         }
     }
 

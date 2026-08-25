@@ -54,7 +54,7 @@ const SHEET_H_PT: f32 = 230.0;
 /// taps never touch it. Format: "b w" (slider space, 4 decimals).
 const CUSTOM_FL_PATH: &str = "/var/local/yb-reader/frontlight";
 
-fn load_custom() -> Option<(f32, f32)> {
+pub(crate) fn load_custom() -> Option<(f32, f32)> {
     let s = std::fs::read_to_string(CUSTOM_FL_PATH).ok()?;
     let (b, w) = s.split_once(' ')?;
     Some((b.trim().parse().ok()?, w.trim().parse().ok()?))
