@@ -272,6 +272,29 @@ impl Panel {
         );
     }
 
+    /// Fast A2 refresh for animation frames: 2 gray levels only, quick
+    /// update time, and it ghosts — the caller must end the animation
+    /// with a full (GC16) refresh to clean the panel. A2 snaps every
+    /// anti-aliased pixel to black/white, which is exactly right for
+    /// chunky line art and wrong for text.
+    pub fn refresh_fast(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        self.fence();
+        self.marker = self.marker.wrapping_add(1);
+        let region = mtk::MxcfbRect {
+            top: y,
+            left: x,
+            width: w,
+            height: h,
+        };
+        let _ = mtk::send_update(
+            self.fb.as_raw_fd(),
+            region,
+            mtk::WAVEFORM_A2,
+            mtk::UPDATE_MODE_PARTIAL,
+            self.marker,
+        );
+    }
+
     /// Full (flashing) refresh, to clear ghosting.
     pub fn refresh_full(&mut self) {
         self.fence();

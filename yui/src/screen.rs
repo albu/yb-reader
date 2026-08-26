@@ -30,12 +30,12 @@ pub trait Screen {
         Action::Keep
     }
 
-    /// The gesture-wait timed out: a slot for periodic work (keepalives,
-    /// polling). Returning `Keep` is free — App refreshes NOTHING on a bare
-    /// tick (the no-op-flash/ghosting rule).
-    fn on_tick(&mut self) -> Action {
-        Action::Keep
-    }
+/// The gesture-wait timed out: a slot for periodic work (keepalives,
+/// polling). Returning `Keep` is free — App refreshes NOTHING on a bare
+/// tick (the no-op-flash/ghosting rule).
+fn on_tick(&mut self) -> Action {
+    Action::Keep
+}
 
     /// This screen was pushed (it is now the top). Runs before the first
     /// draw; heavy setup (opening a document, network) belongs here. The
@@ -90,6 +90,7 @@ impl std::fmt::Debug for Action {
         f.write_str(match self {
             Action::Keep => "Keep",
             Action::Redraw => "Redraw",
+            Action::RedrawFast => "RedrawFast",
             Action::RedrawFull => "RedrawFull",
             Action::Push(_) => "Push(..)",
             Action::Pop => "Pop",
@@ -99,11 +100,28 @@ impl std::fmt::Debug for Action {
     }
 }
 
+/// How the panel should repaint after a redraw action. App maps each
+/// variant to a refresh waveform; the distinction matters on e-ink.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefreshMode {
+    /// Fast A2 partial refresh — animation frames. 2 gray levels, ghosts;
+    /// screens that return `RedrawFast` must finish with a `RedrawFull`
+    /// to clean the panel (the pop / on_resume default does this).
+    Fast,
+    /// Flash-less partial refresh (GL16), the default for content turns.
+    Partial,
+    /// Full flashing refresh (GC16) — screen change or ghost cleanup.
+    Full,
+}
+
 pub enum Action {
     /// Nothing changed; no redraw, no refresh.
     Keep,
     /// Repaint and send a partial (flash-less) refresh.
     Redraw,
+    /// Repaint and send a fast A2 partial refresh — animation frames.
+    /// See [`RefreshMode::Fast`] for the ghosting caveat.
+    RedrawFast,
     /// Repaint and send a full (flashing) refresh — screen change or
     /// ghost cleanup.
     RedrawFull,

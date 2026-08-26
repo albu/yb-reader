@@ -13,7 +13,7 @@ use ybdev::panel::Panel;
 use crate::font::Font;
 use crate::orientation::Orientation;
 use crate::painter::Painter;
-use crate::screen::{Action, Screen};
+use crate::screen::{Action, RefreshMode, Screen};
 
 pub struct App {
     panel: Panel,
@@ -204,6 +204,9 @@ impl App {
                 .last()
                 .map(|s| s.tick_interval())
                 .unwrap_or_else(|| std::time::Duration::from_secs(1));
+            // Cap the poll wait to 1s so loop checks (USB plug, watchdog heartbeat,
+            // quit flag) evaluate promptly even if the screen requested a long tick (e.g. 20s).
+            let poll_timeout = interval.min(std::time::Duration::from_secs(1));
             let before = std::time::SystemTime::now();
             // Raw panel input becomes visual-space input here — the only
             // un-rotation touch ever sees; screens and the edge policy
@@ -212,7 +215,7 @@ impl App {
             let orient = self.orientation;
             let gesture = self
                 .input
-                .next_gesture(interval)
+                .next_gesture(poll_timeout)
                 .map(|g| orient.gesture_to_visual(pw, ph, g));
             let wall = before.elapsed().unwrap_or_default();
             // Any gesture is user activity — including the power press
@@ -227,7 +230,7 @@ impl App {
             // power press that woke the device must not immediately
             // re-sleep it (dispatch would push the sleep screen).
             let mut woke = false;
-            if gap_is_suspend(interval, wall)
+            if gap_is_suspend(poll_timeout, wall)
                 && !self.stack.last().map(|s| s.is_sleep()).unwrap_or(false)
             {
                 woke = true;
@@ -339,13 +342,13 @@ impl App {
     }
 
     fn apply(&mut self, a: Action) -> bool {
-        let (cont, redraw_full) = transition(&mut self.stack, a);
+        let (cont, refresh) = transition(&mut self.stack, a);
         // Re-resolve orientation after the stack change; a flip forces the
         // refresh to full (rotating without the flash ghosts badly).
         let flipped = self.resolve_orientation();
-        match redraw_full {
-            Some(full) => self.draw_top(full || flipped),
-            None if flipped => self.draw_top(true),
+        match refresh {
+            Some(mode) => self.draw_top(mode, flipped),
+            None if flipped => self.draw_top(RefreshMode::Full, false),
             _ => {}
         }
         cont
@@ -363,7 +366,7 @@ impl App {
         }
     }
 
-    fn draw_top(&mut self, full: bool) {
+    fn draw_top(&mut self, mode: RefreshMode, flipped: bool) {
         let App {
             panel,
             font,
@@ -382,22 +385,27 @@ impl App {
             }
             p.flush();
         }
-        if full {
+        if flipped {
             panel.refresh_full();
         } else {
-            panel.refresh_partial(0, 0, w, h);
+            match mode {
+                RefreshMode::Fast => panel.refresh_fast(0, 0, w, h),
+                RefreshMode::Partial => panel.refresh_partial(0, 0, w, h),
+                RefreshMode::Full => panel.refresh_full(),
+            }
         }
     }
 }
 
 /// Pure stack machine behind Action — separately testable with fake
-/// screens. Returns (continue?, redraw mode: Some(full?) means draw the
-/// new top now).
-fn transition(stack: &mut Vec<Box<dyn Screen>>, a: Action) -> (bool, Option<bool>) {
+/// screens. Returns (continue?, refresh mode: Some(..) means draw the
+/// new top now, with that panel refresh).
+fn transition(stack: &mut Vec<Box<dyn Screen>>, a: Action) -> (bool, Option<RefreshMode>) {
     match a {
         Action::Keep => (true, None),
-        Action::Redraw => (true, Some(false)),
-        Action::RedrawFull => (true, Some(true)),
+        Action::Redraw => (true, Some(RefreshMode::Partial)),
+        Action::RedrawFast => (true, Some(RefreshMode::Fast)),
+        Action::RedrawFull => (true, Some(RefreshMode::Full)),
         Action::Push(s) => {
             stack.push(s);
             let a = stack.last_mut().unwrap().on_enter();
@@ -502,8 +510,18 @@ mod tests {
         let mut stack = vec![];
         let (cont, redraw) = transition(&mut stack, Action::Push(fake("a", &log)));
         assert!(cont);
-        assert_eq!(redraw, Some(true));
+        assert_eq!(redraw, Some(RefreshMode::Full));
         assert_eq!(*log.borrow(), vec!["a:enter"]);
+    }
+
+    #[test]
+    fn redraw_fast_requests_a2_refresh() {
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut stack = vec![fake("a", &log)];
+        let (cont, redraw) = transition(&mut stack, Action::RedrawFast);
+        assert!(cont);
+        assert_eq!(redraw, Some(RefreshMode::Fast));
+        assert!(log.borrow().is_empty()); // no lifecycle calls — pure repaint
     }
 
     #[test]
@@ -520,7 +538,7 @@ mod tests {
 
         let (cont, redraw) = transition(&mut stack, Action::PopN(2));
         assert!(cont);
-        assert_eq!(redraw, Some(true));
+        assert_eq!(redraw, Some(RefreshMode::Full));
         assert_eq!(
             *log.borrow(),
             vec!["toc:leave", "scrubber:leave", "reader:resume"]
@@ -549,7 +567,7 @@ mod tests {
         let (cont, redraw) = transition(&mut stack, Action::Pop);
         assert!(cont);
         // base's default-impl resume: RedrawFull.
-        assert_eq!(redraw, Some(true));
+        assert_eq!(redraw, Some(RefreshMode::Full));
         assert_eq!(*log.borrow(), vec!["over:leave", "base:resume"]);
         assert_eq!(stack.len(), 1);
     }
@@ -565,7 +583,7 @@ mod tests {
         });
         let mut stack: Vec<Box<dyn Screen>> = vec![base, fake("over", &log)];
         let (_, redraw) = transition(&mut stack, Action::Pop);
-        assert_eq!(redraw, Some(false));
+        assert_eq!(redraw, Some(RefreshMode::Partial));
     }
 
     #[test]
@@ -612,7 +630,7 @@ mod tests {
             Action::Push(Box::new(Failing { log: log.clone() })),
         );
         assert!(cont);
-        assert_eq!(redraw, Some(true)); // msg's default on_enter
+        assert_eq!(redraw, Some(RefreshMode::Full)); // msg's default on_enter
         assert_eq!(*log.borrow(), vec!["fail:enter", "msg:enter"]);
         assert_eq!(stack.len(), 2);
     }
