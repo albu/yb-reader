@@ -49,7 +49,7 @@ pub enum ShapeKind {
     Code,
 }
 
-fn hash_word(word: &str, kind: ShapeKind, size_scaled: u16) -> u64 {
+fn hash_word(word: &str, kind: ShapeKind, size_scaled: u16, family_id: u8) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
     for &b in word.as_bytes() {
         h ^= b as u64;
@@ -63,13 +63,15 @@ fn hash_word(word: &str, kind: ShapeKind, size_scaled: u16) -> u64 {
     h = h.wrapping_mul(0x100000001b3);
     h ^= size_scaled as u64;
     h = h.wrapping_mul(0x100000001b3);
+    h ^= family_id as u64;
+    h = h.wrapping_mul(0x100000001b3);
     h
 }
 
 pub struct ShapeCache {
     cache: HashMap<u64, (String, ShapeKind, u16, Arc<ShapedWord>)>,
-    hyphen_advance: HashMap<(FontStyle, u16), f32>,
-    space_advance: HashMap<(FontStyle, u16), f32>,
+    hyphen_advance: HashMap<(u8, FontStyle, u16), f32>,
+    space_advance: HashMap<(u8, FontStyle, u16), f32>,
 }
 
 impl Default for ShapeCache {
@@ -97,10 +99,11 @@ impl ShapeCache {
     ) -> Arc<ShapedWord> {
         let kind = ShapeKind::Style(style);
         let size_scaled = (size_pt * 10.0).round() as u16;
-        let h = hash_word(word, kind, size_scaled);
+        let family_id = fonts.family.id();
+        let h = hash_word(word, kind, size_scaled, family_id);
 
         if let Some((w, k, sz, shaped)) = self.cache.get(&h) {
-            if *sz == size_scaled && *k == kind && w == word {
+            if *sz == size_scaled && *k == kind && w == word && fonts.family.id() == family_id {
                 return Arc::clone(shaped);
             }
         }
@@ -129,7 +132,10 @@ impl ShapeCache {
     ) -> Arc<ShapedWord> {
         let kind = ShapeKind::Code;
         let size_scaled = (size_pt * 10.0).round() as u16;
-        let h = hash_word(word, kind, size_scaled);
+        // Code faces are Noto Sans for every body family, but the hash
+        // still carries the family id so a family switch never reuses a
+        // stale entry by accident.
+        let h = hash_word(word, kind, size_scaled, fonts.family.id());
 
         if let Some((w, k, sz, shaped)) = self.cache.get(&h) {
             if *sz == size_scaled && *k == kind && w == word {
@@ -152,24 +158,26 @@ impl ShapeCache {
     /// Fast lookup for single space advance width in pixels.
     pub fn space_advance(&mut self, style: FontStyle, size_pt: f32, fonts: &FontSystem) -> f32 {
         let size_scaled = (size_pt * 10.0).round() as u16;
-        if let Some(&adv) = self.space_advance.get(&(style, size_scaled)) {
+        let family_id = fonts.family.id();
+        if let Some(&adv) = self.space_advance.get(&(family_id, style, size_scaled)) {
             return adv;
         }
         let shaped = self.shape_word(" ", style, size_pt, fonts);
         let adv = shaped.advance;
-        self.space_advance.insert((style, size_scaled), adv);
+        self.space_advance.insert((family_id, style, size_scaled), adv);
         adv
     }
 
     /// Fast lookup for hyphen advance width in pixels.
     pub fn hyphen_advance(&mut self, style: FontStyle, size_pt: f32, fonts: &FontSystem) -> f32 {
         let size_scaled = (size_pt * 10.0).round() as u16;
-        if let Some(&adv) = self.hyphen_advance.get(&(style, size_scaled)) {
+        let family_id = fonts.family.id();
+        if let Some(&adv) = self.hyphen_advance.get(&(family_id, style, size_scaled)) {
             return adv;
         }
         let shaped = self.shape_word("-", style, size_pt, fonts);
         let adv = shaped.advance;
-        self.hyphen_advance.insert((style, size_scaled), adv);
+        self.hyphen_advance.insert((family_id, style, size_scaled), adv);
         adv
     }
 }

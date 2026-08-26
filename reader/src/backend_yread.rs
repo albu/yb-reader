@@ -16,6 +16,10 @@ pub struct YreadBackend {
     yfonts: Option<Rc<yread::font::FontSystem>>,
     ycache: Arc<Mutex<yread::shape::ShapeCache>>,
     yworker_fonts: Option<Arc<yread::font::FontSystem>>,
+    /// The body family the fonts are built for. `ensure_fonts` rebuilds
+    /// when this changes; the shape cache is family-keyed so a switch
+    /// never serves a previous family's widths.
+    yfont_family: yread::font::FontFamily,
     yraster: yread::raster::Rasterizer,
     ychap_idx: usize,
     ychap_page: usize,
@@ -156,6 +160,7 @@ impl YreadBackend {
             yfonts: None,
             ycache: Arc::new(Mutex::new(yread::shape::ShapeCache::new())),
             yworker_fonts: None,
+            yfont_family: yread::font::FontFamily::Literata,
             yraster: yread::raster::Rasterizer::new(),
             ychap_idx: 0,
             ychap_page: 0,
@@ -206,11 +211,22 @@ impl YreadBackend {
     }
 
     fn ensure_fonts(&mut self) {
-        if self.yworker_fonts.is_none() {
-            self.yworker_fonts = Some(Arc::new(yread::font::FontSystem::default()));
+        let family = self.yfont_family;
+        let rebuild_worker = self
+            .yworker_fonts
+            .as_ref()
+            .map(|f| f.family != family)
+            .unwrap_or(true);
+        if rebuild_worker {
+            self.yworker_fonts = Some(Arc::new(yread::font::FontSystem::for_family(family)));
         }
-        if self.yfonts.is_none() {
-            self.yfonts = Some(Rc::new(yread::font::FontSystem::default()));
+        let rebuild = self
+            .yfonts
+            .as_ref()
+            .map(|f| f.family != family)
+            .unwrap_or(true);
+        if rebuild {
+            self.yfonts = Some(Rc::new(yread::font::FontSystem::for_family(family)));
         }
     }
 
@@ -931,9 +947,13 @@ impl ReaderBackend for YreadBackend {
             || old.indent_em != new.indent_em
             || old.hyphenate != new.hyphenate
             || old.body_align != new.body_align
+            || old.font_family != new.font_family
+            || old.word_spacing_mult != new.word_spacing_mult
+            || old.letter_spacing_px != new.letter_spacing_px
             || old.split.rotation != new.split.rotation;
 
         if layout_changed {
+            self.yfont_family = new.font_family;
             self.yread_land_at(self.ychap_idx, self.y_char_offset, vw, vh, new);
             self.ensure_fonts();
             self.ybg_rx = None;
@@ -955,10 +975,12 @@ impl ReaderBackend for YreadBackend {
         vw: u32,
         vh: u32,
     ) -> Option<Vec<u8>> {
-        self.ensure_fonts();
         let book = self.ybook.as_ref()?.clone();
         let chap = book.chapters.get(self.ychap_idx)?;
-        let fonts = self.yfonts.as_ref()?.clone();
+        // Preview with the settings under the finger (the sheet has not
+        // committed yet), so a font-family change shows immediately
+        // without mutating the committed fonts.
+        let fonts = Rc::new(yread::font::FontSystem::for_family(settings.font_family));
 
         let cfg = self.yread_layout_config(settings, vw, vh);
         // Never block the UI on the shape-cache mutex: if the background
@@ -1047,6 +1069,7 @@ mod save_guard_tests {
             yfonts: None,
             ycache: Arc::new(Mutex::new(yread::shape::ShapeCache::new())),
             yworker_fonts: None,
+            yfont_family: yread::font::FontFamily::Literata,
             yraster: yread::raster::Rasterizer::new(),
             ychap_idx: 0,
             ychap_page: 0,

@@ -1768,3 +1768,53 @@ fn test_word_and_letter_spacing_thread_through() {
         );
     }
 }
+
+#[test]
+fn test_font_families_are_family_scoped_in_shape_cache() {
+    use yread::font::FontSystem;
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // The shape cache is keyed by (word, style, size, family): switching
+    // families must never serve a previous family's widths, and going back
+    // must reproduce the original family's widths exactly.
+    let html = "<p>the quick brown fox jumps over the lazy dog with a long \
+                word to compare widths across typefaces</p>";
+    let book = yread::epub::parse_epub(&epub_with_body(html)).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+
+    fn total_width(lines: &[yread::line::LayoutLine]) -> f32 {
+        lines.iter().map(|l| l.width).sum()
+    }
+
+    let literata = FontSystem::for_family(yread::font::FontFamily::Literata);
+    let pt_serif = FontSystem::for_family(yread::font::FontFamily::PtSerif);
+    let mut cache = ShapeCache::new();
+
+    let a1 = total_width(&break_paragraph_lines(
+        &ch.text, runs, 0.0, 900.0, 12.0, 1.2, TextAlign::Justify, &literata, &mut cache, None,
+    ));
+    let b = total_width(&break_paragraph_lines(
+        &ch.text, runs, 0.0, 900.0, 12.0, 1.2, TextAlign::Justify, &pt_serif, &mut cache, None,
+    ));
+    let a2 = total_width(&break_paragraph_lines(
+        &ch.text, runs, 0.0, 900.0, 12.0, 1.2, TextAlign::Justify, &literata, &mut cache, None,
+    ));
+
+    assert!(
+        (a1 - a2).abs() < 0.01,
+        "same family must reproduce identical widths ({:.2} vs {:.2})",
+        a1,
+        a2
+    );
+    assert!(
+        (a1 - b).abs() > 1.0,
+        "different families must shape differently (got {:.2} vs {:.2})",
+        a1,
+        b
+    );
+}

@@ -293,6 +293,8 @@ pub struct ReaderSettings {
     pub word_spacing_mult: f32,
     /// Letter-spacing tracking in pixels added to every glyph (0.0 = none).
     pub letter_spacing_px: f32,
+    /// Body typeface family.
+    pub font_family: yread::font::FontFamily,
     /// Contrast & text darkness curve
     pub contrast: ContrastMode,
     /// Background white snap cutoff (e.g. 0 = off, 240, 230)
@@ -316,6 +318,7 @@ impl Default for ReaderSettings {
             body_align: TextAlign::Justify,
             word_spacing_mult: 1.0,
             letter_spacing_px: 0.0,
+            font_family: yread::font::FontFamily::Literata,
             contrast: ContrastMode::Normal,
             white_cutoff: 0,
             invert: false,

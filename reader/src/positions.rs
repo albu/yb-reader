@@ -215,6 +215,12 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                         .and_then(|s| s.parse::<f32>().ok())
                         .filter(|v| (0.0..=5.0).contains(v))
                         .unwrap_or(0.0);
+                    let font_family = match it.next() {
+                        Some("ptserif") => yread::font::FontFamily::PtSerif,
+                        Some("bitter") => yread::font::FontFamily::Bitter,
+                        Some("ptsans") => yread::font::FontFamily::PtSans,
+                        _ => yread::font::FontFamily::Literata,
+                    };
 
                     settings = Some(ReaderSettings {
                         split,
@@ -227,6 +233,7 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                         body_align,
                         word_spacing_mult,
                         letter_spacing_px,
+                        font_family,
                         contrast,
                         white_cutoff: white_cut,
                         invert,
@@ -263,7 +270,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
             if let Some(s) = p.settings {
                 let sc = s.split;
                 format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{:.2}\t{:.2}\t{}\t{}\t{:.3}\t{:.2}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{:.2}\t{:.2}\t{}\t{}\t{:.3}\t{:.2}\t{}",
                     k,
                     p.page,
                     p.total,
@@ -292,6 +299,12 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
                     },
                     s.word_spacing_mult,
                     s.letter_spacing_px,
+                    match s.font_family {
+                        yread::font::FontFamily::Literata => "literata",
+                        yread::font::FontFamily::PtSerif => "ptserif",
+                        yread::font::FontFamily::Bitter => "bitter",
+                        yread::font::FontFamily::PtSans => "ptsans",
+                    },
                 )
             } else if p.sub_idx > 0 {
                 format!("{}\t{}\t{}\t{}\t{}", k, p.page, p.total, p.ts, p.sub_idx)
@@ -547,6 +560,7 @@ mod tests {
         assert_eq!(s.indent_em, 1.2);
         assert!(s.hyphenate);
         assert_eq!(s.body_align, yread::model::TextAlign::Justify);
+        assert_eq!(s.font_family, yread::font::FontFamily::Literata);
 
         // And a full line round-trips through the store.
         let mut settings = ReaderSettings::default();
@@ -554,6 +568,7 @@ mod tests {
         settings.indent_em = 0.0;
         settings.hyphenate = false;
         settings.body_align = yread::model::TextAlign::Left;
+        settings.font_family = yread::font::FontFamily::Bitter;
         let mut map = HashMap::new();
         map.insert(
             "paper.pdf".to_string(),
@@ -575,6 +590,7 @@ mod tests {
         assert_eq!(s.indent_em, 0.0);
         assert!(!s.hyphenate);
         assert_eq!(s.body_align, yread::model::TextAlign::Left);
+        assert_eq!(s.font_family, yread::font::FontFamily::Bitter);
         let _ = std::fs::remove_file(p);
     }
 }

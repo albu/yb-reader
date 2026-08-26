@@ -13,6 +13,83 @@ pub static LITERATA_BOLD_ITALIC_BYTES: &[u8] =
     include_bytes!("../../resources/fonts/Literata-BoldItalic.ttf");
 pub static NOTO_SANS_BYTES: &[u8] = include_bytes!("../../resources/fonts/NotoSans-Regular.ttf");
 
+pub static PTSERIF_REGULAR_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/PTSerif-Regular.ttf");
+pub static PTSERIF_BOLD_BYTES: &[u8] = include_bytes!("../../resources/fonts/PTSerif-Bold.ttf");
+pub static PTSERIF_ITALIC_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/PTSerif-Italic.ttf");
+pub static PTSERIF_BOLD_ITALIC_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/PTSerif-BoldItalic.ttf");
+pub static BITTER_REGULAR_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/Bitter-Regular.ttf");
+pub static BITTER_BOLD_BYTES: &[u8] = include_bytes!("../../resources/fonts/Bitter-Bold.ttf");
+pub static BITTER_ITALIC_BYTES: &[u8] = include_bytes!("../../resources/fonts/Bitter-Italic.ttf");
+pub static BITTER_BOLD_ITALIC_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/Bitter-BoldItalic.ttf");
+pub static PTSANS_REGULAR_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/PTSans-Regular.ttf");
+pub static PTSANS_BOLD_BYTES: &[u8] = include_bytes!("../../resources/fonts/PTSans-Bold.ttf");
+pub static PTSANS_ITALIC_BYTES: &[u8] = include_bytes!("../../resources/fonts/PTSans-Italic.ttf");
+pub static PTSANS_BOLD_ITALIC_BYTES: &[u8] =
+    include_bytes!("../../resources/fonts/PTSans-BoldItalic.ttf");
+
+/// The body typeface families shipped in the binary. All OFL-1.1, all with
+/// Latin + Cyrillic coverage (the Russian Word Wise / book corpus demands
+/// it). Literata is the signature default; the others are subsetted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontFamily {
+    Literata = 0,
+    PtSerif = 1,
+    Bitter = 2,
+    PtSans = 3,
+}
+
+impl FontFamily {
+    pub const ALL: [FontFamily; 4] = [
+        FontFamily::Literata,
+        FontFamily::PtSerif,
+        FontFamily::Bitter,
+        FontFamily::PtSans,
+    ];
+
+    pub fn id(self) -> u8 {
+        self as u8
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FontFamily::Literata => "Literata",
+            FontFamily::PtSerif => "PT Serif",
+            FontFamily::Bitter => "Bitter",
+            FontFamily::PtSans => "PT Sans",
+        }
+    }
+
+    /// The embedded bytes for one style of this family.
+    pub fn face_bytes(self, style: FontStyle) -> &'static [u8] {
+        use FontFamily::*;
+        use FontStyle::*;
+        match (self, style) {
+            (Literata, Regular) => LITERATA_REGULAR_BYTES,
+            (Literata, Bold) => LITERATA_BOLD_BYTES,
+            (Literata, Italic) => LITERATA_ITALIC_BYTES,
+            (Literata, BoldItalic) => LITERATA_BOLD_ITALIC_BYTES,
+            (PtSerif, Regular) => PTSERIF_REGULAR_BYTES,
+            (PtSerif, Bold) => PTSERIF_BOLD_BYTES,
+            (PtSerif, Italic) => PTSERIF_ITALIC_BYTES,
+            (PtSerif, BoldItalic) => PTSERIF_BOLD_ITALIC_BYTES,
+            (Bitter, Regular) => BITTER_REGULAR_BYTES,
+            (Bitter, Bold) => BITTER_BOLD_BYTES,
+            (Bitter, Italic) => BITTER_ITALIC_BYTES,
+            (Bitter, BoldItalic) => BITTER_BOLD_ITALIC_BYTES,
+            (PtSans, Regular) => PTSANS_REGULAR_BYTES,
+            (PtSans, Bold) => PTSANS_BOLD_BYTES,
+            (PtSans, Italic) => PTSANS_ITALIC_BYTES,
+            (PtSans, BoldItalic) => PTSANS_BOLD_ITALIC_BYTES,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct FontFace {
     pub data: &'static [u8],
@@ -43,23 +120,33 @@ pub struct FontSystem {
     pub bold_italic: FontFace,
     pub code: FontFace,
     pub fallback: FontFace,
+    /// The body family this system is built for. Code / fallback faces
+    /// stay Noto Sans regardless of family.
+    pub family: FontFamily,
 }
 
 impl Default for FontSystem {
     fn default() -> Self {
+        Self::for_family(FontFamily::Literata)
+    }
+}
+
+impl FontSystem {
+    pub fn for_family(family: FontFamily) -> Self {
         Self {
-            regular: FontFace::from_bytes(LITERATA_REGULAR_BYTES),
-            bold: FontFace::from_bytes(LITERATA_BOLD_BYTES),
-            italic: FontFace::from_bytes(LITERATA_ITALIC_BYTES),
-            bold_italic: FontFace::from_bytes(LITERATA_BOLD_ITALIC_BYTES),
+            regular: FontFace::from_bytes(family.face_bytes(FontStyle::Regular)),
+            bold: FontFace::from_bytes(family.face_bytes(FontStyle::Bold)),
+            italic: FontFace::from_bytes(family.face_bytes(FontStyle::Italic)),
+            bold_italic: FontFace::from_bytes(family.face_bytes(FontStyle::BoldItalic)),
             code: FontFace::from_bytes(NOTO_SANS_BYTES),
             fallback: FontFace::from_bytes(NOTO_SANS_BYTES),
+            family,
         }
     }
 }
 
 /// Font-file constants (units per em, ascender, descender, line gap) —
-/// parsed once per process per style. `metrics()` used to call
+/// parsed once per process per (family, style). `metrics()` used to call
 /// `Face::from_slice` (a full 320 kB sfnt parse) on EVERY call, and
 /// build_line calls it per item per line: ~34k parses per chapter —
 /// measured as ~75% of all pagination time.
@@ -80,26 +167,25 @@ fn raw_metrics(bytes: &'static [u8]) -> RawFaceMetrics {
     }
 }
 
-static RAW_REGULAR: OnceLock<RawFaceMetrics> = OnceLock::new();
-static RAW_BOLD: OnceLock<RawFaceMetrics> = OnceLock::new();
-static RAW_ITALIC: OnceLock<RawFaceMetrics> = OnceLock::new();
-static RAW_BOLD_ITALIC: OnceLock<RawFaceMetrics> = OnceLock::new();
+static RAW_METRICS: [[OnceLock<RawFaceMetrics>; 4]; 4] = [
+    [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+    [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+    [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+    [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+];
 
-fn raw_for(style: FontStyle) -> &'static RawFaceMetrics {
-    match style {
-        FontStyle::Regular => RAW_REGULAR.get_or_init(|| raw_metrics(LITERATA_REGULAR_BYTES)),
-        FontStyle::Bold => RAW_BOLD.get_or_init(|| raw_metrics(LITERATA_BOLD_BYTES)),
-        FontStyle::Italic => RAW_ITALIC.get_or_init(|| raw_metrics(LITERATA_ITALIC_BYTES)),
-        FontStyle::BoldItalic => {
-            RAW_BOLD_ITALIC.get_or_init(|| raw_metrics(LITERATA_BOLD_ITALIC_BYTES))
-        }
-    }
+fn raw_for(family: FontFamily, style: FontStyle) -> &'static RawFaceMetrics {
+    RAW_METRICS[family.id() as usize][style as usize]
+        .get_or_init(|| raw_metrics(family.face_bytes(style)))
 }
 
-static RB_REGULAR: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
-static RB_BOLD: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
-static RB_ITALIC: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
-static RB_BOLD_ITALIC: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
+static RB_FACES: [[OnceLock<rustybuzz::Face<'static>>; 4]; 4] =
+    [
+        [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+        [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+        [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+        [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()],
+    ];
 static RB_CODE: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
 
 impl FontSystem {
@@ -121,17 +207,8 @@ impl FontSystem {
     /// statics, so this is identical to re-parsing face_for_style().
     /// data on every shape call, just ~µs cheaper).
     pub fn rustybuzz_face(&self, style: FontStyle) -> &'static rustybuzz::Face<'static> {
-        let build = |bytes: &'static [u8]| {
-            rustybuzz::Face::from_slice(bytes, 0).expect("embedded font parses")
-        };
-        match style {
-            FontStyle::Regular => RB_REGULAR.get_or_init(|| build(LITERATA_REGULAR_BYTES)),
-            FontStyle::Bold => RB_BOLD.get_or_init(|| build(LITERATA_BOLD_BYTES)),
-            FontStyle::Italic => RB_ITALIC.get_or_init(|| build(LITERATA_ITALIC_BYTES)),
-            FontStyle::BoldItalic => {
-                RB_BOLD_ITALIC.get_or_init(|| build(LITERATA_BOLD_ITALIC_BYTES))
-            }
-        }
+        RB_FACES[self.family.id() as usize][style as usize]
+            .get_or_init(|| rustybuzz::Face::from_slice(self.family.face_bytes(style), 0).expect("embedded font parses"))
     }
 
     pub fn rustybuzz_code_face(&self) -> &'static rustybuzz::Face<'static> {
@@ -148,7 +225,7 @@ impl FontSystem {
     /// Calculate baseline ascender, descender, and natural line height in pixels at a given point size (at 300 PPI).
     pub fn metrics(&self, style: FontStyle, size_pt: f32) -> FontMetrics {
         // Same numbers the per-call Face parse produced; now O(1).
-        let raw = raw_for(style);
+        let raw = raw_for(self.family, style);
         let scale = (size_pt * (300.0 / 72.0)) / raw.upem;
         let ascender = raw.ascender * scale;
         let descender = raw.descender * scale;

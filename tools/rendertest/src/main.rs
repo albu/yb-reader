@@ -265,6 +265,34 @@ fn gallery_mode(
             s.hyphen_ladder_max,
         );
     }
+
+    // Font family eyeball: the base page rendered in each body family.
+    // This is the "see it on e-ink" step for a new face — crisp stems and
+    // generous x-height matter more than the stats table.
+    println!("\n(family renders -> {}/font_*.png)", outdir);
+    for family in yread::font::FontFamily::ALL {
+        let config = mk(11.0, 72, 1.2, TextAlign::Justify, true, 1.2, 0.25, 1.0, 0.0);
+        let mut cache = ShapeCache::new();
+        let fonts = FontSystem::for_family(family);
+        let (_pt, layouts) = paginate_chapter_with_images(
+            chapter,
+            Some(&book.image_sizes),
+            &config,
+            &fonts,
+            &mut cache,
+            Some(yread::hypher_lang(&book.meta.language)),
+        );
+        if let Some(page) = layouts.first() {
+            let mut raster = Rasterizer::new();
+            let w = config.page_width as usize;
+            let h = config.page_height as usize;
+            let mut fb = vec![255u8; w * h];
+            raster.render_page(book, page, &config, &fonts, &mut fb, w);
+            let slug = family.label().to_lowercase().replace(' ', "_");
+            save_gray_png(&format!("{}/font_{}.png", outdir, slug), w, h, &fb);
+            println!("  font_{}.png ({})", slug, family.label());
+        }
+    }
 }
 
 #[derive(Default)]

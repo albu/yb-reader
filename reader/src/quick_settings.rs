@@ -83,6 +83,22 @@ impl QuickSettingsSheet {
         let pad = pt(PAD_PT);
         let mut y = sheet_y + pt(12.0);
 
+        // Row 1: FONT (body family)
+        p.text(pad, y + pt(15.0), 8.5, 0, "FONT");
+        let fam_btn_w = pt(58.0);
+        for (i, family) in yread::font::FontFamily::ALL.iter().enumerate() {
+            let bx = w - pad - (4 - i as i32) * (fam_btn_w + pt(4.0));
+            let br = Rect::new(bx, y, fam_btn_w, pt(BTN_H_PT));
+            if self.settings.font_family == *family {
+                p.rect(br, 0);
+                p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.0, 255, family.label());
+            } else {
+                p.rect_outline_t(br, 1, 120);
+                p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.0, 0, family.label());
+            }
+        }
+        y += pt(ROW_H_PT) + pt(4.0);
+
         // Row 1: ALIGN (body paragraphs: Justify vs ragged Left)
         p.text(pad, y + pt(15.0), 8.5, 0, "ALIGN");
         let aligns = [(TextAlign::Justify, "Justify"), (TextAlign::Left, "Left")];
@@ -173,6 +189,18 @@ impl QuickSettingsSheet {
     fn handle_typography_gesture(&mut self, vx: i32, vy: i32, sheet_y: i32, w: i32) -> Action {
         let pad = pt(PAD_PT);
         let mut y = sheet_y + pt(12.0);
+
+        // Row 1: FONT
+        let fam_btn_w = pt(58.0);
+        for (i, family) in yread::font::FontFamily::ALL.iter().enumerate() {
+            let bx = w - pad - (4 - i as i32) * (fam_btn_w + pt(4.0));
+            let br = Rect::new(bx, y, fam_btn_w, pt(BTN_H_PT));
+            if br.contains(vx, vy) {
+                self.settings.font_family = *family;
+                return self.apply_change();
+            }
+        }
+        y += pt(ROW_H_PT) + pt(4.0);
 
         // Row 1: ALIGN
         let aligns = [TextAlign::Justify, TextAlign::Left];

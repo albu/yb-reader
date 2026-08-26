@@ -65,6 +65,7 @@ fn layout_fingerprint(
     h.write(&[align_code(s.body_align)]);
     h.write(&s.word_spacing_mult.to_le_bytes());
     h.write(&s.letter_spacing_px.to_le_bytes());
+    h.write(&[s.font_family.id()]);
     h.write(&[s.contrast as u8]);
     h.write(&[s.white_cutoff]);
     h.write(&[s.invert as u8]);
@@ -494,6 +495,12 @@ mod tests {
         diff_track.letter_spacing_px = 1.0;
         assert_eq!(
             load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_track, w, h, 0),
+            None
+        );
+        let mut diff_family = settings;
+        diff_family.font_family = yread::font::FontFamily::PtSerif;
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_family, w, h, 0),
             None
         );
 
