@@ -54,6 +54,9 @@ fn main() {
         paragraph_spacing: 0.25,
         indent_em: 1.2,
         hyphenate: true,
+        body_align: yread::model::TextAlign::Justify,
+        word_spacing_mult: 1.0,
+        letter_spacing_px: 0.0,
     };
 
     let fonts = yread::font::FontSystem::default();

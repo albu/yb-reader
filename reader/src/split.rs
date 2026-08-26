@@ -1,6 +1,8 @@
 //! PDF Split & Crop and Reading Configuration (Typography, Contrast Curves,
 //! Background Whitening, Night Mode, and Layout).
 
+use yread::model::TextAlign;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[derive(Default)]
 pub enum SplitPreset {
@@ -278,6 +280,19 @@ pub struct ReaderSettings {
     /// for airier text). Layout-affecting like font size — changes
     /// repaginate, so the anchor path carries the position.
     pub line_spacing: f32,
+    /// Paragraph spacing in em (0.0 = snug block paragraphs).
+    pub paragraph_spacing: f32,
+    /// First-line indent in em (0.0 = flush-left block style).
+    pub indent_em: f32,
+    /// Hyphenation toggle for body text.
+    pub hyphenate: bool,
+    /// Body-paragraph alignment (Justify or Left); book-set alignments
+    /// (centered poetry, flush lists) are preserved by the engine.
+    pub body_align: TextAlign,
+    /// Word-spacing multiplier (1.0 = the font's own space width).
+    pub word_spacing_mult: f32,
+    /// Letter-spacing tracking in pixels added to every glyph (0.0 = none).
+    pub letter_spacing_px: f32,
     /// Contrast & text darkness curve
     pub contrast: ContrastMode,
     /// Background white snap cutoff (e.g. 0 = off, 240, 230)
@@ -295,6 +310,12 @@ impl Default for ReaderSettings {
             font_size: 11.0,
             margin_pad: 72,
             line_spacing: 1.0,
+            paragraph_spacing: 0.25,
+            indent_em: 1.2,
+            hyphenate: true,
+            body_align: TextAlign::Justify,
+            word_spacing_mult: 1.0,
+            letter_spacing_px: 0.0,
             contrast: ContrastMode::Normal,
             white_cutoff: 0,
             invert: false,

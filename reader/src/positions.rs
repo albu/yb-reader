@@ -187,12 +187,46 @@ fn parse(text: &str) -> HashMap<String, Pos> {
                         .unwrap_or(1.0);
                     let mirror_even_odd = it.next().map(|s| s == "1").unwrap_or(false);
                     split.mirror_even_odd = mirror_even_odd;
+                    // Typography fields, appended after mirror_even_odd
+                    // (same backward-compatible pattern): old lines without
+                    // them keep the book's current defaults.
+                    let paragraph_spacing = it
+                        .next()
+                        .and_then(|s| s.parse::<f32>().ok())
+                        .filter(|v| (0.0..=1.0).contains(v))
+                        .unwrap_or(0.25);
+                    let indent_em = it
+                        .next()
+                        .and_then(|s| s.parse::<f32>().ok())
+                        .filter(|v| (0.0..=3.0).contains(v))
+                        .unwrap_or(1.2);
+                    let hyphenate = it.next().map(|s| s != "0").unwrap_or(true);
+                    let body_align = match it.next() {
+                        Some("l") => yread::model::TextAlign::Left,
+                        _ => yread::model::TextAlign::Justify,
+                    };
+                    let word_spacing_mult = it
+                        .next()
+                        .and_then(|s| s.parse::<f32>().ok())
+                        .filter(|v| (0.5..=2.0).contains(v))
+                        .unwrap_or(1.0);
+                    let letter_spacing_px = it
+                        .next()
+                        .and_then(|s| s.parse::<f32>().ok())
+                        .filter(|v| (0.0..=5.0).contains(v))
+                        .unwrap_or(0.0);
 
                     settings = Some(ReaderSettings {
                         split,
                         font_size,
                         margin_pad,
                         line_spacing,
+                        paragraph_spacing,
+                        indent_em,
+                        hyphenate,
+                        body_align,
+                        word_spacing_mult,
+                        letter_spacing_px,
                         contrast,
                         white_cutoff: white_cut,
                         invert,
@@ -229,7 +263,7 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
             if let Some(s) = p.settings {
                 let sc = s.split;
                 format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.1}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{:.2}\t{:.2}\t{}\t{}\t{:.3}\t{:.2}",
                     k,
                     p.page,
                     p.total,
@@ -249,6 +283,15 @@ fn save_at(path: &str, map: &HashMap<String, Pos>) {
                     s.margin_pad,
                     s.line_spacing,
                     if sc.mirror_even_odd { "1" } else { "0" },
+                    s.paragraph_spacing,
+                    s.indent_em,
+                    if s.hyphenate { "1" } else { "0" },
+                    match s.body_align {
+                        yread::model::TextAlign::Left => "l",
+                        _ => "j",
+                    },
+                    s.word_spacing_mult,
+                    s.letter_spacing_px,
                 )
             } else if p.sub_idx > 0 {
                 format!("{}\t{}\t{}\t{}\t{}", k, p.page, p.total, p.ts, p.sub_idx)
@@ -491,6 +534,47 @@ mod tests {
         // not an empty library: prune must leave the store alone.
         prune_at(p, &[]);
         assert_eq!(load_at(p).len(), 1);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn typography_fields_roundtrip_and_defaults() {
+        // A line from before the typography fields existed: all four fall
+        // back to the reader defaults.
+        let old = "a.epub\t3\t9\t1700000000\t1\th2\t270\t0.1000\t0.1000\t0.1000\t0.1000\t0.1000\t12.0\tnorm\t0\t0\t72\t1.0\t0\n";
+        let s = parse(old)["a.epub"].settings.unwrap();
+        assert_eq!(s.paragraph_spacing, 0.25);
+        assert_eq!(s.indent_em, 1.2);
+        assert!(s.hyphenate);
+        assert_eq!(s.body_align, yread::model::TextAlign::Justify);
+
+        // And a full line round-trips through the store.
+        let mut settings = ReaderSettings::default();
+        settings.paragraph_spacing = 0.6;
+        settings.indent_em = 0.0;
+        settings.hyphenate = false;
+        settings.body_align = yread::model::TextAlign::Left;
+        let mut map = HashMap::new();
+        map.insert(
+            "paper.pdf".to_string(),
+            Pos {
+                page: 5,
+                total: 20,
+                ts: 1700000000,
+                sub_idx: 1,
+                settings: Some(settings),
+            },
+        );
+        let path = std::env::temp_dir().join("yb-positions-typography-test.txt");
+        let p = path.to_str().unwrap();
+        let _ = std::fs::remove_file(p);
+        save_at(p, &map);
+        let loaded = load_at(p);
+        let s = loaded["paper.pdf"].settings.unwrap();
+        assert_eq!(s.paragraph_spacing, 0.6);
+        assert_eq!(s.indent_em, 0.0);
+        assert!(!s.hyphenate);
+        assert_eq!(s.body_align, yread::model::TextAlign::Left);
         let _ = std::fs::remove_file(p);
     }
 }

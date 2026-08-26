@@ -19,6 +19,17 @@ pub struct LayoutConfig {
     pub paragraph_spacing: f32,
     pub indent_em: f32,
     pub hyphenate: bool,
+    /// Body-paragraph alignment override (Justify or Left). Book-set
+    /// alignments (centered poetry, flush list items, headings) are kept.
+    pub body_align: TextAlign,
+    /// Word-spacing multiplier on the base space advance (1.0 = font
+    /// default). Applied at tokenize time so the breaker, rasterizer and
+    /// word-rect extraction all see the same final advance.
+    pub word_spacing_mult: f32,
+    /// Letter-spacing tracking in pixels added to every glyph advance
+    /// (0.0 = none). Applied to a per-use copy — the shape cache stays
+    /// valid.
+    pub letter_spacing_px: f32,
 }
 
 impl LayoutConfig {
@@ -34,6 +45,12 @@ impl LayoutConfig {
         font_size: f32,
         line_spacing: f32,
         show_header: bool,
+        paragraph_spacing: f32,
+        indent_em: f32,
+        hyphenate: bool,
+        body_align: TextAlign,
+        word_spacing_mult: f32,
+        letter_spacing_px: f32,
     ) -> Self {
         Self {
             page_width: vw,
@@ -44,9 +61,12 @@ impl LayoutConfig {
             margin_bottom: margin_pad + 72,
             font_size,
             line_spacing,
-            paragraph_spacing: 0.25,
-            indent_em: 1.2,
-            hyphenate: true,
+            paragraph_spacing,
+            indent_em,
+            hyphenate,
+            body_align,
+            word_spacing_mult,
+            letter_spacing_px,
         }
     }
 }
@@ -65,6 +85,9 @@ impl Default for LayoutConfig {
             paragraph_spacing: 0.15,
             indent_em: 1.2,
             hyphenate: true,
+            body_align: TextAlign::Justify,
+            word_spacing_mult: 1.0,
+            letter_spacing_px: 0.0,
         }
     }
 }
@@ -254,6 +277,18 @@ pub fn paginate_chapter_with_images(
                         0.0
                     };
 
+                // The reader's alignment choice drives default (justified)
+                // body paragraphs. Book-set alignments — centered poetry,
+                // flush list items, right-aligned epigraphs — are kept, so
+                // a ragged-left preference never destroys book grammar.
+                let align = if *align == TextAlign::Justify
+                    && matches!(config.body_align, TextAlign::Justify | TextAlign::Left)
+                {
+                    config.body_align
+                } else {
+                    *align
+                };
+
                 let lines = break_paragraph_lines_streaming(
                     &chapter.text,
                     runs,
@@ -261,10 +296,12 @@ pub fn paginate_chapter_with_images(
                     avail_w,
                     config.font_size,
                     config.line_spacing,
-                    *align,
+                    align,
                     fonts,
                     cache,
                     target_lang,
+                    config.word_spacing_mult,
+                    config.letter_spacing_px,
                     &mut cur_byte_offset,
                     &mut cur_char_offset,
                 );
@@ -452,6 +489,8 @@ pub fn paginate_chapter_with_images(
                     fonts,
                     cache,
                     None,
+                    1.0,
+                    0.0,
                     &mut cur_byte_offset,
                     &mut cur_char_offset,
                 );

@@ -23,6 +23,26 @@ pub struct ShapedWord {
     pub glyphs: Vec<ShapedGlyph>,
 }
 
+impl ShapedWord {
+    /// A copy with `tracking_px` added to every glyph advance (letter
+    /// spacing). The shape cache keeps the untracked original — this is a
+    /// per-use copy, so the cache stays valid and tracking changes never
+    /// trigger a reshape.
+    pub fn tracked(&self, tracking_px: f32) -> Arc<ShapedWord> {
+        if tracking_px == 0.0 {
+            return Arc::new(self.clone());
+        }
+        let mut glyphs = self.glyphs.clone();
+        for g in &mut glyphs {
+            g.x_advance += tracking_px;
+        }
+        Arc::new(ShapedWord {
+            advance: self.advance + tracking_px * glyphs.len() as f32,
+            glyphs,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShapeKind {
     Style(FontStyle),

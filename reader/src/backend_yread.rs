@@ -196,6 +196,12 @@ impl YreadBackend {
             settings.font_size,
             settings.line_spacing,
             settings.show_header,
+            settings.paragraph_spacing,
+            settings.indent_em,
+            settings.hyphenate,
+            settings.body_align,
+            settings.word_spacing_mult,
+            settings.letter_spacing_px,
         )
     }
 
@@ -782,6 +788,12 @@ impl ReaderBackend for YreadBackend {
                         yread::line::LineItem::Space { adv, .. } => {
                             cur_x += *adv + extra_space;
                         }
+                        yread::line::LineItem::SoftHyphen { .. } => {}
+                        yread::line::LineItem::Hyphen { adv, .. } => {
+                            // No word rect for a soft-hyphen hyphen, but the
+                            // pen must advance so later rects match ink.
+                            cur_x += *adv;
+                        }
                         yread::line::LineItem::HardBreak => {}
                     }
                 }
@@ -915,6 +927,10 @@ impl ReaderBackend for YreadBackend {
         let layout_changed = old.font_size != new.font_size
             || old.line_spacing != new.line_spacing
             || old.margin_pad != new.margin_pad
+            || old.paragraph_spacing != new.paragraph_spacing
+            || old.indent_em != new.indent_em
+            || old.hyphenate != new.hyphenate
+            || old.body_align != new.body_align
             || old.split.rotation != new.split.rotation;
 
         if layout_changed {

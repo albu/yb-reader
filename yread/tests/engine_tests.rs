@@ -1,7 +1,7 @@
 use yread::epub::parse_epub;
 use yread::fb2::parse_fb2;
 use yread::font::FontSystem;
-use yread::model::Block;
+use yread::model::{Block, TextAlign};
 use yread::paginate::{paginate_chapter, LayoutConfig};
 use yread::raster::Rasterizer;
 use yread::shape::ShapeCache;
@@ -55,6 +55,9 @@ fn test_fb2_pagination_and_char_offset_invariance() {
         paragraph_spacing: 0.15,
         indent_em: 1.5,
         hyphenate: true,
+        body_align: TextAlign::Justify,
+        word_spacing_mult: 1.0,
+        letter_spacing_px: 0.0,
     };
 
     let (pt_11pt, _layouts_11pt) = paginate_chapter(
@@ -552,6 +555,9 @@ fn test_page_starts_are_set_consistent_and_monotonic() {
         paragraph_spacing: 0.15,
         indent_em: 1.2,
         hyphenate: true,
+        body_align: TextAlign::Justify,
+        word_spacing_mult: 1.0,
+        letter_spacing_px: 0.0,
     };
 
     let (pt, layouts) = paginate_chapter(
@@ -682,6 +688,10 @@ fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
     let fonts = FontSystem::default();
     let mut cache = ShapeCache::new();
     let lang = yread::hypher_lang("ru");
+    println!(
+        "space adv at 10pt = {:.1}",
+        cache.space_advance(yread::model::FontStyle::Regular, 10.0, &fonts)
+    );
 
     let mut hyphen_breaks = 0;
     for width in [90.0, 110.0, 130.0, 150.0, 170.0, 190.0, 230.0] {
@@ -703,7 +713,15 @@ fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
             // (legit punctuation joins like "(sharding" have none).
             let mut prev: Option<&yread::line::LineItem> = None;
             for it in &line.items {
-                let wordish = !it.is_space();
+                // Soft hyphens / their materialized hyphens are intentional
+                // word joins (like the "(sharding" punctuation join), not
+                // gaps — they must not trip the missing-space tripwire.
+                let wordish = !it.is_space()
+                    && !matches!(
+                        it,
+                        yread::line::LineItem::SoftHyphen { .. }
+                            | yread::line::LineItem::Hyphen { .. }
+                    );
                 if wordish {
                     if let Some(p) = prev {
                         let ranges = |x: &yread::line::LineItem| match x {
@@ -776,7 +794,12 @@ fn hyphen_broken_line_keeps_space_before_hyphenated_word() {
             for (li, line) in lines.iter().enumerate() {
                 let mut prev_wordish = false;
                 for it in &line.items {
-                    let wordish = !it.is_space();
+                    let wordish = !it.is_space()
+                        && !matches!(
+                            it,
+                            yread::line::LineItem::SoftHyphen { .. }
+                                | yread::line::LineItem::Hyphen { .. }
+                        );
                     if wordish && prev_wordish {
                         panic!(
                             "width {} line {}: two words with no space \
@@ -889,4 +912,859 @@ fn test_parse_real_sample_fb2() {
     let book = yread::fb2::parse_fb2_path(p).expect("parse sample fb2");
     assert!(!book.chapters.is_empty());
     println!("Parsed sample.fb2: {} chapters, {} images", book.chapters.len(), book.images.len());
+}
+
+/// The words on a line in reading order (SoftHyphen/Hyphen join fragments).
+fn line_word_texts(line: &yread::line::LayoutLine, text: &str) -> Vec<String> {
+    line.items
+        .iter()
+        .filter_map(|it| match it {
+            yread::line::LineItem::Word { byte_start, byte_end, .. } => {
+                Some(text[*byte_start..*byte_end].to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A shy-rich paragraph: filler words give fine-grained line fills (so
+/// lines land in the near-full zone), and every single word fits every
+/// measure in the sweeps below, so any violation is the soft-hyphen class.
+const SHY_CORPUS_BODY: &str = concat!(
+    "<p>",
+    "a quick brown fox jumps over the lazy dog and then a ",
+    "quick brown fox jumps over cu&shy;stomer again, ",
+    "a quick brown fox jumps over the lazy dog and then ",
+    "cu&shy;stomer for good, a quick brown fox jumps over ",
+    "the lazy dog with cu&shy;stomer for good.",
+    "</p>",
+);
+
+#[test]
+fn test_nbsp_keeps_word_groups_together() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // Regression: &nbsp; was decoded to U+00A0 and then normalize_spaces
+    // collapsed it into a breakable space, so "Mr. Smith" / "10 km" could
+    // split at the unit boundary.
+    let body = concat!(
+        "<p>",
+        "Mr.&nbsp;Smith walked 10&nbsp;km to the station, and ",
+        "Mr.&nbsp;Smith counted 10&nbsp;km again. ",
+        "The quick brown fox jumps over the lazy dog. ",
+        "Mr.&nbsp;Smith and the 10&nbsp;km markers repeat. ",
+        "</p>",
+    );
+    let book = yread::epub::parse_epub(&epub_with_body(body)).expect("parse");
+    let ch = &book.chapters[0];
+    assert!(
+        ch.text.contains('\u{00A0}'),
+        "parser must keep NBSP in chapter text: {:?}",
+        &ch.text[..ch.text.len().min(80)]
+    );
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    for width in (120..500).step_by(20) {
+        let lines = break_paragraph_lines(
+            &ch.text,
+            runs,
+            0.0,
+            width as f32,
+            12.0,
+            1.2,
+            TextAlign::Left,
+            &fonts,
+            &mut cache,
+            None,
+        );
+        for pair in lines.iter().zip(lines.iter().skip(1)) {
+            let (cur, next) = pair;
+            let cur_words = line_word_texts(cur, &ch.text);
+            let next_words = line_word_texts(next, &ch.text);
+            let last_word = cur_words.last().map(|s| s.as_str()).unwrap_or("");
+            let first_word = next_words.first().map(|s| s.as_str()).unwrap_or("");
+            assert!(
+                !(last_word == "Mr." && first_word == "Smith"),
+                "width {}: 'Mr. Smith' split across lines",
+                width
+            );
+            assert!(
+                !(last_word == "10" && first_word == "km"),
+                "width {}: '10 km' split across lines",
+                width
+            );
+        }
+    }
+}
+
+#[test]
+fn test_fb2_nbsp_keeps_word_groups_together() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // The FB2 parser has its own normalize_spaces copy — the epub NBSP
+    // regression must be pinned there too, or the two drift apart.
+    let fb2 = r##"<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+<description><title-info><book-title>T</book-title><lang>en</lang></title-info></description>
+<body><section><title><p>Ch</p></title>
+<p>Mr.&nbsp;Smith walked 10&nbsp;km to the station, and Mr.&nbsp;Smith counted 10&nbsp;km again. The quick brown fox jumps over the lazy dog. Mr.&nbsp;Smith and the 10&nbsp;km markers repeat.</p>
+</section></body></FictionBook>"##;
+    let book = parse_fb2(fb2.as_bytes()).expect("parse");
+    let ch = &book.chapters[0];
+    assert!(
+        ch.text.contains('\u{00A0}'),
+        "fb2 parser must keep NBSP in chapter text: {:?}",
+        &ch.text[..ch.text.len().min(80)]
+    );
+    let runs = match ch.blocks.iter().find_map(|b| match b {
+        Block::Paragraph { runs, .. } => Some(runs),
+        _ => None,
+    }) {
+        Some(r) => r,
+        None => panic!("expected a paragraph block"),
+    };
+
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    for width in (120..500).step_by(20) {
+        let lines = break_paragraph_lines(
+            &ch.text,
+            runs,
+            0.0,
+            width as f32,
+            12.0,
+            1.2,
+            TextAlign::Left,
+            &fonts,
+            &mut cache,
+            None,
+        );
+        for pair in lines.iter().zip(lines.iter().skip(1)) {
+            let (cur, next) = pair;
+            let cur_words = line_word_texts(cur, &ch.text);
+            let next_words = line_word_texts(next, &ch.text);
+            let last_word = cur_words.last().map(|s| s.as_str()).unwrap_or("");
+            let first_word = next_words.first().map(|s| s.as_str()).unwrap_or("");
+            assert!(
+                !(last_word == "Mr." && first_word == "Smith"),
+                "width {}: 'Mr. Smith' split across lines (fb2)",
+                width
+            );
+            assert!(
+                !(last_word == "10" && first_word == "km"),
+                "width {}: '10 km' split across lines (fb2)",
+                width
+            );
+        }
+    }
+}
+
+#[test]
+fn test_soft_hyphen_break_renders_hyphen_and_is_invisible_midline() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // Regression: &shy; survived into shaping as a visible U+00AD and was
+    // never a break opportunity. Now it splits "customer" into fragments
+    // joined by an invisible SoftHyphen that materializes a Hyphen only at
+    // a real line break.
+    let book = yread::epub::parse_epub(&epub_with_body(SHY_CORPUS_BODY)).expect("parse");
+    let ch = &book.chapters[0];
+    assert!(
+        ch.text.contains('\u{00AD}'),
+        "parser must keep soft hyphens in chapter text"
+    );
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let mut saw_hyphen_break = false;
+    let mut saw_invisible_midline = false;
+
+    for width in (70..600).step_by(15) {
+        let lines = break_paragraph_lines(
+            &ch.text,
+            runs,
+            0.0,
+            width as f32,
+            12.0,
+            1.2,
+            TextAlign::Left,
+            &fonts,
+            &mut cache,
+            None,
+        );
+        for line in &lines {
+            let mut has_sh = false;
+            let mut has_hyphen = false;
+            for it in &line.items {
+                match it {
+                    yread::line::LineItem::SoftHyphen { .. } => has_sh = true,
+                    yread::line::LineItem::Hyphen { .. } => has_hyphen = true,
+                    _ => {}
+                }
+            }
+            if has_hyphen {
+                saw_hyphen_break = true;
+                assert!(
+                    line
+                        .items
+                        .last()
+                        .map(|it| matches!(it, yread::line::LineItem::Hyphen { .. }))
+                        .unwrap_or(false),
+                    "materialized Hyphen must be the last item of the broken line"
+                );
+            }
+            if has_sh {
+                saw_invisible_midline = true;
+            }
+        }
+    }
+    assert!(
+        saw_hyphen_break,
+        "narrow widths must break at soft hyphens"
+    );
+    assert!(
+        saw_invisible_midline,
+        "wide lines must keep soft hyphens invisible mid-line"
+    );
+}
+
+#[test]
+fn test_soft_hyphen_never_leaves_visible_character() {
+    // The fragments must never include the U+00AD itself: a soft hyphen is
+    // either an invisible join or a materialized '-' at a break — never a
+    // stray glyph inside a shaped word.
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    let body =
+        "<p>super&shy;cali&shy;fragi&shy;listic&shy;expiali&shy;docious</p>";
+    let book = yread::epub::parse_epub(&epub_with_body(body)).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    for width in (60..800).step_by(10) {
+        let lines = break_paragraph_lines(
+            &ch.text,
+            runs,
+            0.0,
+            width as f32,
+            12.0,
+            1.2,
+            TextAlign::Left,
+            &fonts,
+            &mut cache,
+            None,
+        );
+        for line in &lines {
+            for w in line_word_texts(line, &ch.text) {
+                assert!(
+                    !w.contains('\u{00AD}'),
+                    "width {}: word fragment {:?} still contains the soft hyphen",
+                    width,
+                    w
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn soft_hyphen_lines_never_exceed_the_measure() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // Regression: materializing a soft-hyphen break added the hyphen
+    // advance AFTER the fit check, so a line within one hyphen-width of
+    // full pushed ink past the right margin — the exact "lines past the
+    // measure" drift that killed Knuth-Plass. The extent invariant:
+    // a broken line's natural width must never exceed its measure. The
+    // 2.5px tolerance covers only the pre-existing hyphenation width
+    // drift (boundary lookup vs reshaped prefix, ~2px); a real
+    // materialization overshoot adds a full hyphen advance.
+    let body = concat!(
+        "<p>",
+        "cu&shy;stomer cu&shy;stomer cu&shy;stomer cu&shy;stomer ",
+        "cu&shy;stomer cu&shy;stomer cu&shy;stomer cu&shy;stomer ",
+        "cu&shy;stomer cu&shy;stomer cu&shy;stomer cu&shy;stomer ",
+        "</p>",
+    );
+    let book = yread::epub::parse_epub(&epub_with_body(body)).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let mut worst_over = 0.0f32;
+    for width in (180..340).step_by(1) {
+        let lines = break_paragraph_lines(
+            &ch.text,
+            runs,
+            0.0,
+            width as f32,
+            12.0,
+            1.2,
+            TextAlign::Justify,
+            &fonts,
+            &mut cache,
+            None,
+        );
+        for (li, line) in lines.iter().enumerate() {
+            let over = line.width - line.max_width;
+            worst_over = worst_over.max(over);
+            assert!(
+                over <= 2.5,
+                "width {} line {}: line.width {:.1} exceeds max_width {:.1} by {:.2}px",
+                width,
+                li,
+                line.width,
+                line.max_width,
+                over
+            );
+        }
+    }
+    assert!(
+        worst_over <= 2.5,
+        "worst extent overshoot was {:.2}px",
+        worst_over
+    );
+}
+
+#[test]
+fn justified_lines_fill_the_measure_exactly() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // The justification is solved once at build time and stored on the
+    // line. A justified (non-last) line must render to exactly its
+    // measure, and the public helper (the raster + word-rect extractor
+    // share this truth) must return the stored values.
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let book = parse_fb2(WAR_AND_PEACE_FB2.as_bytes()).expect("parse");
+    let ch = &book.chapters[0];
+
+    let mut justified = 0usize;
+    for width in [600.0, 800.0, 1092.0, 1236.0] {
+        for fs in [9.0, 11.0, 13.0] {
+            for block in &ch.blocks {
+                let Block::Paragraph { runs, .. } = block else {
+                    continue;
+                };
+                let lines = break_paragraph_lines(
+                    &ch.text,
+                    runs,
+                    18.0,
+                    width,
+                    fs,
+                    1.2,
+                    TextAlign::Justify,
+                    &fonts,
+                    &mut cache,
+                    Some(yread::hypher_lang("en")),
+                );
+                for (li, line) in lines.iter().enumerate() {
+                    assert_eq!(
+                        yread::raster::alignment_adjust(line),
+                        (line.start_offset, line.extra_space),
+                        "w={} fs={} line {}: helper drifted from stored values",
+                        width,
+                        fs,
+                        li
+                    );
+                    if line.is_last_in_paragraph || line.align != TextAlign::Justify {
+                        continue;
+                    }
+                    if line.extra_space != 0.0 {
+                        justified += 1;
+                        let gaps =
+                            line.items.iter().filter(|it| it.is_space()).count() as f32;
+                        let rendered = line.width + gaps * line.extra_space;
+                        assert!(
+                            (rendered - line.max_width).abs() < 0.01,
+                            "w={} fs={} line {}: justified line renders {:.2}, measure {:.2}",
+                            width,
+                            fs,
+                            li,
+                            rendered,
+                            line.max_width
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        justified > 100,
+        "sweep must produce justified lines, got {}",
+        justified
+    );
+}
+
+#[test]
+fn justified_rendered_width_never_exceeds_the_measure() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // Extent invariant for the RENDERED width (natural + solved gaps):
+    // a justified line never spills past its measure — and when
+    // hyphenation width drift pushes the natural width a hair over, the
+    // shrink tolerance pulls it back rather than letting ink past the
+    // right margin.
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    // Both a hyphenation-drift-heavy corpus (W&P, hyphenated) and the
+    // shy-rich corpus exercise the rendered-extent + shrink invariants.
+    let books = [
+        ("war_and_peace", parse_fb2(WAR_AND_PEACE_FB2.as_bytes()).expect("parse")),
+        ("shy_corpus", yread::epub::parse_epub(&epub_with_body(SHY_CORPUS_BODY)).expect("parse")),
+    ];
+
+    for (name, book) in books {
+        let ch = &book.chapters[0];
+        for width in [600.0, 800.0, 1092.0, 1236.0] {
+            for fs in [9.0, 11.0, 13.0] {
+                for block in &ch.blocks {
+                    let Block::Paragraph { runs, .. } = block else {
+                        continue;
+                    };
+                    let lines = break_paragraph_lines(
+                        &ch.text,
+                        runs,
+                        18.0,
+                        width,
+                        fs,
+                        1.2,
+                        TextAlign::Justify,
+                        &fonts,
+                        &mut cache,
+                        Some(yread::hypher_lang("en")),
+                    );
+                    for (li, line) in lines.iter().enumerate() {
+                        if line.is_last_in_paragraph || line.align != TextAlign::Justify {
+                            continue;
+                        }
+                        let gaps = line.items.iter().filter(|it| it.is_space()).count() as f32;
+                        if gaps == 0.0 && line.width > line.max_width {
+                            // An unbreakable word wider than the measure has
+                            // no gaps to shrink — the pre-existing
+                            // over-wide-word class, not a justification
+                            // overshoot.
+                            continue;
+                        }
+                        let rendered = line.width + gaps * line.extra_space;
+                        assert!(
+                            rendered <= line.max_width + 0.01,
+                            "{} w={} fs={} line {}: justified rendered width {:.2} exceeds measure {:.2}",
+                            name, width, fs, li, rendered, line.max_width
+                        );
+                        // The solver never shrinks past the per-gap
+                        // tolerance.
+                        let min_shrink = line
+                            .items
+                            .iter()
+                            .filter_map(|it| match it {
+                                yread::line::LineItem::Space { shrink, .. } => Some(*shrink),
+                                _ => None,
+                            })
+                            .fold(f32::MAX, f32::min);
+                        if min_shrink != f32::MAX {
+                            assert!(
+                                line.extra_space >= -min_shrink,
+                                "{} w={} fs={} line {}: shrink {:.2} exceeds per-gap tolerance {:.2}",
+                                name, width, fs, li, line.extra_space, min_shrink
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn hyphen_end(line: &yread::line::LayoutLine) -> bool {
+    line.items
+        .last()
+        .map(|it| {
+            matches!(
+                it,
+                yread::line::LineItem::HyphenatedPrefix { .. }
+                    | yread::line::LineItem::Hyphen { .. }
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[test]
+fn test_hyphen_ladder_capped_at_two() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // Long Russian compounds at narrow measures force many consecutive
+    // hyphenated line ends; the hygiene rule caps the ladder at 2 (a third
+    // consecutive hyphenated end moves the whole word instead).
+    let html = "<p>Долгими зимними вечерами электроэнергетическая промышленность \
+                южных регионов продолжала работать устойчиво и надёжно каждый \
+                single day, когда автоматизированные электротехнические \
+                предприятия переоснащались высокоскоростными агрегатами.</p>";
+    let book = yread::epub::parse_epub(&epub_with_body(html)).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let lang = yread::hypher_lang("ru");
+
+    let mut saw_hyphen = false;
+    let mut max_ladder = 0usize;
+    for width in (60..500).step_by(3) {
+        let lines = break_paragraph_lines(
+            &ch.text,
+            runs,
+            0.0,
+            width as f32,
+            10.0,
+            1.2,
+            TextAlign::Justify,
+            &fonts,
+            &mut cache,
+            Some(lang),
+        );
+        let mut ladder = 0usize;
+        for line in &lines {
+            if hyphen_end(line) {
+                saw_hyphen = true;
+                ladder += 1;
+                max_ladder = max_ladder.max(ladder);
+                assert!(
+                    ladder <= 2,
+                    "width {}: hyphen ladder {} exceeds 2",
+                    width,
+                    ladder
+                );
+            } else {
+                ladder = 0;
+            }
+        }
+    }
+    assert!(saw_hyphen, "test setup must produce hyphen breaks");
+    assert!(
+        max_ladder <= 2,
+        "max hyphen ladder across sweep was {}",
+        max_ladder
+    );
+}
+
+#[test]
+fn test_hyphen_min_syllable_lengths() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    let html = "<p>Долгими зимними вечерами электроэнергетическая промышленность \
+                южных регионов продолжала работать устойчиво и надёжно каждый \
+                single day, когда автоматизированные электротехнические \
+                предприятия переоснащались высокоскоростными агрегатами.</p>";
+    let book = yread::epub::parse_epub(&epub_with_body(html)).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let lang = yread::hypher_lang("ru");
+
+    for width in (60..500).step_by(3) {
+        let lines = break_paragraph_lines(
+            &ch.text,
+            runs,
+            0.0,
+            width as f32,
+            10.0,
+            1.2,
+            TextAlign::Justify,
+            &fonts,
+            &mut cache,
+            Some(lang),
+        );
+        for (li, line) in lines.iter().enumerate() {
+            for it in &line.items {
+                let yread::line::LineItem::HyphenatedPrefix {
+                    byte_start, byte_end, ..
+                } = it
+                else {
+                    continue;
+                };
+                let prefix = &ch.text[*byte_start..*byte_end];
+                assert!(
+                    prefix.chars().count() >= 3,
+                    "width {} line {}: prefix {:?} shorter than 3 chars",
+                    width,
+                    li,
+                    prefix
+                );
+                if let Some(next) = lines.get(li + 1) {
+                    if let Some(first) = next.items.iter().find_map(|it| match it {
+                        yread::line::LineItem::Word {
+                            byte_start, byte_end, ..
+                        } => Some(&ch.text[*byte_start..*byte_end]),
+                        _ => None,
+                    }) {
+                        assert!(
+                            first.chars().count() >= 2,
+                            "width {} line {}: suffix {:?} shorter than 2 chars",
+                            width,
+                            li,
+                            first
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_no_hyphen_break_adjacent_to_existing_dash() {
+    use yread::line::break_paragraph_lines;
+    use yread::model::{Block, TextAlign};
+
+    // Regression: hypher can place a syllable boundary right after a
+    // literal ASCII hyphen in a compound ("so--called"), and the rendered
+    // line-end hyphen then doubles the existing dash. Hygiene must skip
+    // any break point next to an existing dash.
+    let html = "<p>so--called state-of-the-art long-established well-known \
+                self-contained multi-purpose high-level well-defined \
+                far-fetched old-fashioned full-scale wide-ranging \
+                deep-seated long-running double-barrelled inter-office \
+                re-enter pre-emptive co-operation non-stop well-being.</p>";
+    let book = yread::epub::parse_epub(&epub_with_body(html)).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+    let lang = yread::hypher_lang("en");
+
+    let mut saw_hyphen = false;
+    for width in (60..600).step_by(3) {
+        let lines = break_paragraph_lines(
+            &ch.text,
+            runs,
+            0.0,
+            width as f32,
+            10.0,
+            1.2,
+            TextAlign::Justify,
+            &fonts,
+            &mut cache,
+            Some(lang),
+        );
+        for (li, line) in lines.iter().enumerate() {
+            for it in &line.items {
+                let yread::line::LineItem::HyphenatedPrefix {
+                    byte_start, byte_end, ..
+                } = it
+                else {
+                    continue;
+                };
+                saw_hyphen = true;
+                let prefix = &ch.text[*byte_start..*byte_end];
+                assert!(
+                    !prefix.ends_with('-') && !prefix.ends_with('—') && !prefix.ends_with('–'),
+                    "width {} line {}: hyphen break lands after an existing dash: {:?}",
+                    width,
+                    li,
+                    prefix
+                );
+            }
+            if let Some(next) = lines.get(li + 1) {
+                if let Some(first) = next.items.iter().find_map(|it| match it {
+                    yread::line::LineItem::Word { byte_start, byte_end, .. } => {
+                        Some(&ch.text[*byte_start..*byte_end])
+                    }
+                    _ => None,
+                }) {
+                    assert!(
+                        !first.starts_with('-') && !first.starts_with('—') && !first.starts_with('–'),
+                        "width {} line {}: suffix starts with a dash: {:?}",
+                        width,
+                        li,
+                        first
+                    );
+                }
+            }
+        }
+    }
+    assert!(saw_hyphen, "test setup must produce hyphen breaks");
+}
+
+#[test]
+fn test_word_and_letter_spacing_thread_through() {
+    use yread::line::{break_paragraph_lines, break_paragraph_lines_with_spacing};
+    use yread::model::{Block, TextAlign};
+
+    let html = "<p>the quick brown fox jumps over the lazy dog and another \
+                line of ordinary prose that will wrap at this measure</p>";
+    let book = yread::epub::parse_epub(&epub_with_body(html)).expect("parse");
+    let ch = &book.chapters[0];
+    let runs = match &ch.blocks[0] {
+        Block::Paragraph { runs, .. } => runs,
+        _ => panic!("expected paragraph"),
+    };
+    let fonts = FontSystem::default();
+
+    fn word_vec(lines: &[yread::line::LayoutLine], text: &str) -> Vec<(String, f32, usize)> {
+        let mut v = Vec::new();
+        for line in lines {
+            for it in &line.items {
+                if let yread::line::LineItem::Word {
+                    byte_start,
+                    byte_end,
+                    shaped,
+                    ..
+                } = it
+                {
+                    v.push((
+                        text[*byte_start..*byte_end].to_string(),
+                        shaped.advance,
+                        shaped.glyphs.len(),
+                    ));
+                }
+            }
+        }
+        v
+    }
+    fn space_vec(lines: &[yread::line::LayoutLine]) -> Vec<f32> {
+        let mut v = Vec::new();
+        for line in lines {
+            for it in &line.items {
+                if let yread::line::LineItem::Space { adv, .. } = it {
+                    v.push(*adv);
+                }
+            }
+        }
+        v
+    }
+
+    let mut cache = ShapeCache::new();
+    let base = break_paragraph_lines(
+        &ch.text,
+        runs,
+        0.0,
+        900.0,
+        12.0,
+        1.2,
+        TextAlign::Justify,
+        &fonts,
+        &mut cache,
+        None,
+    );
+    let base_words = word_vec(&base, &ch.text);
+    let base_spaces = space_vec(&base);
+    assert!(!base_words.is_empty() && !base_spaces.is_empty());
+
+    // Word spacing multiplies the base space advance; tracking adds a fixed
+    // px to every glyph advance (word and space alike). Both land on the
+    // final token advances — the breaker/raster/extractor all see them.
+    let mut cache2 = ShapeCache::new();
+    let spaced = break_paragraph_lines_with_spacing(
+        &ch.text,
+        runs,
+        0.0,
+        900.0,
+        12.0,
+        1.2,
+        TextAlign::Justify,
+        &fonts,
+        &mut cache2,
+        None,
+        1.25,
+        0.5,
+    );
+    let spaced_words = word_vec(&spaced, &ch.text);
+    let spaced_spaces = space_vec(&spaced);
+    assert_eq!(spaced_words.len(), base_words.len(), "same words in order");
+    for ((t1, a1, g1), (t2, a2, _g2)) in base_words.iter().zip(spaced_words.iter()) {
+        assert_eq!(t1, t2);
+        assert!(
+            (a2 - (a1 + 0.5 * *g1 as f32)).abs() < 0.01,
+            "word {:?}: tracking not applied (base {:.2} -> {:.2}, {} glyphs)",
+            t1,
+            a1,
+            a2,
+            g1
+        );
+    }
+    for (s1, s2) in base_spaces.iter().zip(spaced_spaces.iter()) {
+        assert!(
+            (s2 - (s1 * 1.25 + 0.5)).abs() < 0.01,
+            "space advance {:.2} -> {:.2} (mult 1.25 + 0.5px tracking)",
+            s1,
+            s2
+        );
+    }
+
+    // Justify still fills the measure exactly with spacing on.
+    for line in &spaced {
+        if line.align == TextAlign::Justify && !line.is_last_in_paragraph {
+            let gaps = line.items.iter().filter(|it| it.is_space()).count() as f32;
+            if line.extra_space != 0.0 {
+                let rendered = line.width + gaps * line.extra_space;
+                assert!(
+                    (rendered - line.max_width).abs() < 0.01,
+                    "spaced justified line renders {:.2}, measure {:.2}",
+                    rendered,
+                    line.max_width
+                );
+            }
+        }
+    }
+
+    // The shape cache must stay valid: breaking with the SAME cache but
+    // default spacing reproduces the untracked advances.
+    let after = break_paragraph_lines(
+        &ch.text,
+        runs,
+        0.0,
+        900.0,
+        12.0,
+        1.2,
+        TextAlign::Justify,
+        &fonts,
+        &mut cache2,
+        None,
+    );
+    let after_words = word_vec(&after, &ch.text);
+    for ((t1, a1, _), (t3, a3, _)) in base_words.iter().zip(after_words.iter()) {
+        assert_eq!(t1, t3);
+        assert!(
+            (a1 - a3).abs() < 0.01,
+            "word {:?}: tracking leaked into the shape cache ({:.2} -> {:.2})",
+            t1,
+            a1,
+            a3
+        );
+    }
 }

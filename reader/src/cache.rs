@@ -1,14 +1,84 @@
 //! Page snapshot caching and garbage collection for instant book opening and turns.
 
 use std::fs;
+use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::split::ReaderSettings;
 
 const CACHE_DIR: &str = "/mnt/us/extensions/reader/cache";
-const MAGIC: &[u8; 8] = b"YBSNAP11"; // 11: Includes line_spacing in snapshot key
+const MAGIC: &[u8; 8] = b"YBSNAP13"; // 13: layout fingerprint over the whole settings (see layout_fingerprint)
+const SNAP12: &[u8; 8] = b"YBSNAP12"; // 12: four typography fields in key
+const SNAP11: &[u8; 8] = b"YBSNAP11"; // 11: line_spacing in key
+const SNAP10: &[u8; 8] = b"YBSNAP10"; // 10: pre-line_spacing
 pub const MAX_CACHED_FILES: usize = 24; // orientation/preset variants coexist
+
+/// Deterministic FNV-1a hasher. std's DefaultHasher is explicitly not
+/// guaranteed stable across releases, and the fingerprint is persisted in
+/// the snapshot header, so it must be.
+struct FnvHasher(u64);
+
+impl std::hash::Hasher for FnvHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        self.0 = h;
+    }
+}
+
+/// The snapshot's layout identity: an FNV hash over every layout-affecting
+/// field of ReaderSettings plus page/sub/dims/engine, in one fixed place.
+/// The recurring "field missing from the cache key" bug family
+/// (line_spacing -> typography four -> spacing two) now has exactly one
+/// spot to extend — add a new layout-affecting field here and the key
+/// follows automatically; forget it and the fingerprint is still stable
+/// for the old fields, so nothing silently serves stale pixels for the
+/// fields that ARE covered.
+fn layout_fingerprint(
+    settings: &ReaderSettings,
+    page: u32,
+    sub: u32,
+    width: u32,
+    height: u32,
+    engine: u8,
+) -> u64 {
+    let mut h = FnvHasher(0xcbf29ce484222325);
+    let s = settings;
+    h.write(&page.to_le_bytes());
+    h.write(&sub.to_le_bytes());
+    h.write(&width.to_le_bytes());
+    h.write(&height.to_le_bytes());
+    h.write(&[engine]);
+    h.write(&s.font_size.to_le_bytes());
+    h.write(&s.margin_pad.to_le_bytes());
+    h.write(&s.line_spacing.to_le_bytes());
+    h.write(&s.paragraph_spacing.to_le_bytes());
+    h.write(&s.indent_em.to_le_bytes());
+    h.write(&[s.hyphenate as u8]);
+    h.write(&[align_code(s.body_align)]);
+    h.write(&s.word_spacing_mult.to_le_bytes());
+    h.write(&s.letter_spacing_px.to_le_bytes());
+    h.write(&[s.contrast as u8]);
+    h.write(&[s.white_cutoff]);
+    h.write(&[s.invert as u8]);
+    h.write(&[s.show_header as u8]);
+    h.write(&[preset_code(&s.split.preset)]);
+    h.write(&s.split.rotation.to_le_bytes());
+    h.write(&s.split.overlap.to_le_bytes());
+    h.write(&s.split.margin_left.to_le_bytes());
+    h.write(&s.split.margin_top.to_le_bytes());
+    h.write(&s.split.margin_right.to_le_bytes());
+    h.write(&s.split.margin_bottom.to_le_bytes());
+    h.write(&[s.split.mirror_even_odd as u8]);
+    h.finish()
+}
 
 /// Byte code for the split preset — part of the snapshot's identity.
 fn preset_code(p: &crate::split::SplitPreset) -> u8 {
@@ -19,6 +89,16 @@ fn preset_code(p: &crate::split::SplitPreset) -> u8 {
         Horizontal3 => 2,
         Vertical2 => 3,
         Grid4 => 4,
+    }
+}
+
+/// Byte code for the body alignment — part of the snapshot's identity.
+fn align_code(a: yread::model::TextAlign) -> u8 {
+    match a {
+        yread::model::TextAlign::Left => 0,
+        yread::model::TextAlign::Center => 1,
+        yread::model::TextAlign::Right => 2,
+        yread::model::TextAlign::Justify => 3,
     }
 }
 
@@ -68,58 +148,113 @@ pub fn load_snapshot_from(
 ) -> Option<Vec<u8>> {
     let path = cache_file_path_at(dir, book_name, page_no, sub_idx);
     let bytes = fs::read(&path).ok()?;
-    let (header_len, snap_spacing) = if bytes.len() >= 62 && &bytes[0..8] == MAGIC {
-        let sp = f32::from_le_bytes(bytes[58..62].try_into().ok()?);
-        (62, sp)
-    } else if bytes.len() >= 58 && &bytes[0..8] == b"YBSNAP10" {
-        (58, 1.0f32)
+    // YBSNAP13: one fingerprint compare covers every layout-affecting
+    // field (and anything added to ReaderSettings later).
+    let header_len = if bytes.len() >= 33 && &bytes[0..8] == MAGIC {
+        let stored = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
+        if stored
+            != layout_fingerprint(settings, page_no as u32, sub_idx as u32, w, h, engine)
+        {
+            return None;
+        }
+        33
     } else {
-        return None;
+        // Legacy headers: per-field compare, with defaults for the fields
+        // they predate, so a pre-upgrade cache entry still serves.
+        let (
+            hlen,
+            snap_spacing,
+            snap_para,
+            snap_indent,
+            snap_hyphenate,
+            snap_align,
+            snap_word,
+            snap_tracking,
+        ) = if bytes.len() >= 72 && &bytes[0..8] == SNAP12 {
+            let sp = f32::from_le_bytes(bytes[58..62].try_into().ok()?);
+            let para = f32::from_le_bytes(bytes[62..66].try_into().ok()?);
+            let indent = f32::from_le_bytes(bytes[66..70].try_into().ok()?);
+            let hyphen = bytes[70] != 0;
+            let align = bytes[71];
+            (72, sp, para, indent, hyphen, align, 1.0, 0.0)
+        } else if bytes.len() >= 62 && &bytes[0..8] == SNAP11 {
+            let sp = f32::from_le_bytes(bytes[58..62].try_into().ok()?);
+            (
+                62,
+                sp,
+                0.25,
+                1.2,
+                true,
+                align_code(yread::model::TextAlign::Justify),
+                1.0,
+                0.0,
+            )
+        } else if bytes.len() >= 58 && &bytes[0..8] == SNAP10 {
+            (
+                58,
+                1.0f32,
+                0.25,
+                1.2,
+                true,
+                align_code(yread::model::TextAlign::Justify),
+                1.0,
+                0.0,
+            )
+        } else {
+            return None;
+        };
+
+        let snap_page = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+        let snap_sub = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
+        let snap_w = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
+        let snap_h = u32::from_le_bytes(bytes[20..24].try_into().ok()?);
+        let snap_font = f32::from_le_bytes(bytes[24..28].try_into().ok()?);
+        let snap_margin = u32::from_le_bytes(bytes[28..32].try_into().ok()?);
+        let snap_contrast = bytes[32];
+        let snap_invert = bytes[33] != 0;
+        let snap_preset = preset_code(&settings.split.preset) ^ bytes[34];
+        let snap_engine = engine ^ bytes[35];
+        let snap_rotation =
+            u16::from_le_bytes(bytes[36..38].try_into().ok()?) ^ settings.split.rotation;
+        let snap_overlap = f32::from_le_bytes(bytes[38..42].try_into().ok()?);
+        let snap_ml = f32::from_le_bytes(bytes[42..46].try_into().ok()?);
+        let snap_mt = f32::from_le_bytes(bytes[46..50].try_into().ok()?);
+        let snap_mr = f32::from_le_bytes(bytes[50..54].try_into().ok()?);
+        let snap_mb = f32::from_le_bytes(bytes[54..58].try_into().ok()?);
+
+        // Must match the requested page, dimensions, font size, visual
+        // settings, spacing and the whole split identity (rotation,
+        // preset, overlap, crop margins) — a tuned crop's snapshot must
+        // never serve a different crop, and a portrait render must never
+        // pose as landscape.
+        if snap_page != page_no
+            || snap_sub != sub_idx
+            || snap_w != w
+            || snap_h != h
+            || (snap_font - settings.font_size).abs() > 0.01
+            || (snap_spacing - settings.line_spacing).abs() > 0.01
+            || (snap_para - settings.paragraph_spacing).abs() > 0.01
+            || (snap_indent - settings.indent_em).abs() > 0.01
+            || snap_hyphenate != settings.hyphenate
+            || snap_align != align_code(settings.body_align)
+            || (snap_word - settings.word_spacing_mult).abs() > 0.01
+            || (snap_tracking - settings.letter_spacing_px).abs() > 0.01
+            || snap_margin != settings.margin_pad
+            || snap_contrast != (settings.contrast as u8)
+            || snap_invert != settings.invert
+            || snap_preset != 0
+            || snap_engine != 0
+            || snap_rotation != 0
+            || !near(snap_overlap, settings.split.overlap)
+            || !near(snap_ml, settings.split.margin_left)
+            || !near(snap_mt, settings.split.margin_top)
+            || !near(snap_mr, settings.split.margin_right)
+            || !near(snap_mb, settings.split.margin_bottom)
+        {
+            return None;
+        }
+        hlen
     };
-
-    let snap_page = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
-    let snap_sub = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
-    let snap_w = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    let snap_h = u32::from_le_bytes(bytes[20..24].try_into().ok()?);
-    let snap_font = f32::from_le_bytes(bytes[24..28].try_into().ok()?);
-    let snap_margin = u32::from_le_bytes(bytes[28..32].try_into().ok()?);
-    let snap_contrast = bytes[32];
-    let snap_invert = bytes[33] != 0;
-    // XOR so a mismatch shows up as nonzero in one integer compare path.
-    let snap_preset = preset_code(&settings.split.preset) ^ bytes[34];
-    let snap_engine = engine ^ bytes[35];
-    let snap_rotation =
-        u16::from_le_bytes(bytes[36..38].try_into().ok()?) ^ settings.split.rotation;
-    let snap_overlap = f32::from_le_bytes(bytes[38..42].try_into().ok()?);
-    let snap_ml = f32::from_le_bytes(bytes[42..46].try_into().ok()?);
-    let snap_mt = f32::from_le_bytes(bytes[46..50].try_into().ok()?);
-    let snap_mr = f32::from_le_bytes(bytes[50..54].try_into().ok()?);
-    let snap_mb = f32::from_le_bytes(bytes[54..58].try_into().ok()?);
-
-    // Must match the requested page, dimensions, font size, visual
-    // settings AND the whole split identity (rotation, preset, overlap,
-    // crop margins) — a tuned crop's snapshot must never serve a
-    // different crop, and a portrait render must never pose as landscape.
-    if snap_page != page_no
-        || snap_sub != sub_idx
-        || snap_w != w
-        || snap_h != h
-        || (snap_font - settings.font_size).abs() > 0.01
-        || (snap_spacing - settings.line_spacing).abs() > 0.01
-        || snap_margin != settings.margin_pad
-        || snap_contrast != (settings.contrast as u8)
-        || snap_invert != settings.invert
-        || snap_preset != 0
-        || snap_engine != 0
-        || snap_rotation != 0
-        || !near(snap_overlap, settings.split.overlap)
-        || !near(snap_ml, settings.split.margin_left)
-        || !near(snap_mt, settings.split.margin_top)
-        || !near(snap_mr, settings.split.margin_right)
-        || !near(snap_mb, settings.split.margin_bottom)
-    {
-        return None;
-    }
 
     let expected_len = (w * h) as usize;
     let pixel_data = &bytes[header_len..];
@@ -162,26 +297,16 @@ pub fn save_snapshot_to(
     let _ = fs::create_dir_all(dir);
     let path = cache_file_path_at(dir, book_name, page_no, sub_idx);
 
-    let mut buf = Vec::with_capacity(62 + pixels.len());
+    let mut buf = Vec::with_capacity(33 + pixels.len());
     buf.extend_from_slice(MAGIC);
+    buf.extend_from_slice(
+        &layout_fingerprint(settings, page_no as u32, sub_idx as u32, w, h, engine).to_le_bytes(),
+    );
     buf.extend_from_slice(&(page_no as u32).to_le_bytes());
     buf.extend_from_slice(&(sub_idx as u32).to_le_bytes());
     buf.extend_from_slice(&w.to_le_bytes());
     buf.extend_from_slice(&h.to_le_bytes());
-    buf.extend_from_slice(&settings.font_size.to_le_bytes());
-    buf.extend_from_slice(&settings.margin_pad.to_le_bytes());
-    buf.push(settings.contrast as u8);
-    buf.push(if settings.invert { 1 } else { 0 });
-    buf.push(preset_code(&settings.split.preset));
     buf.push(engine);
-    buf.extend_from_slice(&settings.split.rotation.to_le_bytes());
-    let sc = settings.split;
-    buf.extend_from_slice(&sc.overlap.to_le_bytes());
-    buf.extend_from_slice(&sc.margin_left.to_le_bytes());
-    buf.extend_from_slice(&sc.margin_top.to_le_bytes());
-    buf.extend_from_slice(&sc.margin_right.to_le_bytes());
-    buf.extend_from_slice(&sc.margin_bottom.to_le_bytes());
-    buf.extend_from_slice(&settings.line_spacing.to_le_bytes());
     buf.extend_from_slice(pixels);
 
     let tmp = format!("{}.tmp", path.display());
@@ -327,6 +452,175 @@ mod tests {
         diff_spacing.line_spacing = 1.4;
         assert_eq!(
             load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_spacing, w, h, 0),
+            None
+        );
+
+        // Different typography fields -> Rejected (a snapshot rendered with
+        // one indent/hyphenation/alignment must never serve another).
+        let mut diff_para = settings;
+        diff_para.paragraph_spacing = 0.6;
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_para, w, h, 0),
+            None
+        );
+        let mut diff_indent = settings;
+        diff_indent.indent_em = 0.0;
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_indent, w, h, 0),
+            None
+        );
+        let mut diff_hyphen = settings;
+        diff_hyphen.hyphenate = false;
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_hyphen, w, h, 0),
+            None
+        );
+        let mut diff_align = settings;
+        diff_align.body_align = yread::model::TextAlign::Left;
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_align, w, h, 0),
+            None
+        );
+
+        // Different word/letter spacing -> Rejected (the fields that
+        // triggered the YBSNAP13 fingerprint bump).
+        let mut diff_word = settings;
+        diff_word.word_spacing_mult = 1.25;
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_word, w, h, 0),
+            None
+        );
+        let mut diff_track = settings;
+        diff_track.letter_spacing_px = 1.0;
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_track, w, h, 0),
+            None
+        );
+
+        // A field that predates the key entirely (show_header changes
+        // margins -> layout) is now covered by the fingerprint too.
+        let mut diff_header = settings;
+        diff_header.show_header = false;
+        assert_eq!(
+            load_snapshot_from(dir, "my_book.epub", 5, 0, &diff_header, w, h, 0),
+            None
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_snapshot_typography_roundtrip_and_legacy_fallback() {
+        let dir = "/tmp/yb_cache_test_typo";
+        let _ = fs::remove_dir_all(dir);
+
+        // Non-default typography + spacing round-trips through the
+        // YBSNAP13 fingerprint header.
+        let settings = ReaderSettings {
+            paragraph_spacing: 0.6,
+            indent_em: 0.0,
+            hyphenate: false,
+            body_align: yread::model::TextAlign::Left,
+            word_spacing_mult: 1.25,
+            letter_spacing_px: 1.0,
+            ..Default::default()
+        };
+        let w = 10;
+        let h = 10;
+        let pixels = vec![128u8; (w * h) as usize];
+        let legacy = ReaderSettings {
+            font_size: 11.0,
+            ..Default::default()
+        };
+        save_snapshot_to(dir, "typo.epub", 1, 0, &settings, w, h, &pixels, 0);
+        assert_eq!(
+            load_snapshot_from(dir, "typo.epub", 1, 0, &settings, w, h, 0),
+            Some(pixels.clone())
+        );
+
+        // A hand-built YBSNAP12 snapshot (typography fields, no spacing)
+        // loads with spacing defaults — a pre-YBSNAP13 entry still serves.
+        let path12 = cache_file_path_at(dir, "legacy12.epub", 1, 0);
+        let mut buf12 = Vec::with_capacity(72 + pixels.len());
+        buf12.extend_from_slice(SNAP12);
+        buf12.extend_from_slice(&1u32.to_le_bytes()); // page
+        buf12.extend_from_slice(&0u32.to_le_bytes()); // sub
+        buf12.extend_from_slice(&w.to_le_bytes());
+        buf12.extend_from_slice(&h.to_le_bytes());
+        buf12.extend_from_slice(&11.0f32.to_le_bytes()); // font
+        buf12.extend_from_slice(&72u32.to_le_bytes()); // margin
+        buf12.push(0); // contrast
+        buf12.push(0); // invert
+        buf12.push(0); // preset
+        buf12.push(0); // engine
+        buf12.extend_from_slice(&0u16.to_le_bytes()); // rotation
+        buf12.extend_from_slice(&0.018f32.to_le_bytes()); // overlap
+        buf12.extend_from_slice(&0.0f32.to_le_bytes()); // ml
+        buf12.extend_from_slice(&0.0f32.to_le_bytes()); // mt
+        buf12.extend_from_slice(&0.0f32.to_le_bytes()); // mr
+        buf12.extend_from_slice(&0.0f32.to_le_bytes()); // mb
+        buf12.extend_from_slice(&1.0f32.to_le_bytes()); // line_spacing
+        buf12.extend_from_slice(&0.25f32.to_le_bytes()); // paragraph_spacing
+        buf12.extend_from_slice(&1.2f32.to_le_bytes()); // indent_em
+        buf12.push(1); // hyphenate
+        buf12.push(3); // align = Justify
+        buf12.extend_from_slice(&pixels);
+        fs::write(&path12, &buf12).unwrap();
+        assert_eq!(
+            load_snapshot_from(dir, "legacy12.epub", 1, 0, &legacy, w, h, 0),
+            Some(pixels.clone()),
+            "YBSNAP12 fallback must serve with spacing defaults"
+        );
+        let changed_spacing = ReaderSettings {
+            font_size: 11.0,
+            word_spacing_mult: 1.25,
+            ..Default::default()
+        };
+        assert_eq!(
+            load_snapshot_from(dir, "legacy12.epub", 1, 0, &changed_spacing, w, h, 0),
+            None,
+            "spacing change must miss a YBSNAP12 cache entry"
+        );
+
+        // A hand-built YBSNAP11 snapshot (no typography fields) loads with
+        // the reader defaults — a pre-upgrade cache entry still serves.
+        let path = cache_file_path_at(dir, "legacy.epub", 1, 0);
+        let mut buf = Vec::with_capacity(62 + pixels.len());
+        buf.extend_from_slice(SNAP11);
+        buf.extend_from_slice(&1u32.to_le_bytes()); // page
+        buf.extend_from_slice(&0u32.to_le_bytes()); // sub
+        buf.extend_from_slice(&w.to_le_bytes());
+        buf.extend_from_slice(&h.to_le_bytes());
+        buf.extend_from_slice(&11.0f32.to_le_bytes()); // font
+        buf.extend_from_slice(&72u32.to_le_bytes()); // margin
+        buf.push(0); // contrast
+        buf.push(0); // invert
+        buf.push(0); // preset
+        buf.push(0); // engine
+        buf.extend_from_slice(&0u16.to_le_bytes()); // rotation
+        buf.extend_from_slice(&0.018f32.to_le_bytes()); // overlap (SplitConfig::default)
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // ml
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // mt
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // mr
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // mb
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // line_spacing
+        buf.extend_from_slice(&pixels);
+        fs::write(&path, &buf).unwrap();
+
+        assert_eq!(
+            load_snapshot_from(dir, "legacy.epub", 1, 0, &legacy, w, h, 0),
+            Some(pixels.clone()),
+            "YBSNAP11 fallback must serve with typography defaults"
+        );
+        // But a typography change after the legacy snapshot was written
+        // misses the cache (the reason for the bump in the first place).
+        let changed = ReaderSettings {
+            font_size: 11.0,
+            indent_em: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            load_snapshot_from(dir, "legacy.epub", 1, 0, &changed, w, h, 0),
             None
         );
 

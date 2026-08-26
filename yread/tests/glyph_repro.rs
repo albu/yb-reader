@@ -1,7 +1,7 @@
 //! Regression and repro test for glyph weight consistency across styles and multi-chapter sessions.
 use yread::epub::parse_epub;
 use yread::font::FontSystem;
-use yread::model::FontStyle;
+use yread::model::{FontStyle, TextAlign};
 use yread::paginate::{paginate_chapter_with_images, LayoutConfig};
 use yread::raster::Rasterizer;
 use yread::shape::ShapeCache;
@@ -58,6 +58,9 @@ fn test_glyph_weight_consistency_across_chapters() {
         paragraph_spacing: 0.25,
         indent_em: 1.2,
         hyphenate: true,
+        body_align: TextAlign::Justify,
+        word_spacing_mult: 1.0,
+        letter_spacing_px: 0.0,
     };
 
     let (ci, ch) = book
@@ -186,6 +189,10 @@ fn test_glyph_weight_consistency_across_chapters() {
                     }
                     yread::line::LineItem::Space { adv, .. } => {
                         cur_x += *adv + extra_space_per_gap;
+                    }
+                    yread::line::LineItem::SoftHyphen { .. } => {}
+                    yread::line::LineItem::Hyphen { adv, .. } => {
+                        cur_x += *adv;
                     }
                     yread::line::LineItem::HardBreak => {}
                 }

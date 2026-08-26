@@ -5,7 +5,7 @@ use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 
 use crate::font::FontSystem;
 use crate::line::{LayoutLine, LineItem};
-use crate::model::{Book, FontStyle, TextAlign};
+use crate::model::{Book, FontStyle};
 use crate::paginate::{LayoutConfig, PageElement, PageLayout};
 
 /// Non-linear E-ink alpha quantization table.
@@ -69,34 +69,14 @@ impl Default for Rasterizer {
 }
 
 /// Pen position adjustment for a line's alignment: (leading offset,
-/// extra advance per inter-word space). Shared truth for the RASTER and
-/// the app's word-rect extraction — when they drifted apart, lookups
-/// hit the wrong word near line ends on justified text (the dictionary
-/// "couldn't find" words it had).
+/// extra advance per inter-word space). Solved ONCE at line-build time
+/// and stored on the LayoutLine — this function only reads the stored
+/// values, so the RASTER and the app's word-rect extraction can never
+/// drift apart again (when they did, lookups hit the wrong word near
+/// line ends on justified text — the dictionary "couldn't find" words
+/// it had).
 pub fn alignment_adjust(line: &crate::line::LayoutLine) -> (f32, f32) {
-    match line.align {
-        TextAlign::Center => {
-            let slack = (line.max_width - line.width).max(0.0);
-            (slack / 2.0, 0.0)
-        }
-        TextAlign::Right => {
-            let slack = (line.max_width - line.width).max(0.0);
-            (slack, 0.0)
-        }
-        TextAlign::Justify => {
-            if !line.is_last_in_paragraph && line.width < line.max_width {
-                let space_count = line.items.iter().filter(|it| it.is_space()).count();
-                if space_count > 0 {
-                    let slack = line.max_width - line.width;
-                    if slack < line.max_width * 0.40 {
-                        return (0.0, slack / space_count as f32);
-                    }
-                }
-            }
-            (0.0, 0.0)
-        }
-        TextAlign::Left => (0.0, 0.0),
-    }
+    line.alignment_adjust()
 }
 
 impl Rasterizer {
@@ -356,39 +336,36 @@ impl Rasterizer {
                         p_height,
                     );
                     cur_x += prefix_shaped.advance;
-
-                    // Draw shaped hyphen
-                    let swash_font = face.as_swash();
-                    if let Some(font_ref) = swash_font {
-                        let hyphen_gid = font_ref.charmap().map('-');
-                        if hyphen_gid != 0 {
-                            let hyp_shaped = crate::shape::ShapedWord {
-                                advance: *hyphen_adv,
-                                glyphs: vec![crate::shape::ShapedGlyph {
-                                    glyph_id: hyphen_gid,
-                                    cluster: 0,
-                                    x_advance: *hyphen_adv,
-                                    y_advance: 0.0,
-                                    x_offset: 0.0,
-                                    y_offset: 0.0,
-                                }],
-                            };
-                            self.render_shaped_word(
-                                &hyp_shaped,
-                                cur_x,
-                                baseline_y,
-                                run_size,
-                                style.font_style,
-                                face,
-                                fg,
-                                fb,
-                                stride,
-                                p_width,
-                                p_height,
-                            );
-                        }
-                    }
-                    cur_x += *hyphen_adv;
+                    cur_x += self.render_hyphen_glyph(
+                        cur_x,
+                        baseline_y,
+                        run_size,
+                        style,
+                        *hyphen_adv,
+                        fonts,
+                        fb,
+                        stride,
+                        p_width,
+                        p_height,
+                    );
+                }
+                LineItem::SoftHyphen { .. } => {
+                    // Invisible when the line did not break here.
+                }
+                LineItem::Hyphen { adv, style } => {
+                    let run_size = base_font_size * style.size_mult;
+                    cur_x += self.render_hyphen_glyph(
+                        cur_x,
+                        baseline_y,
+                        run_size,
+                        style,
+                        *adv,
+                        fonts,
+                        fb,
+                        stride,
+                        p_width,
+                        p_height,
+                    );
                 }
                 LineItem::Space { adv, .. } => {
                     cur_x += *adv + extra_space_per_gap;
@@ -396,6 +373,59 @@ impl Rasterizer {
                 LineItem::HardBreak => {}
             }
         }
+    }
+
+    /// Draw a hyphen glyph at the pen position and return its advance.
+    fn render_hyphen_glyph(
+        &mut self,
+        cur_x: f32,
+        baseline_y: f32,
+        run_size: f32,
+        style: &crate::model::Style,
+        hyphen_adv: f32,
+        fonts: &FontSystem,
+        fb: &mut [u8],
+        stride: usize,
+        p_width: usize,
+        p_height: usize,
+    ) -> f32 {
+        let face = fonts.face_for_style(style.font_style);
+        let fg = style.color.unwrap_or(0);
+        let swash_font = face.as_swash();
+        if let Some(font_ref) = swash_font {
+            let hyphen_gid = font_ref.charmap().map('-');
+            if hyphen_gid != 0 {
+                let hyp_shaped = crate::shape::ShapedWord {
+                    advance: hyphen_adv,
+                    glyphs: vec![crate::shape::ShapedGlyph {
+                        glyph_id: hyphen_gid,
+                        cluster: 0,
+                        x_advance: hyphen_adv,
+                        y_advance: 0.0,
+                        x_offset: 0.0,
+                        y_offset: 0.0,
+                    }],
+                };
+                self.render_shaped_word(
+                    &hyp_shaped,
+                    cur_x,
+                    baseline_y,
+                    run_size,
+                    style.font_style,
+                    face,
+                    fg,
+                    fb,
+                    stride,
+                    p_width,
+                    p_height,
+                );
+            }
+        }
+        // Always consume the hyphen advance, even if the face has no '-'
+        // glyph: the word-rect extractor advances by the same amount
+        // unconditionally, so the pen must too (raster ↔ hit-test parity —
+        // the same drift class that broke dictionary taps once).
+        hyphen_adv
     }
 
     fn render_shaped_word(

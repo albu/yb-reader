@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use yread::epub::parse_epub;
 use yread::font::FontSystem;
-use yread::paginate::LayoutConfig;
+use yread::model::TextAlign;
+use yread::paginate::{paginate_chapter_with_images, LayoutConfig, PageElement};
 use yread::raster::Rasterizer;
 use yread::shape::ShapeCache;
 
@@ -75,10 +76,18 @@ fn test_render_real_sample_book() {
         paragraph_spacing: 0.15,
         indent_em: 1.2,
         hyphenate: true,
+        body_align: TextAlign::Justify,
+        word_spacing_mult: 1.0,
+        letter_spacing_px: 0.0,
     };
 
     // Target Chapter 7: "Reliable, Scalable, and Maintainable Applications"
-    let target_chap = &book.chapters[7];
+    // (guard: books with fewer chapters — including this test's own
+    // synthetic fixtures — must not panic on the hardcoded index).
+    let Some(target_chap) = book.chapters.get(7) else {
+        println!("Chapter 7 absent — skipping chapter-7 render");
+        return;
+    };
 
     let t2 = Instant::now();
     let (page_table, layouts) = yread::paginate::paginate_chapter_with_images(
@@ -209,6 +218,8 @@ fn test_render_real_sample_book() {
                                 }
                             }
                             yread::line::LineItem::Space { .. } => s.push(' '),
+                            yread::line::LineItem::SoftHyphen { .. } => {}
+                            yread::line::LineItem::Hyphen { .. } => s.push('-'),
                             yread::line::LineItem::HardBreak => {}
                             yread::line::LineItem::HyphenatedPrefix {
                                 byte_start,
@@ -251,6 +262,120 @@ fn test_render_real_sample_book() {
                                 }
                                 _ => {}
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The real-book verification gate. Opt-in via YB_TEST_EPUB (same pattern
+/// as test_render_real_sample_book): every breaker/justification change
+/// must keep the width-model invariants green on a real book across
+/// several chapters × a settings matrix — the repo's own "revive only
+/// against per-font-size real-book verification" gate from the
+/// Knuth-Plass removal commit.
+#[test]
+fn test_real_book_typography_properties() {
+    let default_path = "/tmp/sample_book.epub".to_string();
+    let book_path = std::env::var("YB_TEST_EPUB").unwrap_or(default_path);
+    if !Path::new(&book_path).exists() {
+        return;
+    }
+    let data = fs::read(&book_path).expect("read epub");
+    let book = parse_epub(&data).expect("parse");
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+
+    // Same recipe as the app (LayoutConfig::reader): a hand-rolled config
+    // stopped representing device layout once the two drifted — the exact
+    // drift the gallery exists to prevent.
+    let mk = |fs: f32, margin: u32, ls: f32, align: TextAlign, hyphen: bool| {
+        LayoutConfig::reader(
+            1236, 1648, margin, fs, ls, true, 0.25, 1.2, hyphen, align, 1.0, 0.0,
+        )
+    };
+    let configs: Vec<(&str, LayoutConfig)> = vec![
+        ("base", mk(11.0, 72, 1.2, TextAlign::Justify, true)),
+        ("fs13", mk(13.0, 72, 1.2, TextAlign::Justify, true)),
+        ("fs16", mk(16.0, 72, 1.2, TextAlign::Justify, true)),
+        ("margin36", mk(11.0, 36, 1.2, TextAlign::Justify, true)),
+        ("margin108", mk(11.0, 108, 1.2, TextAlign::Justify, true)),
+        ("align_left", mk(11.0, 72, 1.2, TextAlign::Left, true)),
+        ("hyphen_off", mk(11.0, 72, 1.2, TextAlign::Justify, false)),
+    ];
+
+    let chapter_idx: Vec<usize> = (0..book.chapters.len().min(8)).collect();
+    let lang = yread::hypher_lang(&book.meta.language);
+
+    for &ci in &chapter_idx {
+        let chapter = &book.chapters[ci];
+        for (name, config) in &configs {
+            let (_pt, layouts) = paginate_chapter_with_images(
+                chapter,
+                Some(&book.image_sizes),
+                config,
+                &fonts,
+                &mut cache,
+                Some(lang),
+            );
+            assert!(
+                !layouts.is_empty(),
+                "ch{} {}: empty pagination",
+                ci,
+                name
+            );
+            for (pi, layout) in layouts.iter().enumerate() {
+                for elem in &layout.elements {
+                    let PageElement::Line { line, .. } = elem else {
+                        continue;
+                    };
+                    // A single item wider than the measure (URL, code
+                    // token) is the pre-existing over-wide-word class —
+                    // no gaps can pull it back, so it is exempt.
+                    let max_item = line.items.iter().map(|it| it.advance()).fold(0.0, f32::max);
+                    let over = line.width - line.max_width;
+                    if over > 2.5 && max_item <= line.max_width {
+                        panic!(
+                            "ch{} {} p{}: natural width {:.1} exceeds measure {:.1} by {:.1}px",
+                            ci,
+                            name,
+                            pi,
+                            line.width,
+                            line.max_width,
+                            over
+                        );
+                    }
+
+                    if line.align != TextAlign::Justify || line.is_last_in_paragraph {
+                        continue;
+                    }
+                    let gaps = line.items.iter().filter(|it| it.is_space()).count() as f32;
+                    if gaps == 0.0 {
+                        continue;
+                    }
+                    let rendered = line.width + gaps * line.extra_space;
+                    if max_item <= line.max_width {
+                        assert!(
+                            rendered <= line.max_width + 0.01,
+                            "ch{} {} p{}: justified rendered width {:.2} exceeds measure {:.2}",
+                            ci,
+                            name,
+                            pi,
+                            rendered,
+                            line.max_width
+                        );
+                        if line.extra_space != 0.0 {
+                            assert!(
+                                (rendered - line.max_width).abs() < 0.01,
+                                "ch{} {} p{}: justified line renders {:.2}, measure {:.2}",
+                                ci,
+                                name,
+                                pi,
+                                rendered,
+                                line.max_width
+                            );
                         }
                     }
                 }

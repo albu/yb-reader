@@ -1142,15 +1142,25 @@ fn resolve_relative_path(base_file: &str, target: &str) -> String {
 fn normalize_spaces(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_ws = false;
+    let mut ws_has_nbsp = false;
     for c in s.chars() {
         if c.is_whitespace() {
+            let is_nbsp = c == '\u{00A0}';
             if !in_ws {
-                out.push(' ');
+                // A whitespace run begins. A NBSP anywhere in the run makes
+                // the whole run non-breaking ("Mr. Smith", "10 km").
+                out.push(if is_nbsp { '\u{00A0}' } else { ' ' });
                 in_ws = true;
+                ws_has_nbsp = is_nbsp;
+            } else if is_nbsp && !ws_has_nbsp {
+                out.pop();
+                out.push('\u{00A0}');
+                ws_has_nbsp = true;
             }
         } else {
             out.push(c);
             in_ws = false;
+            ws_has_nbsp = false;
         }
     }
     out

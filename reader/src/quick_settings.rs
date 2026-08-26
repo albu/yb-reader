@@ -9,6 +9,7 @@ use yui::Orientation;
 
 use crate::crop_dialog::CropDialog;
 use crate::split::{ContrastMode, ReaderSettings, SplitConfig, SplitPreset};
+use yread::model::TextAlign;
 
 const SHEET_H_PT: f32 = 197.0;
 const PAD_PT: f32 = 16.0;
@@ -22,6 +23,9 @@ pub struct QuickSettingsSheet {
     pub total: usize,
     pub settings: ReaderSettings,
     pub is_pdf: bool,
+    /// 0 = main page (size/margins/spacing/contrast/night), 1 = typography
+    /// page (alignment/hyphenation/indent/paragraph spacing).
+    page: u8,
     pub doc: Option<std::rc::Rc<mupdf::Document>>,
     pub page_gray: Option<Vec<u8>>,
     dims: (i32, i32),
@@ -47,6 +51,7 @@ impl QuickSettingsSheet {
             total,
             settings,
             is_pdf,
+            page: 0,
             doc,
             page_gray,
             dims: (1236, 1648),
@@ -69,6 +74,169 @@ impl QuickSettingsSheet {
             self.page_gray = Some(new_gray);
         }
         Action::Redraw
+    }
+
+    /// The typography page: body alignment, hyphenation, first-line indent
+    /// and paragraph spacing. Every change rides the same live-render +
+    /// persistence path as the main page (apply_change).
+    fn draw_typography_page(&mut self, p: &mut Painter, sheet_y: i32, w: i32) {
+        let pad = pt(PAD_PT);
+        let mut y = sheet_y + pt(12.0);
+
+        // Row 1: ALIGN (body paragraphs: Justify vs ragged Left)
+        p.text(pad, y + pt(15.0), 8.5, 0, "ALIGN");
+        let aligns = [(TextAlign::Justify, "Justify"), (TextAlign::Left, "Left")];
+        let a_btn_w = pt(62.0);
+        for (i, (align, a_lbl)) in aligns.iter().enumerate() {
+            let bx = w - pad - (2 - i as i32) * (a_btn_w + pt(4.0));
+            let br = Rect::new(bx, y, a_btn_w, pt(BTN_H_PT));
+            if self.settings.body_align == *align {
+                p.rect(br, 0);
+                p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.5, 255, a_lbl);
+            } else {
+                p.rect_outline_t(br, 1, 120);
+                p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.5, 0, a_lbl);
+            }
+        }
+        y += pt(ROW_H_PT) + pt(4.0);
+
+        // Row 2: HYPHEN
+        p.text(pad, y + pt(15.0), 8.5, 0, "HYPHEN");
+        let h_btn_w = pt(52.0);
+        for (i, (on, h_lbl)) in [(true, "On"), (false, "Off")].iter().enumerate() {
+            let bx = w - pad - (2 - i as i32) * (h_btn_w + pt(4.0));
+            let br = Rect::new(bx, y, h_btn_w, pt(BTN_H_PT));
+            if self.settings.hyphenate == *on {
+                p.rect(br, 0);
+                p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.5, 255, h_lbl);
+            } else {
+                p.rect_outline_t(br, 1, 120);
+                p.text_center_in(br.x, br.x + br.w, y + pt(15.0), 7.5, 0, h_lbl);
+            }
+        }
+        y += pt(ROW_H_PT) + pt(4.0);
+
+        // Row 3: INDENT (first-line indent in em; 0.0 = flush block style)
+        p.text(pad, y + pt(15.0), 8.5, 0, "INDENT");
+        let indent_str = format!("{:.1}em", self.settings.indent_em);
+        p.text_center_in(
+            pad + pt(70.0),
+            pad + pt(130.0),
+            y + pt(15.0),
+            9.0,
+            0,
+            &indent_str,
+        );
+        let i_minus = Rect::new(w - pad - pt(70.0), y, pt(30.0), pt(BTN_H_PT));
+        let i_plus = Rect::new(w - pad - pt(34.0), y, pt(30.0), pt(BTN_H_PT));
+        p.rect_outline_t(i_minus, 1, 0);
+        p.text_center_in(i_minus.x, i_minus.x + i_minus.w, y + pt(15.0), 10.0, 0, "-");
+        p.rect_outline_t(i_plus, 1, 0);
+        p.text_center_in(i_plus.x, i_plus.x + i_plus.w, y + pt(15.0), 10.0, 0, "+");
+        y += pt(ROW_H_PT) + pt(4.0);
+
+        // Row 4: PARA SPACE (paragraph spacing in em)
+        p.text(pad, y + pt(15.0), 8.5, 0, "PARA SPACE");
+        let ps_str = format!("{:.2}em", self.settings.paragraph_spacing);
+        p.text_center_in(
+            pad + pt(70.0),
+            pad + pt(130.0),
+            y + pt(15.0),
+            9.0,
+            0,
+            &ps_str,
+        );
+        let ps_minus = Rect::new(w - pad - pt(70.0), y, pt(30.0), pt(BTN_H_PT));
+        let ps_plus = Rect::new(w - pad - pt(34.0), y, pt(30.0), pt(BTN_H_PT));
+        p.rect_outline_t(ps_minus, 1, 0);
+        p.text_center_in(ps_minus.x, ps_minus.x + ps_minus.w, y + pt(15.0), 10.0, 0, "-");
+        p.rect_outline_t(ps_plus, 1, 0);
+        p.text_center_in(ps_plus.x, ps_plus.x + ps_plus.w, y + pt(15.0), 10.0, 0, "+");
+        y += pt(ROW_H_PT) + pt(6.0);
+
+        // Row 5: BACK
+        let back_btn = Rect::new(pad, y, pt(90.0), pt(BTN_H_PT));
+        p.rect_outline_t(back_btn, 1, 0);
+        p.text_center_in(back_btn.x, back_btn.x + back_btn.w, y + pt(15.0), 8.0, 0, "◀ BACK");
+        p.text_center_in(
+            pad + pt(96.0),
+            w - pad,
+            y + pt(15.0),
+            7.5,
+            120,
+            "live preview updates as you tap",
+        );
+    }
+
+    /// The typography page's tap handling. Geometry mirrors
+    /// `draw_typography_page` exactly.
+    fn handle_typography_gesture(&mut self, vx: i32, vy: i32, sheet_y: i32, w: i32) -> Action {
+        let pad = pt(PAD_PT);
+        let mut y = sheet_y + pt(12.0);
+
+        // Row 1: ALIGN
+        let aligns = [TextAlign::Justify, TextAlign::Left];
+        let a_btn_w = pt(62.0);
+        for (i, align) in aligns.iter().enumerate() {
+            let bx = w - pad - (2 - i as i32) * (a_btn_w + pt(4.0));
+            let br = Rect::new(bx, y, a_btn_w, pt(BTN_H_PT));
+            if br.contains(vx, vy) {
+                self.settings.body_align = *align;
+                return self.apply_change();
+            }
+        }
+        y += pt(ROW_H_PT) + pt(4.0);
+
+        // Row 2: HYPHEN
+        let h_btn_w = pt(52.0);
+        for (i, on) in [true, false].iter().enumerate() {
+            let bx = w - pad - (2 - i as i32) * (h_btn_w + pt(4.0));
+            let br = Rect::new(bx, y, h_btn_w, pt(BTN_H_PT));
+            if br.contains(vx, vy) {
+                self.settings.hyphenate = *on;
+                return self.apply_change();
+            }
+        }
+        y += pt(ROW_H_PT) + pt(4.0);
+
+        // Row 3: INDENT (0.1 em steps)
+        let i_minus = Rect::new(w - pad - pt(70.0), y, pt(30.0), pt(BTN_H_PT));
+        let i_plus = Rect::new(w - pad - pt(34.0), y, pt(30.0), pt(BTN_H_PT));
+        if i_minus.contains(vx, vy) {
+            self.settings.indent_em =
+                (((self.settings.indent_em - 0.1) * 10.0).round() / 10.0).max(0.0);
+            return self.apply_change();
+        }
+        if i_plus.contains(vx, vy) {
+            self.settings.indent_em =
+                (((self.settings.indent_em + 0.1) * 10.0).round() / 10.0).min(2.5);
+            return self.apply_change();
+        }
+        y += pt(ROW_H_PT) + pt(4.0);
+
+        // Row 4: PARA SPACE (0.05 em steps)
+        let ps_minus = Rect::new(w - pad - pt(70.0), y, pt(30.0), pt(BTN_H_PT));
+        let ps_plus = Rect::new(w - pad - pt(34.0), y, pt(30.0), pt(BTN_H_PT));
+        if ps_minus.contains(vx, vy) {
+            self.settings.paragraph_spacing =
+                (((self.settings.paragraph_spacing - 0.05) * 100.0).round() / 100.0).max(0.0);
+            return self.apply_change();
+        }
+        if ps_plus.contains(vx, vy) {
+            self.settings.paragraph_spacing =
+                (((self.settings.paragraph_spacing + 0.05) * 100.0).round() / 100.0).min(1.0);
+            return self.apply_change();
+        }
+        y += pt(ROW_H_PT) + pt(6.0);
+
+        // Row 5: BACK
+        let back_btn = Rect::new(pad, y, pt(90.0), pt(BTN_H_PT));
+        if back_btn.contains(vx, vy) {
+            self.page = 0;
+            return Action::Redraw;
+        }
+
+        Action::Keep
     }
 }
 
@@ -117,6 +285,11 @@ impl Screen for QuickSettingsSheet {
             Rect::new(handle_x, sheet_y + pt(4.0), handle_w, pt(2.5)),
             170,
         );
+
+        if self.page == 1 {
+            self.draw_typography_page(p, sheet_y, w);
+            return;
+        }
 
         let mut y = sheet_y + pt(12.0);
         let pad = pt(PAD_PT);
@@ -286,14 +459,24 @@ impl Screen for QuickSettingsSheet {
         }
         y += pt(ROW_H_PT) + pt(6.0);
 
-        // Row 4: Action Footer (tap above · swipe down hint)
+        // Footer: dismiss hint + Typography page entry
         p.text_center_in(
             pad,
-            w - pad,
+            w - pad - pt(96.0),
             y + pt(15.0),
             7.5,
             120,
-            "tap above · swipe down to close",
+            "tap above · swipe down",
+        );
+        let typog_btn = Rect::new(w - pad - pt(88.0), y - pt(4.0), pt(88.0), pt(BTN_H_PT));
+        p.rect_outline_t(typog_btn, 1, 120);
+        p.text_center_in(
+            typog_btn.x,
+            typog_btn.x + typog_btn.w,
+            y + pt(15.0),
+            7.5,
+            0,
+            "TYPOG ▶",
         );
     }
 
@@ -317,6 +500,10 @@ impl Screen for QuickSettingsSheet {
         // Tap outside sheet -> dismiss
         if vy < sheet_y {
             return Action::Pop;
+        }
+
+        if self.page == 1 {
+            return self.handle_typography_gesture(vx, vy, sheet_y, w);
         }
 
         let mut y = sheet_y + pt(12.0);
@@ -425,9 +612,16 @@ impl Screen for QuickSettingsSheet {
             return self.apply_change();
         }
 
-        Action::Keep
-    }
+        // Typography page entry (footer button)
+        let footer_y = y + pt(ROW_H_PT) + pt(6.0);
+        let typog_btn = Rect::new(w - pad - pt(88.0), footer_y - pt(4.0), pt(88.0), pt(BTN_H_PT));
+        if typog_btn.contains(vx, vy) {
+            self.page = 1;
+            return Action::Redraw;
+        }
 
+       Action::Keep
+   }
     fn default_edges(&self) -> bool {
         false
     }
