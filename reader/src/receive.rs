@@ -1734,7 +1734,7 @@ impl Screen for ReceiveScreen {
     fn on_enter(&mut self) -> Action {
         crate::awake::screen_wants_awake(true);
         self.start_setup();
-        Action::RedrawFull
+        Action::Redraw
     }
 
     fn on_leave(&mut self) {
@@ -1764,11 +1764,11 @@ impl Screen for ReceiveScreen {
                     let pin = srv.token().to_string();
                     self.phase = Phase::Ready { url, pin, ssid };
                     self.server = Some(srv);
-                    Action::RedrawFull
+                    Action::Redraw
                 }
                 Some(Err(e)) => {
                     self.phase = Phase::Failed(e);
-                    Action::RedrawFull
+                    Action::Redraw
                 }
                 None => Action::Keep,
             }

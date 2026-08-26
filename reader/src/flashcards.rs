@@ -256,7 +256,7 @@ impl Screen for FlashcardsScreen {
     }
 
     fn on_enter(&mut self) -> Action {
-        Action::RedrawFull
+        Action::Redraw
     }
 
     fn draw(&mut self, p: &mut Painter) {

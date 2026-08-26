@@ -227,7 +227,7 @@ impl Screen for ScreensaversScreen {
         // Opening the manager is also the natural GC point: replaced or
         // deleted images must not leave orphaned render files behind.
         ybdev::img::ss_cache_gc(&Self::current_hashes());
-        Action::RedrawFull
+        Action::Redraw
     }
 
     fn draw(&mut self, p: &mut Painter) {

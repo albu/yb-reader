@@ -266,7 +266,7 @@ impl Default for CurtainScreen {
 impl Screen for CurtainScreen {
     fn on_enter(&mut self) -> Action {
         self.fl = Frontlight::open().ok();
-        Action::RedrawFull
+        Action::Redraw
     }
 
     fn draw(&mut self, p: &mut Painter) {

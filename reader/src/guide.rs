@@ -238,7 +238,7 @@ impl Default for GuideScreen {
 
 impl Screen for GuideScreen {
     fn on_enter(&mut self) -> Action {
-        Action::RedrawFull
+        Action::Redraw
     }
 
     fn draw(&mut self, p: &mut Painter) {
@@ -312,7 +312,7 @@ impl Screen for GuideScreen {
                         GuidePage::Reading => GuidePage::System,
                         GuidePage::System => GuidePage::Reading,
                     };
-                    Action::RedrawFull
+                    Action::Redraw
                 }
                 _ => Action::Keep,
             },
@@ -328,11 +328,11 @@ impl Screen for GuideScreen {
 
                 if r_tab1.contains(vx, vy) && self.page != GuidePage::Reading {
                     self.page = GuidePage::Reading;
-                    return Action::RedrawFull;
+                    return Action::Redraw;
                 }
                 if r_tab2.contains(vx, vy) && self.page != GuidePage::System {
                     self.page = GuidePage::System;
-                    return Action::RedrawFull;
+                    return Action::Redraw;
                 }
 
                 Action::Keep
@@ -415,7 +415,7 @@ mod tests {
             ex: 200,
             ey: 500,
         });
-        assert!(matches!(act, Action::RedrawFull));
+        assert!(matches!(act, Action::Redraw));
         assert_eq!(s.page, GuidePage::System);
 
         // Swipe East flips back to Reading
@@ -426,7 +426,7 @@ mod tests {
             ex: 500,
             ey: 500,
         });
-        assert!(matches!(act, Action::RedrawFull));
+        assert!(matches!(act, Action::Redraw));
         assert_eq!(s.page, GuidePage::Reading);
     }
 }

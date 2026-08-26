@@ -582,7 +582,7 @@ impl Screen for HomeScreen {
 
     fn on_resume(&mut self) -> Action {
         self.scan();
-        Action::RedrawFull
+        Action::Redraw
     }
 
     fn draw(&mut self, p: &mut Painter) {
@@ -847,7 +847,7 @@ impl Screen for HomeScreen {
                         if y >= pt(HEADER_RULE_PT) && y < pt(LIST_TOP_PT)
                             && !self.collections.is_empty() {
                                 self.cycle_collection();
-                                return Action::RedrawFull;
+                                return Action::Redraw;
                             }
 
                         // Sort control: the footer band (primary, the hint
@@ -855,7 +855,7 @@ impl Screen for HomeScreen {
                         if HomeScreen::in_footer(y, self.h) || y < pt(HEADER_RULE_PT) {
                             self.sort = self.sort.next();
                             self.apply_sort();
-                            return Action::RedrawFull;
+                            return Action::Redraw;
                         }
 
                         let rows_top = pt(LIST_TOP_PT);
@@ -880,7 +880,7 @@ impl Screen for HomeScreen {
             } if self.tab == 1 => {
                 self.offset =
                     (self.offset + self.per_page.max(1)).min(self.names.len().saturating_sub(1));
-                Action::RedrawFull
+                Action::Redraw
             }
             Gesture::Swipe {
                 dir: SwipeDir::South,
@@ -888,7 +888,7 @@ impl Screen for HomeScreen {
             } if self.tab == 1 => {
                 if self.offset > 0 {
                     self.offset -= self.per_page.min(self.offset);
-                    Action::RedrawFull
+                    Action::Redraw
                 } else {
                     Action::Keep
                 }

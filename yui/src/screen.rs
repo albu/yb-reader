@@ -40,9 +40,9 @@ fn on_tick(&mut self) -> Action {
     /// This screen was pushed (it is now the top). Runs before the first
     /// draw; heavy setup (opening a document, network) belongs here. The
     /// returned action is applied after the push — e.g. an overlay message
-    /// on a failed setup.
+    /// on a failed setup. Default repaints with a flash-less partial refresh.
     fn on_enter(&mut self) -> Action {
-        Action::RedrawFull
+        Action::Redraw
     }
 
     /// This screen was popped for good (not merely covered). Release
@@ -50,10 +50,9 @@ fn on_tick(&mut self) -> Action {
     fn on_leave(&mut self) {}
 
     /// An overlay above us was popped; we are the top again. Default
-    /// repaints with a full flash — screens holding a pixel cache may
-    /// prefer `Action::Redraw` to re-present it cheaply.
+    /// repaints with a flash-less partial refresh.
     fn on_resume(&mut self) -> Action {
-        Action::RedrawFull
+        Action::Redraw
     }
 
     /// How long App waits for a gesture before calling on_tick.

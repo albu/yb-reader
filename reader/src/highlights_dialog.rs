@@ -64,7 +64,7 @@ impl<F: FnMut(HighlightsAction) -> Action> Screen for HighlightsDialog<F> {
     }
 
     fn on_enter(&mut self) -> Action {
-        Action::RedrawFull
+        Action::Redraw
     }
 
     /// A delete confirm above us popped: reload and re-present, so the
@@ -75,7 +75,7 @@ impl<F: FnMut(HighlightsAction) -> Action> Screen for HighlightsDialog<F> {
         if self.offset >= self.items.len() {
             self.offset = self.items.len().saturating_sub(1);
         }
-        Action::RedrawFull
+        Action::Redraw
     }
 
     fn draw(&mut self, p: &mut Painter) {

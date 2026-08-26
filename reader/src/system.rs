@@ -115,7 +115,14 @@ impl Screen for SystemScreen {
         self.ss_count = crate::screensavers::scan().len();
         let devices_path = ybdev::devices::devices_path();
         self.dev_count = ybdev::devices::DeviceStore::load(&devices_path).devices.len();
-        Action::RedrawFull
+        Action::Redraw
+    }
+
+    fn on_resume(&mut self) -> Action {
+        self.ss_count = crate::screensavers::scan().len();
+        let devices_path = ybdev::devices::devices_path();
+        self.dev_count = ybdev::devices::DeviceStore::load(&devices_path).devices.len();
+        Action::Redraw
     }
 
     fn draw(&mut self, p: &mut Painter) {

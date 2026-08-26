@@ -419,10 +419,15 @@ fn transition(stack: &mut Vec<Box<dyn Screen>>, a: Action) -> (bool, Option<Refr
                 }
                 return (false, None);
             }
+            let was_sleep = stack.last().map(|s| s.is_sleep()).unwrap_or(false);
             if let Some(mut popped) = stack.pop() {
                 popped.on_leave();
             }
-            let a = stack.last_mut().unwrap().on_resume();
+            let mut a = stack.last_mut().unwrap().on_resume();
+            if was_sleep {
+                // Exiting SleepScreen must ALWAYS do a full waveform refresh to purge photographic screensaver ghosting!
+                a = Action::RedrawFull;
+            }
             transition(stack, a)
         }
         Action::PopN(n) => {
@@ -430,12 +435,19 @@ fn transition(stack: &mut Vec<Box<dyn Screen>>, a: Action) -> (bool, Option<Refr
             // result. Clamped to the overlays: never quits by popping the
             // root (an explicit Pop from the root screen means that).
             let n = n.min(stack.len().saturating_sub(1));
+            let mut was_sleep = false;
             for _ in 0..n {
                 if let Some(mut popped) = stack.pop() {
+                    if popped.is_sleep() {
+                        was_sleep = true;
+                    }
                     popped.on_leave();
                 }
             }
-            let a = stack.last_mut().unwrap().on_resume();
+            let mut a = stack.last_mut().unwrap().on_resume();
+            if was_sleep {
+                a = Action::RedrawFull;
+            }
             transition(stack, a)
         }
         Action::Quit => (false, None),
@@ -584,6 +596,28 @@ mod tests {
         let mut stack: Vec<Box<dyn Screen>> = vec![base, fake("over", &log)];
         let (_, redraw) = transition(&mut stack, Action::Pop);
         assert_eq!(redraw, Some(RefreshMode::Partial));
+    }
+
+    #[test]
+    fn waking_from_sleep_forces_full_refresh() {
+        struct FakeSleep;
+        impl Screen for FakeSleep {
+            fn draw(&mut self, _p: &mut Painter) {}
+            fn is_sleep(&self) -> bool {
+                true
+            }
+        }
+
+        let log = Rc::new(RefCell::new(vec![]));
+        // Underlying screen returns Redraw (partial), but SleepScreen pop forces Full:
+        let base: Box<dyn Screen> = Box::new(Fake {
+            name: "base",
+            log: log.clone(),
+            resume: Action::Redraw,
+        });
+        let mut stack: Vec<Box<dyn Screen>> = vec![base, Box::new(FakeSleep)];
+        let (_, redraw) = transition(&mut stack, Action::Pop);
+        assert_eq!(redraw, Some(RefreshMode::Full));
     }
 
     #[test]
