@@ -36,7 +36,7 @@ const HEADER_RULE_PT: f32 = 40.0;
 /// Action rows start under the header rule when no Continue card
 /// exists, below the card otherwise.
 const ROWS_TOP_PT: f32 = 56.0;
-const ROWS_TOP_CONT_PT: f32 = 128.0;
+const ROWS_TOP_CONT_PT: f32 = 114.0;
 const ROW_H_PT: f32 = 38.0;
 const ROW_LABEL_PT: f32 = 10.0;
 const ROW_LABEL_BASE_PT: f32 = 23.0;
@@ -49,12 +49,11 @@ const ICON_GAP_PT: f32 = 8.0;
 const LIB_COUNT_PT: f32 = 7.5;
 const KICKER2_SIZE_PT: f32 = 7.0;
 
-/// Continue hero block (only drawn when a last-read book exists).
-const CONT_TOP_PT: f32 = 64.0;
-const CONT_H_PT: f32 = 46.0;
+/// Continue hero card (only drawn when a last-read book exists).
+const CONT_TOP_PT: f32 = 50.0;
+const CONT_H_PT: f32 = 52.0;
 const CONT_TITLE_PT: f32 = 10.5;
 const CONT_SUB_PT: f32 = 7.5;
-const CONT_ICON_PT: f32 = 16.0;
 
 /// All-books list: kicker + rows.
 const LIST_TOP_PT: f32 = 64.0;
@@ -128,6 +127,13 @@ fn recency_key(name: &str, pos_map: &HashMap<String, Pos>, p: &Path) -> u64 {
     read.max(file)
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Row progress label: "38%" when the total is known, nothing when it
 /// isn't. Clamped at 100 for the last page.
 fn progress_str(pos: &Pos) -> Option<String> {
@@ -192,8 +198,11 @@ pub struct HomeScreen {
     /// Header clock as painted — on_tick compares a fresh reading
     /// against it and redraws when the minute flips.
     hdr_time: String,
-    /// Flashcards due, cached at scan() so draw never touches flash.
+/// Flashcards due, cached at scan() so draw never touches flash.
     due_count: usize,
+    /// Timestamps (unix millis) of recent taps on the build stamp, for
+    /// the 5-tap easter egg. Pruned against a rolling window.
+    stamp_taps: Vec<u64>,
 }
 
 impl HomeScreen {
@@ -221,6 +230,38 @@ impl HomeScreen {
             snap: None,
             hdr_time: String::new(),
             due_count: 0,
+            stamp_taps: Vec::new(),
+        }
+    }
+
+    /// Bounding box of the build stamp (`v<sha>`, top-right of the
+    /// header band). Taps here count toward the easter egg instead of
+    /// cycling the sort — the stamp is metadata, not a control.
+    fn stamp_box(w: i32) -> Rect {
+        let pad = pt(PAD_PT);
+        let stamp_w = pt(36.0); // "v" + 7-char sha at 7 pt, generous
+        Rect::new(
+            w - pad - stamp_w,
+            pt(KICKER_BASE_PT) - pt(8.0),
+            stamp_w,
+            pt(12.0),
+        )
+    }
+
+    /// Count one tap on the build stamp; returns true on the 5th tap
+    /// within the window (and resets). Pure and testable via `now`.
+    fn stamp_tap(&mut self, now: u64) -> bool {
+        const EGG_WINDOW_MS: u64 = 2500;
+        const EGG_TAPS: usize = 5;
+        self.stamp_taps
+            .retain(|t| now.saturating_sub(*t) < EGG_WINDOW_MS);
+        self.stamp_taps.push(now);
+        if self.stamp_taps.len() >= EGG_TAPS {
+            self.stamp_taps.clear();
+            plog("easter egg: 5 taps on the build stamp");
+            true
+        } else {
+            false
         }
     }
 
@@ -439,8 +480,8 @@ impl HomeScreen {
         Action::Redraw
     }
 
-    /// The Continue hero block — optical buffer kicker, open-book line-art icon,
-    /// 10.5pt title, author · page (pct), inset progress bar, chevron.
+    /// The Continue hero card — transparent background with crisp 1px outline,
+    /// solid black "CONTINUE" pill badge, mini cover graphic, and outline progress track.
     fn draw_continue_block(&self, p: &mut Painter) {
         let w = p.size().0;
         let pad = pt(PAD_PT);
@@ -457,22 +498,37 @@ impl HomeScreen {
             .unwrap_or_else(|| sans_ext(&name));
         let author = i.map(|i| self.all_authors[i].clone()).unwrap_or_default();
 
-        // Low-contrast optical cushion between the solid header rule and the hero book
-        p.text(pad, pt(56.0), KICKER2_SIZE_PT, 140, "CONTINUE");
-
         let top = pt(CONT_TOP_PT);
-        draw_book_icon(
-            p,
-            pad,
-            top + (pt(CONT_H_PT) - pt(CONT_ICON_PT)) / 2 - pt(2.0),
-        );
+        let card_w = w - 2 * pad;
+        let card_h = pt(CONT_H_PT);
+        let card_r = Rect::new(pad, top, card_w, card_h);
 
-        let tx = pad + pt(CONT_ICON_PT) + pt(8.0);
-        let chev_w = p.text_width(CHEV_PT, ">") / PX + 4.0;
-        let budget = (p.width_pt() - 2.0 * PAD_PT - CONT_ICON_PT - 8.0 - chev_w).max(10.0);
+        // 1. Transparent Card Container with Crisp 1px Outline (no gray fill)
+        p.rect_outline_t(card_r, 1, 0);
+
+        // 2. Elegant Kicker Typography (Top-Left) & Chevron (Right)
+        p.text(card_r.x + pt(10.0), top + pt(10.5), 6.5, 120, "CONTINUE READING");
+        p.text_right(card_r.x + card_w - pt(10.0), top + pt(26.0), 12.0, 160, ">");
+
+        // 3. Mini Book Cover / Spine Graphic (Pure B&W Line Art)
+        let thumb_x = card_r.x + pt(10.0);
+        let thumb_y = top + pt(16.0);
+        let thumb_w = pt(18.0);
+        let thumb_h = pt(24.0);
+        let thumb_r = Rect::new(thumb_x, thumb_y, thumb_w, thumb_h);
+        p.rect_outline_t(thumb_r, 1, 0);
+        // Spine bar
+        p.rect(Rect::new(thumb_x, thumb_y, pt(3.5), thumb_h), 0);
+        // Mini page lines inside thumbnail
+        p.hline_t(thumb_y + pt(6.5), thumb_x + pt(6.0), thumb_x + thumb_w - pt(3.0), 1, 0);
+        p.hline_t(thumb_y + pt(11.5), thumb_x + pt(6.0), thumb_x + thumb_w - pt(3.0), 1, 0);
+        p.hline_t(thumb_y + pt(16.5), thumb_x + pt(6.0), thumb_x + thumb_w - pt(3.0), 1, 0);
+
+        // 4. Title & Author
+        let tx = thumb_x + thumb_w + pt(8.0);
+        let budget = (p.width_pt() - 2.0 * PAD_PT - 10.0 - 18.0 - 8.0 - 20.0).max(10.0);
         let label = p.truncate(CONT_TITLE_PT, &disp, budget);
-        p.text(tx, top + pt(17.0), CONT_TITLE_PT, 0, &label);
-        p.text_right(w - pad, top + pt(23.0), CHEV_PT, 160, ">");
+        p.text(tx, top + pt(24.0), CONT_TITLE_PT, 0, &label);
 
         let pct_opt = progress_str(pos);
         let page_info = if pos.total > 0 {
@@ -490,16 +546,19 @@ impl HomeScreen {
             format!("{} · {}", author, page_info)
         };
         let sub_trunc = p.truncate(CONT_SUB_PT, &sub, budget);
-        p.text(tx, top + pt(30.0), CONT_SUB_PT, 130, &sub_trunc);
+        p.text(tx, top + pt(33.5), CONT_SUB_PT, 100, &sub_trunc);
 
-        // Inset thin progress bar aligned with the text block
+        // 5. Embedded Crisp Outline Progress Track (Pure B&W)
         if pos.total > 0 {
-            let bw = (w - pad - tx).max(1);
-            let frac = ((pos.page + 1) as f32 / pos.total as f32).clamp(0.0, 1.0);
-            p.rect(Rect::new(tx, top + pt(38.0), bw, pt(2.0)), 235);
-            let fw = ((bw as f32) * frac).round() as i32;
-            if fw > 0 {
-                p.rect(Rect::new(tx, top + pt(38.0), fw.min(bw), pt(2.0)), 90);
+            let bar_w = card_w - (tx - card_r.x) - pt(20.0);
+            if bar_w > 0 {
+                let frac = ((pos.page + 1) as f32 / pos.total as f32).clamp(0.0, 1.0);
+                let track_r = Rect::new(tx, top + pt(40.5), bar_w, pt(3.0));
+                p.rect_outline_t(track_r, 1, 0);
+                let fw = ((bar_w as f32) * frac).round() as i32;
+                if fw > 0 {
+                    p.rect(Rect::new(tx, top + pt(40.5), fw.min(bar_w), pt(3.0)), 0);
+                }
             }
         }
     }
@@ -738,6 +797,15 @@ impl Screen for HomeScreen {
         match g {
             Gesture::Tap { x, y } => {
                 let (x, y) = (x as i32, y as i32);
+                // Easter egg: five quick taps on the build stamp start
+                // the YB-snake animation. The stamp owns its box — the
+                // rest of the header band still cycles the sort.
+                if HomeScreen::stamp_box(w).contains(x, y) {
+                    if self.stamp_tap(now_ms()) {
+                        return Action::Push(Box::new(crate::easter_egg::EggScreen::new()));
+                    }
+                    return Action::Keep;
+                }
                 if let Some(t) = nav::hit(x, y, w, h, TABS.len()) {
                     if t == self.tab {
                         return Action::Keep;
@@ -882,87 +950,6 @@ impl Screen for HomeScreen {
     }
 }
 
-/// Small open-book glyph for the Continue row.
-fn draw_book_icon(p: &mut Painter, x: i32, y: i32) {
-    let w = pt(CONT_ICON_PT);
-    let h = pt(CONT_ICON_PT) - pt(1.0);
-    let mid = x + w / 2;
-    let pad_y = pt(1.5);
-    let book_h = h - 2 * pad_y;
-
-    // Central spine
-    p.line_w(mid, y + pad_y, mid, y + pad_y + book_h, 3, 0);
-
-    // Left page (curved top and bottom)
-    p.line_w(mid, y + pad_y, x + pt(4.0), y + pad_y - pt(1.5), 2, 0);
-    p.line_w(
-        x + pt(4.0),
-        y + pad_y - pt(1.5),
-        x + pt(1.5),
-        y + pad_y + pt(0.5),
-        2,
-        0,
-    );
-    p.line_w(
-        x + pt(1.5),
-        y + pad_y + pt(0.5),
-        x + pt(1.5),
-        y + pad_y + book_h - pt(0.5),
-        2,
-        0,
-    );
-    p.line_w(
-        x + pt(1.5),
-        y + pad_y + book_h - pt(0.5),
-        x + pt(4.0),
-        y + pad_y + book_h - pt(2.0),
-        2,
-        0,
-    );
-    p.line_w(
-        x + pt(4.0),
-        y + pad_y + book_h - pt(2.0),
-        mid,
-        y + pad_y + book_h,
-        2,
-        0,
-    );
-
-    // Right page (curved top and bottom)
-    p.line_w(mid, y + pad_y, x + w - pt(4.0), y + pad_y - pt(1.5), 2, 0);
-    p.line_w(
-        x + w - pt(4.0),
-        y + pad_y - pt(1.5),
-        x + w - pt(1.5),
-        y + pad_y + pt(0.5),
-        2,
-        0,
-    );
-    p.line_w(
-        x + w - pt(1.5),
-        y + pad_y + pt(0.5),
-        x + w - pt(1.5),
-        y + pad_y + book_h - pt(0.5),
-        2,
-        0,
-    );
-    p.line_w(
-        x + w - pt(1.5),
-        y + pad_y + book_h - pt(0.5),
-        x + w - pt(4.0),
-        y + pad_y + book_h - pt(2.0),
-        2,
-        0,
-    );
-    p.line_w(
-        x + w - pt(4.0),
-        y + pad_y + book_h - pt(2.0),
-        mid,
-        y + pad_y + book_h,
-        2,
-        0,
-    );
-}
 
 /// Row icons in a 13pt box:
 /// 0: Flashcards Stack
@@ -1059,6 +1046,44 @@ fn draw_row_icon(p: &mut Painter, row: usize, x: i32, y: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamp_box_covers_the_build_stamp_only() {
+        // 1236 px wide screen: the stamp hugs the top-right corner,
+        // below the status line and away from "YB READER" on the left.
+        let b = HomeScreen::stamp_box(1236);
+        let w = 1236;
+        let pad = pt(PAD_PT);
+        assert!(b.contains(w - pad - 10, pt(KICKER_BASE_PT)));
+        assert!(b.contains(w - pad - 5, pt(KICKER_BASE_PT) - 4));
+        // Outside: below the header rule is content, not the stamp.
+        assert!(!b.contains(w - pad - 5, pt(HEADER_RULE_PT) + 1));
+        // Outside: the left of the header band ("YB READER") still sorts.
+        assert!(!b.contains(pad, pt(KICKER_BASE_PT)));
+    }
+
+    #[test]
+    fn five_fast_taps_on_the_stamp_trigger_the_egg() {
+        let mut s = HomeScreen::new(1236, 1648);
+        let mut now = 1_000_000;
+        for _ in 0..4 {
+            assert!(!s.stamp_tap(now));
+            now += 400; // well inside the 2.5 s window
+        }
+        assert!(s.stamp_tap(now));
+        // The counter reset: another burst starts from scratch.
+        assert!(!s.stamp_tap(now + 400));
+    }
+
+    #[test]
+    fn slow_taps_never_accumulate_to_five() {
+        let mut s = HomeScreen::new(1236, 1648);
+        let mut now = 1_000_000;
+        for _ in 0..10 {
+            assert!(!s.stamp_tap(now));
+            now += 3_000; // slower than the window
+        }
+    }
 
     #[test]
     fn home_rows_hit_exact_bounds() {

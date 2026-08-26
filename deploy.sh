@@ -66,6 +66,13 @@ ssh_deploy() {
     scp -o ConnectTimeout=10 -q "$ROOT/packages/yb-reader/bin/start.sh" "$HOST:/mnt/us/extensions/reader/bin/start.sh.new.$$" || true
     scp -o ConnectTimeout=10 -q "$ROOT/packages/yb-reader/bin/boot.sh" "$HOST:/mnt/us/extensions/reader/bin/boot.sh.new.$$" || true
 
+    # Companion source zip for the receive page (built with `make dist`).
+    # Sits next to the books; invisible to the library listing, downloadable
+    # through the Companion card's /api/file link.
+    if [ -f "$ROOT/companion/dist/yb-mirror.zip" ]; then
+        scp -o ConnectTimeout=10 -q "$ROOT/companion/dist/yb-mirror.zip" "$HOST:/mnt/us/documents/yb-mirror.zip" || true
+    fi
+
     scp -o ConnectTimeout=10 -q "$BIN" "$HOST:$STAGE_DST"
     s=$(shasum -a 256 "$BIN" | awk '{print $1}')
     d=$($SSHC "$HOST" "sha256sum $STAGE_DST" | awk '{print $1}')
@@ -178,6 +185,9 @@ if [ "$1" = "usb" ]; then
     find "$EXT" -name '._*' -delete
     cp "$PKG/scriptlets/YBReader.sh" /Volumes/Kindle/documents/YBReader.sh
     chmod +x /Volumes/Kindle/documents/YBReader.sh
+    if [ -f "$ROOT/companion/dist/yb-mirror.zip" ]; then
+        cp "$ROOT/companion/dist/yb-mirror.zip" /Volumes/Kindle/documents/yb-mirror.zip
+    fi
     echo "Direct install -> extensions/reader + documents/YBReader.sh"
     ls -lh "$EXT/bin/reader"
     exit 0

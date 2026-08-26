@@ -63,7 +63,6 @@ const FOOTER_SIZE_PT: f32 = 7.0;
 const INK: u8 = 0;
 const DIM: u8 = 130;
 const BORDER: u8 = 180;
-const CODE_BG: u8 = 248;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyledSpan {
@@ -1139,7 +1138,6 @@ impl Screen for AiStreamScreen {
             let prompt_lines = wrap_prompt_lines(&self.turn.prompt, content_w - pt(18.0), PROMPT_SIZE_PT, 4);
             let prompt_h = prompt_card_height(prompt_lines.len());
             let prompt_r = Rect::new(pad, pt(HEADER_TOP_PT), content_w, prompt_h);
-            p.rect(prompt_r, 248);
             p.rect_outline_t(prompt_r, 1, BORDER);
             p.rect(Rect::new(prompt_r.x, prompt_r.y, pt(3.0), prompt_r.h), INK);
             p.text(prompt_r.x + pt(8.0), prompt_r.y + pt(10.0), 6.5, DIM, "PROMPT");
@@ -1194,7 +1192,6 @@ impl Screen for AiStreamScreen {
                     }
 
                     RenderItem::CodeBox { r, lang, lines } => {
-                        p.rect(*r, CODE_BG);
                         p.rect_outline_t(*r, 1, BORDER);
                         p.text_right(r.x + r.w - pt(6.0), r.y + pt(9.5), 6.5, DIM, lang);
                         let line_h = pt(CODE_SIZE_PT + 4.0);
@@ -1208,7 +1205,6 @@ impl Screen for AiStreamScreen {
                     RenderItem::TableRow { x, y, w, h, col_xs, cell_lines, is_header } => {
                         let total_w = *w;
                         if *is_header {
-                            p.rect(Rect::new(*x, *y, total_w, *h), 244);
                             p.hline_t(*y, *x, *x + total_w, 1, BORDER);
                             p.hline_t(*y + *h, *x, *x + total_w, 2, INK);
                         } else {
@@ -1235,7 +1231,6 @@ impl Screen for AiStreamScreen {
                     }
 
                     RenderItem::AlertBox { r, kind } => {
-                        p.rect(*r, 248);
                         p.rect_outline_t(*r, 1, BORDER);
                         p.rect(Rect::new(r.x, r.y, pt(3.0), r.h), INK);
                         let badge = format!("[!{}]", kind);

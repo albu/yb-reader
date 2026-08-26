@@ -38,6 +38,10 @@ yb-reader/
   probe/     on-device introspection tool (fb geometry, input, frontlight)
   kual/      KUAL extension (kept for reference; the library scriptlet in
              documents/ is the real launcher on this unit — no KUAL here)
+  companion/ macOS mirror companion (source). `make dist` builds the small
+             source zip the receive page offers in its "Companion (macOS)"
+             card — unzip on a Mac, `uv sync` + `bash mac/make-app.sh`, and
+             the menu-bar app is built locally (no Gatekeeper, no signing)
   packages/  KPM package incl. bin/{start,boot}.sh + upstart/yb-reader.conf
              (the takeover pieces) + bin/dropbear (bundled ssh server)
   deploy.sh  build + deploy: SSH fast loop (default), `usb`, or `probe`
@@ -194,7 +198,11 @@ counter, kills the reader, and relaunches via `initctl restart
 yb-reader` when the flag is present (start.sh's lipc calls need a live
 cvm, so it must not be used there). Every build shows its git sha
 top-right on the home tab (`vXXXX`, `*` = dirty tree) — the on-device
-answer to "did the deploy land?"
+answer to "did the deploy land?". Five quick taps on that stamp are the
+passphrase to a hidden easter egg: three snakes rise from the bottom of
+the screen and trace a YB logo around the Continue card, animated on the
+fast A2 waveform — 2 gray levels, no flash, the panel's idea of video.
+It ends with a full refresh, so no ghosting survives it.
 
 ## On-device testing (probe)
 
@@ -338,6 +346,7 @@ decoder now uses `Transformations::EXPAND` and there are unit tests
 | Library | tap footer band (or header) | cycle sort: title / recent / reading |
 | Library | long-press row | delete book (confirm dialog) |
 | Library | swipe up/down | scroll / back |
+| Home | tap build stamp (top-right) 5× quickly | YB-snake easter egg (A2 animation) |
 | Launcher | tap row | run |
 | Launcher | vertical swipe | exit app |
 

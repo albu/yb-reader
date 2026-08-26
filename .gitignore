@@ -7,3 +7,8 @@ packages/yb-reader/bin/reader
 # compiled tooling binaries (rebuilt from their .c sources)
 /tools/ruler
 /tools/inject
+
+# companion (yb-mirror): local Python tooling that must never ship
+/companion/.venv/
+/companion/**/__pycache__/
+/companion/dist/

@@ -13,7 +13,7 @@ LLVM_AR ?= /opt/homebrew/opt/llvm@22/bin/llvm-ar
 export LD := $(LLD) -m armelf_linux_eabi
 export AR := $(LLVM_AR)
 
-.PHONY: all setup check build probe deploy deploy-usb deploy-probe clean
+.PHONY: all setup check build probe deploy deploy-usb deploy-probe dist clean
 
 all: build
 
@@ -42,6 +42,11 @@ deploy-usb: build
 deploy-probe: probe
 	chmod +x deploy.sh
 	./deploy.sh probe
+
+# Companion source zip (served by the Kindle receive page).
+dist:
+	chmod +x companion/make-dist.sh
+	./companion/make-dist.sh
 
 clean:
 	cargo clean

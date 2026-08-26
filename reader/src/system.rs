@@ -1,58 +1,45 @@
-//! The System screen — device-level controls that are *not* daily use:
-//! boot mode, reboot, Wi-Fi, trusted devices, the E-Ink refresh cadence,
-//! and status trivia. Reached from the home rows. The curtain keeps the
-//! daily controls (clock, statuses, light) and nothing else — this
-//! screen is where the rare stuff went when the curtain grew too heavy.
+//! The System screen — device-level controls and administrative options:
+//! guides, screensavers, trusted devices, E-Ink refresh interval,
+//! boot mode, reboot, and exit.
+//! Styled with the same zero-blink list row architecture as the Home screen.
 
 use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
 use ybdev::sysinfo;
-
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
 const PAD_PT: f32 = 18.0;
-const TITLE_BASE_PT: f32 = 28.0;
-const TITLE_SIZE_PT: f32 = 13.0;
-const INFO_BASE_PT: f32 = 44.0;
 
-const CARD_TOP_PT: f32 = 56.0;
-const CARD_H_PT: f32 = 32.0;
-const CARD_GAP_PT: f32 = 6.0;
+// Persistent Header
+const HDR_RULE_PT: f32 = 20.0;
+const TRIVIA_BASE_PT: f32 = 34.0;
+const TRIVIA_RULE_PT: f32 = 42.0;
 
-const REFRESH_TITLE_PT: f32 = 296.0;
-const REFRESH_PILL_PT: f32 = 310.0;
+// Section 1: Display & Guides
+const SEC1_LABEL_PT: f32 = 54.0;
+const SEC1_TOP_PT: f32 = 62.0;
 
-const DIM: u8 = 110;
+// Section 2: Device & Lifecycle
+const SEC2_LABEL_PT: f32 = 216.0;
+const SEC2_TOP_PT: f32 = 224.0;
+
+const ROW_H_PT: f32 = 36.0;
+const ICON_BOX_PT: f32 = 14.0;
+const ICON_GAP_PT: f32 = 10.0;
+
+const FOOTER_BASE_PT: f32 = 370.0;
+
 const INK: u8 = 0;
-const CARD_BG: u8 = 246;
-const CARD_BORDER: u8 = 200;
-const PILL_BG: u8 = 242;
-const PILL_ACTIVE_BG: u8 = 30;
-
-const REFRESH_PRESETS: [(&str, usize); 4] =
-    [("Off", 0), ("5 pgs", 5), ("10 pgs", 10), ("20 pgs", 20)];
+const DIM: u8 = 110;
+const MUTED: u8 = 160;
+const DIVIDER: u8 = 220;
 
 pub struct SystemScreen {
     w: i32,
     h: i32,
-    /// Cached Wi-Fi state: a `lipc-get-prop` round trip per draw would
-    /// stall every repaint for ~1 s. Refreshed on entry and after the
-    /// toggle tap.
-    wifi_on: Option<bool>,
-    /// Cached screensaver count: scanning the image dirs per draw is a
-    /// wasteful flash walk. Refreshed on entry (the manager screen re-
-    /// entering re-scans).
     ss_count: usize,
-    /// Cached count of paired trusted devices.
     dev_count: usize,
-}
-
-fn draw_box_text(p: &mut Painter, r: Rect, size_pt: f32, color: u8, text: &str) {
-    let tw = p.text_width(size_pt, text) as i32;
-    let tx = r.x + (r.w - tw).max(0) / 2;
-    let ty = r.y + (r.h - pt(size_pt)).max(0) / 2 + pt(size_pt * 0.82);
-    p.text(tx, ty, size_pt, color, text);
 }
 
 impl SystemScreen {
@@ -60,55 +47,60 @@ impl SystemScreen {
         SystemScreen {
             w: 1236,
             h: 1648,
-            wifi_on: None,
             ss_count: 0,
             dev_count: 0,
         }
     }
 
-    fn draw_card(p: &mut Painter, r: Rect, title: &str, value: &str, sub: &str, armed: bool) {
-        p.rect(r, CARD_BG);
-        p.rect_outline_t(r, 1, CARD_BORDER);
-        if armed {
-            p.rect_outline_t(r, 2, INK);
-        }
-        p.text(r.x + pt(8.0), r.y + pt(9.0), 6.5, DIM, title);
-        p.text(r.x + pt(8.0), r.y + pt(21.0), 9.0, INK, value);
-        if !sub.is_empty() {
-            p.text(r.x + pt(8.0), r.y + pt(29.0), 6.0, DIM, sub);
-        }
+    fn draw_persistent_header(p: &mut Painter, w: i32, pad: i32) {
+        let t = crate::chrome::current_time_str();
+        let (cap, plugged) = sysinfo::battery();
+        let bat = if plugged {
+            format!("+{}%", cap)
+        } else {
+            format!("{}%", cap)
+        };
+        let fg = 120;
+
+        // Left: Time
+        p.text(pad, pt(14.0), 7.0, fg, &t);
+
+        // Center: Title
+        p.text_center(pt(14.0), 7.5, INK, "System");
+
+        // Right: Wi-Fi glyph + Battery + Build
+        let xr = w - pad;
+        let bat_w = p.text_width(7.0, &bat) as i32;
+        p.text_right(xr, pt(14.0), 7.0, fg, &bat);
+        crate::chrome::draw_wifi_glyph(p, xr - bat_w - pt(6.0), pt(11.5), 7.0, fg);
+
+        // Top divider rule
+        p.hline_t(pt(HDR_RULE_PT), pad, w - pad, 1, 225);
     }
 
-    /// The one card that is an action, not a status: dark fill, light
-    /// text — same language as the curtain's Close pill.
-    fn draw_action_card(p: &mut Painter, r: Rect, title: &str, value: &str, sub: &str) {
-        p.rect(r, PILL_ACTIVE_BG);
-        p.text(r.x + pt(8.0), r.y + pt(9.0), 6.5, 180, title);
-        p.text(r.x + pt(8.0), r.y + pt(21.0), 9.0, 255, value);
-        if !sub.is_empty() {
-            p.text(r.x + pt(8.0), r.y + pt(29.0), 6.0, 180, sub);
-        }
-    }
+    fn draw_system_row(
+        p: &mut Painter,
+        pad: i32,
+        w: i32,
+        top: i32,
+        icon_type: usize,
+        title: &str,
+        sub: &str,
+    ) {
+        let icon_y = top + (pt(ROW_H_PT) - pt(ICON_BOX_PT)) / 2;
+        draw_system_icon(p, icon_type, pad, icon_y);
 
-    fn draw_pills(p: &mut Painter, y: i32, w: i32, cur: usize) {
-        let pad = pt(PAD_PT);
-        let gap = pt(5.0);
-        let total_w = w - 2 * pad;
-        let n = REFRESH_PRESETS.len() as i32;
-        let pill_w = (total_w - (n - 1) * gap) / n;
-        let pill_h = pt(16.0);
+        let tx = pad + pt(ICON_BOX_PT) + pt(ICON_GAP_PT);
+        let budget = (p.width_pt() - 2.0 * PAD_PT - ICON_BOX_PT - ICON_GAP_PT - 24.0).max(10.0);
 
-        for (i, (label, val)) in REFRESH_PRESETS.iter().enumerate() {
-            let r = Rect::new(pad + i as i32 * (pill_w + gap), y, pill_w, pill_h);
-            if *val == cur {
-                p.rect(r, PILL_ACTIVE_BG);
-                draw_box_text(p, r, 7.0, 255, label);
-            } else {
-                p.rect(r, PILL_BG);
-                p.rect_outline_t(r, 1, CARD_BORDER);
-                draw_box_text(p, r, 7.0, INK, label);
-            }
-        }
+        let title_trunc = p.truncate(9.5, title, budget);
+        p.text(tx, top + pt(15.0), 9.5, INK, &title_trunc);
+
+        let sub_trunc = p.truncate(7.0, sub, budget);
+        p.text(tx, top + pt(27.0), 7.0, DIM, &sub_trunc);
+
+        p.text_right(w - pad, top + pt(21.0), 12.0, MUTED, ">");
+        p.hline_t(top + pt(ROW_H_PT), pad, w - pad, 1, DIVIDER);
     }
 }
 
@@ -120,9 +112,6 @@ impl Default for SystemScreen {
 
 impl Screen for SystemScreen {
     fn on_enter(&mut self) -> Action {
-        // Snapshot the slow facts (lipc round trip, dir scans, devices) once per
-        // entry, not on every draw.
-        self.wifi_on = crate::wifi::wifi_state();
         self.ss_count = crate::screensavers::scan().len();
         let devices_path = ybdev::devices::devices_path();
         self.dev_count = ybdev::devices::DeviceStore::load(&devices_path).devices.len();
@@ -137,17 +126,10 @@ impl Screen for SystemScreen {
 
         let pad = pt(PAD_PT);
 
-        p.text(pad, pt(TITLE_BASE_PT), TITLE_SIZE_PT, INK, "System");
-        p.text_right(
-            w - pad,
-            pt(TITLE_BASE_PT),
-            8.0,
-            160,
-            concat!("v", env!("YB_BUILD")),
-        );
-        p.hline_t(pt(TITLE_BASE_PT) + pt(9.0), pad, w - pad, 2, 180);
+        // 1. Persistent Ambient Header
+        Self::draw_persistent_header(p, w, pad);
 
-        // Status trivia — the stuff that used to be a curtain card.
+        // 2. System Status Trivia Sub-header
         let mut bits: Vec<String> = Vec::new();
         if let Some(g) = sysinfo::storage_free_gb() {
             bits.push(format!("{g:.1} GB free"));
@@ -155,314 +137,390 @@ impl Screen for SystemScreen {
         if let Some(k) = sysinfo::mem_available_kib() {
             bits.push(format!("{:.0}M RAM free", k as f64 / 1024.0));
         }
-        let (cap, plugged) = sysinfo::battery();
-        bits.push(if plugged {
-            format!("charging {}%", cap)
+        let info_str = if bits.is_empty() {
+            "Kindle Paperwhite (PW5)".to_string()
         } else {
-            format!("battery {}%", cap)
-        });
-        p.text(pad, pt(INFO_BASE_PT), 7.0, DIM, &bits.join("   ·   "));
-
-        // Card stack: boot mode / Wi-Fi / devices / usb / screensavers / reboot / exit.
-        let cw = w - 2 * pad;
-        let ch = pt(CARD_H_PT);
-        let gap = pt(CARD_GAP_PT);
-        let top = pt(CARD_TOP_PT);
-
-        let upstart_installed = std::path::Path::new("/etc/upstart/yb-reader.conf").exists();
-        let os_boot = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists() && upstart_installed;
-        let (bv, bs) = if os_boot {
-            ("yb OS", "Tap: switch to Stock")
-        } else if !upstart_installed {
-            ("Stock", "Requires root upstart job")
-        } else {
-            ("Stock", "Tap: switch to yb OS")
+            bits.join("   ·   ")
         };
-        SystemScreen::draw_card(p, Rect::new(pad, top, cw, ch), "BOOT MODE", bv, bs, os_boot);
-
-        let wifi_on = self.wifi_on == Some(true);
-        let (wv, ws) = if wifi_on {
-            (
-                "On",
-                sysinfo::wifi_ip().unwrap_or_else(|| "connecting…".to_string()),
-            )
-        } else {
-            ("Off", "Tap to turn on".to_string())
-        };
-        SystemScreen::draw_card(
-            p,
-            Rect::new(pad, top + ch + gap, cw, ch),
-            "WI-FI",
-            wv,
-            &ws,
-            wifi_on,
-        );
-
-        // Trusted devices card: shows count of paired laptops/phones.
-        let dev_label = match self.dev_count {
-            0 => "None yet".to_string(),
-            1 => "1 device".to_string(),
-            n => format!("{n} devices"),
-        };
-        let (dv, ds) = (dev_label.as_str(), "Tap to view or revoke");
-        SystemScreen::draw_card(
-            p,
-            Rect::new(pad, top + 2 * (ch + gap), cw, ch),
-            "TRUSTED DEVICES",
-            dv,
-            ds,
-            self.dev_count > 0,
-        );
-        // Screensaver rotation manager — copy images over USB (the
-        // drive always mounts on plug) or the web manager, then pick
-        // which ones rotate (screensavers.rs).
-        let ss_label = match self.ss_count {
-            0 => "None yet".to_string(),
-            n => format!("{n} images"),
-        };
-        let (sv, ss) = (ss_label.as_str(), "Tap to manage the rotation");
-        SystemScreen::draw_card(
-            p,
-            Rect::new(pad, top + 3 * (ch + gap), cw, ch),
-            "SCREENSAVERS",
-            sv,
-            ss,
-            false,
-        );
-
-        let next = if os_boot { "yb OS" } else { "Stock Kindle" };
-        SystemScreen::draw_action_card(
-            p,
-            Rect::new(pad, top + 4 * (ch + gap), cw, ch),
-            "REBOOT",
-            "Reboot now",
-            &format!("Next boot: {next}"),
-        );
-
-        // Exit, deliberately this deep: in takeover it hands the whole
-        // device to the stock framework — an accidental trigger looks
-        // like a hung device while the framework boots — so it is a
-        // System card behind a confirm that honors its buttons, never
-        // a home row or a swipe. Light card, not the dark action
-        // style: quieter than Reboot, matching how rarely it's used.
-        let (ev, es) = if os_boot {
-            ("Exit to Kindle", "Stock UI returns · Reboot: yb OS")
-        } else {
-            ("Quit", "Back to the stock launcher")
-        };
-        SystemScreen::draw_card(
-            p,
-            Rect::new(pad, top + 5 * (ch + gap), cw, ch),
-            "EXIT",
-            ev,
-            es,
-            false,
-        );
-
-        // E-Ink full-refresh cadence.
-        let cur = crate::positions::global_refresh_interval();
-        p.text(pad, pt(REFRESH_TITLE_PT), 8.0, INK, "E-Ink full refresh");
+        p.text(pad, pt(TRIVIA_BASE_PT), 6.8, DIM, &info_str);
         p.text_right(
             w - pad,
-            pt(REFRESH_TITLE_PT),
-            7.0,
-            DIM,
-            "pages between full flashes",
+            pt(TRIVIA_BASE_PT),
+            6.8,
+            MUTED,
+            concat!("v", env!("YB_BUILD")),
         );
-        SystemScreen::draw_pills(p, pt(REFRESH_PILL_PT), w, cur);
+        p.hline_t(pt(TRIVIA_RULE_PT), pad, w - pad, 1, 235);
+
+        // --- SECTION 1: DISPLAY & GUIDES ---
+        p.text(pad, pt(SEC1_LABEL_PT), 6.8, MUTED, "DISPLAY & GUIDES");
+
+        let top1 = pt(SEC1_TOP_PT);
+        let row_h = pt(ROW_H_PT);
+
+        // Row 0: How to Use
+        Self::draw_system_row(
+            p,
+            pad,
+            w,
+            top1,
+            0,
+            "How to Use",
+            "Gestures & Navigation Guide (Page turns, curtain, dictionary)",
+        );
+
+        // Row 1: Screensavers
+        let ss_label = match self.ss_count {
+            0 => "No custom screensavers yet".to_string(),
+            1 => "1 image in lock screen rotation".to_string(),
+            n => format!("{n} images in lock screen rotation"),
+        };
+        Self::draw_system_row(
+            p,
+            pad,
+            w,
+            top1 + row_h,
+            1,
+            "Screensavers",
+            &ss_label,
+        );
+
+        // Row 2: Trusted Devices
+        let dev_label = match self.dev_count {
+            0 => "No paired computers or phones".to_string(),
+            1 => "1 trusted device paired · Tap to manage or revoke".to_string(),
+            n => format!("{n} trusted devices paired · Tap to manage or revoke"),
+        };
+        Self::draw_system_row(
+            p,
+            pad,
+            w,
+            top1 + 2 * row_h,
+            2,
+            "Trusted Devices",
+            &dev_label,
+        );
+
+        // Row 3: E-Ink Full Refresh
+        let refresh_cur = crate::positions::global_refresh_interval();
+        let refresh_val = match refresh_cur {
+            0 => "Off (never flash)".to_string(),
+            1 => "Every 1 page".to_string(),
+            n => format!("Every {n} pages"),
+        };
+        Self::draw_system_row(
+            p,
+            pad,
+            w,
+            top1 + 3 * row_h,
+            3,
+            "E-Ink Full Refresh",
+            &format!("Current: {refresh_val} · Tap to cycle presets"),
+        );
+
+        // --- SECTION 2: DEVICE & LIFECYCLE ---
+        p.text(pad, pt(SEC2_LABEL_PT), 6.8, MUTED, "DEVICE & LIFECYCLE");
+
+        let top2 = pt(SEC2_TOP_PT);
+        let upstart_installed = std::path::Path::new("/etc/upstart/yb-reader.conf").exists();
+        let os_boot = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists() && upstart_installed;
+
+        // Row 4: Boot Mode
+        let (bv, bs) = if os_boot {
+            ("Boot Mode: yb OS (Direct Boot)", "Tap to switch to Stock Kindle mode")
+        } else if !upstart_installed {
+            ("Boot Mode: Stock Kindle", "Requires root upstart job")
+        } else {
+            ("Boot Mode: Stock Kindle", "Tap to switch to yb OS mode")
+        };
+        Self::draw_system_row(p, pad, w, top2, 4, bv, bs);
+
+        // Row 5: Reboot
+        let next = if os_boot { "yb OS" } else { "Stock Kindle" };
+        Self::draw_system_row(
+            p,
+            pad,
+            w,
+            top2 + row_h,
+            5,
+            "Reboot Device",
+            &format!("Restart Kindle hardware · Next boot: {next}"),
+        );
+
+        // Row 6: Exit
+        let (ev, es) = if os_boot {
+            ("Exit to Kindle", "Return to stock UI · Next reboot starts yb OS")
+        } else {
+            ("Quit yb-reader", "Return to the stock launcher")
+        };
+        Self::draw_system_row(p, pad, w, top2 + 2 * row_h, 6, ev, es);
+
+        // 4. Subtle Minimalist Footer
+        p.text_center(
+            pt(FOOTER_BASE_PT),
+            7.5,
+            MUTED,
+            "Swipe up bottom-right to exit",
+        );
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
+        let (w, h) = (self.w, self.h);
+
+        // Universal Kindle back / exit gesture: swipe up in bottom-right corner
+        if g.corner_back() || g.corner_back_in(w as u32, h as u32) {
+            return Action::Pop;
+        }
+
         match g {
             Gesture::Tap { x, y } => {
                 let (x, y) = (x as i32, y as i32);
                 let pad = pt(PAD_PT);
-                let cw = self.w - 2 * pad;
-                let ch = pt(CARD_H_PT);
-                let gap = pt(CARD_GAP_PT);
-                let top = pt(CARD_TOP_PT);
+                let row_h = pt(ROW_H_PT);
 
-                // Boot mode: flip the takeover flag for the next boot.
-                // Applying it is the Reboot card (or any power-cycle) — a
-                // hot-switch from a live session would race a second
-                // reader instance (start.sh's lock exists for that).
-                let r_boot = Rect::new(pad, top, cw, ch);
-                if r_boot.contains(x, y) {
-                    let upstart_installed = std::path::Path::new("/etc/upstart/yb-reader.conf").exists();
-                    if !upstart_installed {
-                        return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
-                            "Root Upstart Required",
-                            "Direct OS Boot requires /etc/upstart/yb-reader.conf to be installed on rootfs. Without it, the Kindle cannot start yb-reader automatically.",
-                            "OK",
-                            None,
-                            |_| Action::Pop,
-                        )));
-                    }
-                    let flag = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK");
-                    if flag.exists() {
-                        let _ = std::fs::remove_file(flag);
-                    } else {
-                        let _ = std::fs::File::create(flag);
-                    }
-                    return Action::Redraw;
-                }
+                let top1 = pt(SEC1_TOP_PT);
+                let top2 = pt(SEC2_TOP_PT);
 
-                let r_wifi = Rect::new(pad, top + ch + gap, cw, ch);
-                if r_wifi.contains(x, y) {
-                    if self.wifi_on == Some(true) {
-                        // Pure lipc — a raw `ifconfig wlan0 down` leaves
-                        // the interface administratively down and
-                        // `wifid enable 1` can never bring it back
-                        // (found on device 2026-08-19).
-                        let _ = std::process::Command::new("lipc-set-prop")
-                             .args(["-i", "com.lab126.wifid", "enable", "0"])
-                            .status();
-                        let _ = std::process::Command::new("lipc-set-prop")
-                            .args(["-i", "com.lab126.cmd", "wirelessEnable", "0"])
-                            .status();
-                        ybdev::wifi::user_turned_off();
-                        self.wifi_on = Some(false);
-                    } else {
-                        ybdev::wifi::user_turned_on();
-                        crate::wifi::turn_on_wifi();
-                        self.wifi_on = Some(true);
-                    }
-                    return Action::Redraw;
-                }
-
-                // Trusted devices tap handler
-                let r_dev = Rect::new(pad, top + 2 * (ch + gap), cw, ch);
-                if r_dev.contains(x, y) {
-                    let devices_path = ybdev::devices::devices_path();
-                    let store = ybdev::devices::DeviceStore::load(&devices_path);
-                    if store.devices.is_empty() {
-                        return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
-                            "No Paired Devices",
-                            "Pair your phone or PC by scanning the QR code in 'Receive over Wi-Fi' or connecting with yb-mirror.",
-                            "OK",
-                            None,
-                            |_| Action::Pop,
-                        )));
-                    } else {
-                        let mut msg = String::new();
-                        for (i, d) in store.devices.iter().enumerate() {
-                            if i > 0 {
-                                msg.push('\n');
-                            }
-                            let ip_str = d.last_ip.as_deref().unwrap_or("Never connected");
-                            msg.push_str(&format!("{}. {} ({})", i + 1, d.name, ip_str));
-                        }
-                        return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
-                            &format!("Trusted Devices ({})", store.devices.len()),
-                            &format!("{}\n\nTap 'Revoke All' to forget all paired devices.", msg),
-                            "Revoke All",
-                            None,
-                            move |act| {
-                                if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
-                                    match ybdev::devices::with_store_mut(|s| {
-                                        s.devices.clear();
-                                    }) {
-                                        Ok(_) => plog("system: all trusted devices revoked"),
-                                        Err(e) => plog(&format!("system: revoke all FAILED: {}", e)),
-                                    }
-                                }
-                                Action::Pop
-                            },
-                        )));
-                    }
-                }
-                let r_ss = Rect::new(pad, top + 3 * (ch + gap), cw, ch);
-                if r_ss.contains(x, y) {
-                    return Action::Push(Box::new(crate::screensavers::ScreensaversScreen::new()));
-                }
-
-                let r_reboot = Rect::new(pad, top + 4 * (ch + gap), cw, ch);
-                if r_reboot.contains(x, y) {
-                    // Plain `reboot` rides the same init cascade as a
-                    // long-press power (TERM -> reader guard restores
-                    // frontlight/wifi/firewall) — no teardown of our own
-                    // needed.
-                    let next = if std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists()
-                        && std::path::Path::new("/etc/upstart/yb-reader.conf").exists()
-                    {
-                        "yb OS"
-                    } else {
-                        "Stock Kindle"
-                    };
-                    return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
-                        "Reboot now?",
-                        &format!("Next boot: {next}."),
-                        "Reboot",
-                        None,
-                        move |act| {
-                            if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
-                                plog("system: reboot requested");
-                                let spawned =
-                                    std::process::Command::new("reboot").spawn().or_else(|_| {
-                                        std::process::Command::new("/sbin/reboot").spawn()
-                                     });
-                                if spawned.is_err() {
-                                    plog("system: reboot command failed");
-                                }
-                            }
-                            Action::Pop
-                        },
-                    )));
-                }
-
-                let r_exit = Rect::new(pad, top + 5 * (ch + gap), cw, ch);
-                if r_exit.contains(x, y) {
-                    let (title, body, yes) = if crate::home::takeover() {
-                        (
-                            "Exit to Kindle?",
-                            "The stock Kindle UI returns.\nReboot brings yb-reader back.",
-                            "Exit",
-                        )
-                    } else {
-                        ("Quit yb-reader?", "Back to the stock launcher.", "Quit")
-                    };
-                    // Yes quits; No must only pop. The home swipe-exit
-                    // bug was a callback that ignored the button and
-                    // quit either way — dismissing the dialog exited.
-                    return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
-                        title,
-                        body,
-                        yes,
-                        None,
-                        move |act| {
-                            if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
-                                Action::Quit
+                // Section 1 Hit Testing
+                if x >= pad && x <= w - pad && y >= top1 && y < top1 + 4 * row_h {
+                    let idx = ((y - top1) / row_h) as usize;
+                    match idx {
+                        // 0. Gesture Guide
+                        0 => return Action::Push(Box::new(crate::guide::GuideScreen::new())),
+                        // 1. Screensavers
+                        1 => return Action::Push(Box::new(crate::screensavers::ScreensaversScreen::new())),
+                        // 2. Trusted Devices
+                        2 => {
+                            let devices_path = ybdev::devices::devices_path();
+                            let store = ybdev::devices::DeviceStore::load(&devices_path);
+                            if store.devices.is_empty() {
+                                return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                                    "No Paired Devices",
+                                    "Pair your phone or PC by scanning the QR code in 'Receive over Wi-Fi' or connecting with yb-mirror.",
+                                    "OK",
+                                    None,
+                                    |_| Action::Pop,
+                                )));
                             } else {
-                                Action::Pop
+                                let mut msg = String::new();
+                                for (i, d) in store.devices.iter().enumerate() {
+                                    if i > 0 {
+                                        msg.push('\n');
+                                    }
+                                    let ip_str = d.last_ip.as_deref().unwrap_or("Never connected");
+                                    msg.push_str(&format!("{}. {} ({})", i + 1, d.name, ip_str));
+                                }
+                                return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                                    &format!("Trusted Devices ({})", store.devices.len()),
+                                    &format!("{}\n\nTap 'Revoke All' to forget all paired devices.", msg),
+                                    "Revoke All",
+                                    None,
+                                    move |act| {
+                                        if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
+                                            match ybdev::devices::with_store_mut(|s| {
+                                                s.devices.clear();
+                                            }) {
+                                                Ok(_) => plog("system: all trusted devices revoked"),
+                                                Err(e) => plog(&format!("system: revoke all FAILED: {}", e)),
+                                            }
+                                        }
+                                        Action::Pop
+                                    },
+                                )));
                             }
-                        },
-                    )));
-                }
-
-                // Refresh-interval pills.
-                let py = pt(REFRESH_PILL_PT);
-                let ph = pt(16.0);
-                if y >= py - 6 && y < py + ph + 6 {
-                    let gap2 = pt(5.0);
-                    let total = self.w - 2 * pad;
-                    let n = REFRESH_PRESETS.len() as i32;
-                    let pw = (total - (n - 1) * gap2) / n;
-                    for (i, (_, val)) in REFRESH_PRESETS.iter().enumerate() {
-                        let px = pad + i as i32 * (pw + gap2);
-                        if x >= px && x < px + pw {
-                            crate::positions::set_global_refresh_interval(*val);
+                        }
+                        // 3. E-Ink Refresh interval cycle
+                        3 => {
+                            let cur = crate::positions::global_refresh_interval();
+                            let next = match cur {
+                                0 => 5,
+                                5 => 10,
+                                10 => 20,
+                                _ => 0,
+                            };
+                            crate::positions::set_global_refresh_interval(next);
                             return Action::Redraw;
                         }
+                        _ => {}
+                    }
+                }
+
+                // Section 2 Hit Testing
+                if x >= pad && x <= w - pad && y >= top2 && y < top2 + 3 * row_h {
+                    let idx = ((y - top2) / row_h) as usize;
+                    match idx {
+                        // 4. Boot mode toggle
+                        0 => {
+                            let upstart_installed = std::path::Path::new("/etc/upstart/yb-reader.conf").exists();
+                            if !upstart_installed {
+                                return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                                    "Root Upstart Required",
+                                    "Direct OS Boot requires /etc/upstart/yb-reader.conf to be installed on rootfs. Without it, the Kindle cannot start yb-reader automatically.",
+                                    "OK",
+                                    None,
+                                    |_| Action::Pop,
+                                )));
+                            }
+                            let flag = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK");
+                            if flag.exists() {
+                                let _ = std::fs::remove_file(flag);
+                            } else {
+                                let _ = std::fs::File::create(flag);
+                            }
+                            return Action::Redraw;
+                        }
+                        // 5. Reboot
+                        1 => {
+                            let next = if std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists()
+                                && std::path::Path::new("/etc/upstart/yb-reader.conf").exists()
+                            {
+                                "yb OS"
+                            } else {
+                                "Stock Kindle"
+                            };
+                            return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                                "Reboot now?",
+                                &format!("Next boot: {next}."),
+                                "Reboot",
+                                None,
+                                move |act| {
+                                    if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
+                                        plog("system: reboot requested");
+                                        let spawned =
+                                            std::process::Command::new("reboot").spawn().or_else(|_| {
+                                                std::process::Command::new("/sbin/reboot").spawn()
+                                             });
+                                        if spawned.is_err() {
+                                            plog("system: reboot command failed");
+                                        }
+                                    }
+                                    Action::Pop
+                                },
+                            )));
+                        }
+                        // 6. Exit
+                        2 => {
+                            let (title, body, yes) = if crate::home::takeover() {
+                                (
+                                    "Exit to Kindle?",
+                                    "The stock Kindle UI returns.\nReboot brings yb-reader back.",
+                                    "Exit",
+                                )
+                            } else {
+                                ("Quit yb-reader?", "Back to the stock launcher.", "Quit")
+                            };
+                            return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
+                                title,
+                                body,
+                                yes,
+                                None,
+                                move |act| {
+                                    if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
+                                        Action::Quit
+                                    } else {
+                                        Action::Pop
+                                    }
+                                },
+                            )));
+                        }
+                        _ => {}
                     }
                 }
 
                 Action::Keep
             }
-            Gesture::Swipe { dir: SwipeDir::North | SwipeDir::South, .. } => {
+            Gesture::Swipe { dir: SwipeDir::North | SwipeDir::South | SwipeDir::East, .. } => {
                 Action::Pop
             }
             Gesture::TwoFingerTap => Action::Pop,
             _ => Action::Keep,
+        }
+    }
+}
+
+/// Dedicated line-art icons in a 14pt box for System screen rows:
+/// 0: Guide (Book / Navigation map)
+/// 1: Screensavers (Picture frame)
+/// 2: Trusted Devices (Paired computers / screens)
+/// 3: E-Ink Refresh (Circular cycle arrows)
+/// 4: Boot Mode (OS Toggle chip)
+/// 5: Reboot (Circular restart arrow)
+/// 6: Exit (Door / Exit arrow)
+fn draw_system_icon(p: &mut Painter, icon: usize, x: i32, y: i32) {
+    let s = pt(ICON_BOX_PT);
+    match icon {
+        // 0: Guide book
+        0 => {
+            let bw = s - pt(2.0);
+            let bh = s - pt(3.0);
+            let bx = x + pt(1.0);
+            let by = y + pt(1.5);
+            let mid = bx + bw / 2;
+            p.rect_outline_t(Rect::new(bx, by, bw, bh), 1, INK);
+            p.line_w(mid, by, mid, by + bh, 1, INK);
+            p.hline_t(by + pt(3.0), bx + pt(2.0), mid - pt(2.0), 1, INK);
+            p.hline_t(by + pt(6.0), bx + pt(2.0), mid - pt(2.0), 1, INK);
+            p.hline_t(by + pt(3.0), mid + pt(2.0), bx + bw - pt(2.0), 1, INK);
+            p.hline_t(by + pt(6.0), mid + pt(2.0), bx + bw - pt(2.0), 1, INK);
+        }
+        // 1: Screensavers (Picture frame + mountains)
+        1 => {
+            let r = Rect::new(x + pt(1.0), y + pt(1.5), s - pt(2.0), s - pt(3.0));
+            p.rect_outline_t(r, 1, INK);
+            // Sun circle
+            p.rect(Rect::new(r.x + pt(3.0), r.y + pt(3.0), pt(2.5), pt(2.5)), INK);
+            // Mountain peaks
+            p.line_w(r.x + pt(2.0), r.y + r.h - pt(2.0), r.x + pt(5.0), r.y + pt(5.0), 1, INK);
+            p.line_w(r.x + pt(5.0), r.y + pt(5.0), r.x + pt(8.0), r.y + r.h - pt(2.0), 1, INK);
+            p.line_w(r.x + pt(7.0), r.y + r.h - pt(2.0), r.x + pt(9.5), r.y + pt(6.5), 1, INK);
+            p.line_w(r.x + pt(9.5), r.y + pt(6.5), r.x + r.w - pt(2.0), r.y + r.h - pt(2.0), 1, INK);
+        }
+        // 2: Trusted Devices (Desktop / connected screen)
+        2 => {
+            let sw = s - pt(3.0);
+            let sh = s - pt(6.0);
+            let sx = x + pt(1.5);
+            let sy = y + pt(1.0);
+            p.rect_outline_t(Rect::new(sx, sy, sw, sh), 1, INK);
+            // Stand
+            p.line_w(sx + sw / 2, sy + sh, sx + sw / 2, sy + sh + pt(3.0), 1, INK);
+            p.hline_t(sy + sh + pt(3.0), sx + pt(2.0), sx + sw - pt(2.0), 1, INK);
+        }
+        // 3: E-Ink Refresh (Circular cycle arrows)
+        3 => {
+            let r = Rect::new(x + pt(2.0), y + pt(2.0), s - pt(4.0), s - pt(4.0));
+            p.rect_outline_t(r, 1, INK);
+            // Arrowhead top-right
+            p.line_w(r.x + r.w - pt(2.5), r.y - pt(1.5), r.x + r.w + pt(1.0), r.y + pt(1.0), 1, INK);
+            // Arrowhead bottom-left
+            p.line_w(r.x - pt(1.0), r.y + r.h - pt(1.0), r.x + pt(2.5), r.y + r.h + pt(1.5), 1, INK);
+        }
+        // 4: Boot Mode (OS Toggle / Chip)
+        4 => {
+            let r = Rect::new(x + pt(2.0), y + pt(2.5), s - pt(4.0), s - pt(5.0));
+            p.rect_outline_t(r, 1, INK);
+            // Inset switch indicator
+            p.rect(Rect::new(r.x + pt(2.0), r.y + pt(2.0), pt(3.0), r.h - pt(4.0)), INK);
+        }
+        // 5: Reboot (Power circular icon)
+        5 => {
+            let cx = x + s / 2;
+            let cy = y + s / 2;
+            let rad = s / 2 - pt(2.0);
+            p.rect_outline_t(Rect::new(cx - rad, cy - rad, rad * 2, rad * 2), 1, INK);
+            p.line_w(cx, cy - rad - pt(1.0), cx, cy, 1, INK);
+        }
+        // 6: Exit (Door / Exit arrow)
+        _ => {
+            let dx = x + pt(2.0);
+            let dy = y + pt(1.5);
+            let dw = s - pt(5.0);
+            let dh = s - pt(3.0);
+            p.rect_outline_t(Rect::new(dx, dy, dw, dh), 1, INK);
+            // Arrow pointing right out of frame
+            p.line_w(dx + pt(2.0), dy + dh / 2, dx + dw + pt(3.0), dy + dh / 2, 1, INK);
+            p.line_w(dx + dw + pt(1.0), dy + dh / 2 - pt(2.5), dx + dw + pt(3.0), dy + dh / 2, 1, INK);
+            p.line_w(dx + dw + pt(1.0), dy + dh / 2 + pt(2.5), dx + dw + pt(3.0), dy + dh / 2, 1, INK);
         }
     }
 }
@@ -472,15 +530,31 @@ mod tests {
     use super::*;
     use yui::Font;
 
-    /// Headless render: title, card stack, and pills must all put ink on
-    /// the page (mirrors the curtain's regression guard).
+    fn save_preview_artifact(name: &str, canvas: &[u8]) {
+        let artifact_dir = match std::env::var("YB_AI_PREVIEW_DIR")
+            .or_else(|_| std::env::var("ARTIFACT_DIR"))
+        {
+            Ok(d) if !d.is_empty() => d,
+            _ => return,
+        };
+        let path = std::path::Path::new(&artifact_dir).join(name);
+        if let Ok(file) = std::fs::File::create(&path) {
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            if let Ok(mut w) = enc.write_header() {
+                let _ = w.write_image_data(canvas);
+            }
+        }
+    }
+
     #[test]
     fn system_screen_renders_content() {
         let font = Font::load().unwrap();
         let mut buf = vec![255u8; 1248 * 1648];
         let mut s = SystemScreen::new();
+        let mut canvas = vec![0u8; 1236 * 1648];
         {
-            let mut canvas = vec![0u8; 1236 * 1648];
             let mut p = yui::Painter::new(
                 &mut buf,
                 1236,
@@ -493,6 +567,8 @@ mod tests {
             s.draw(&mut p);
             p.flush();
         }
+        save_preview_artifact("system_preview.png", &canvas);
+
         let ink = |name: &str, y0: usize, y1: usize, min: usize| {
             let n = buf[y0 * 1248..y1 * 1248]
                 .iter()
@@ -501,13 +577,9 @@ mod tests {
             assert!(n >= min, "{name}: only {n} ink pixels in rows {y0}-{y1}");
         };
         let lit = buf.iter().filter(|&&b| b > 200).count();
-        // 88%: six cards of text are legitimately under 90 — the guard
-        // exists to catch a gray/black full-screen fill, not card count.
         assert!(lit > 1248 * 1648 * 88 / 100, "page is not white: {lit}");
-        ink("title", 90, 170, 60);
-        ink("cards", 270, 1180, 150);
-        // Refresh section at REFRESH_TITLE_PT 296pt / REFRESH_PILL_PT
-        // 310pt (≈ 1234 / 1293 px at 4.17 px/pt).
-        ink("refresh", 1200, 1380, 40);
+        ink("header", 20, 100, 30);
+        ink("sec1_rows", 200, 800, 150);
+        ink("sec2_rows", 800, 1400, 150);
     }
 }

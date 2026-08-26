@@ -38,6 +38,11 @@ fn save_dir() -> String {
 const OK_EXTS: [&str; 5] = ["epub", "pdf", "fb2", "txt", "cbz"];
 /// The screensaver root accepts exactly what the sleep screen renders.
 const SS_EXTS: [&str; 3] = ["png", "jpg", "jpeg"];
+/// The companion source zip the receive page offers ("Companion (macOS)").
+/// It lives in documents/ next to the books — invisible to the library
+/// listing (zip is not an OK_EXT) — and is reachable only through the
+/// card's `/api/file` download link.
+const COMPANION_ZIP: &str = "yb-mirror.zip";
 
 /// The two browsable roots, strictly enumerated — a root is never a
 /// path, so a hostile ?root= cannot escape into the filesystem. The
@@ -877,6 +882,32 @@ fn handle_conn(
     }
 
     if method == "GET" {
+        if raw_path == "/api/companion" {
+            // Cheap availability probe for the Companion card: the page
+            // asks once on load and shows the download link only when the
+            // zip has been deployed next to the books. The file itself is
+            // streamed by the generic /api/file route, so there is nothing
+            // to buffer here — just a stat and a one-line JSON answer.
+            let target = std::path::Path::new(&save_dir()).join(COMPANION_ZIP);
+            if target.is_file() {
+                let sz = target.metadata().map(|m| m.len()).unwrap_or(0);
+                let resp = format!(
+                    "{{\"available\":true,\"name\":\"{}\",\"size\":{}}}",
+                    COMPANION_ZIP, sz
+                );
+                respond(&mut stream, 200, "OK", "application/json; charset=utf-8", &resp);
+            } else {
+                respond(
+                    &mut stream,
+                    200,
+                    "OK",
+                    "application/json; charset=utf-8",
+                    "{\"available\":false}",
+                );
+            }
+            return;
+        }
+
         if raw_path == "/api/list" || raw_path == "/api/tree" {
             let Some(base) = base_dir(root_param(query_str).as_deref()) else {
                 respond(
@@ -2377,6 +2408,79 @@ mod tests {
             resp.starts_with(b"HTTP/1.1 200"),
             "{}",
             String::from_utf8_lossy(&resp)
+        );
+
+        srv.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn companion_availability_probe() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join("yb-receive-companion-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("YB_SAVE_DIR", dir.to_str().unwrap());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut srv = ReceiveServer::start(Arc::clone(&stop)).expect("server");
+        let port = srv.port();
+        let pin = srv.token().to_string();
+
+        // No zip deployed yet: available=false, still 200 (the page shows
+        // nothing rather than an error).
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                "GET /api/companion HTTP/1.1\r\nHost: t\r\n\r\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let body = String::from_utf8_lossy(&resp);
+        assert!(body.starts_with("HTTP/1.1 200"), "{}", body);
+        assert!(body.contains("\"available\":false"), "{}", body);
+
+        // With the zip next to the books: available=true with its size.
+        std::fs::write(dir.join(COMPANION_ZIP), b"fake companion zip").unwrap();
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                "GET /api/companion HTTP/1.1\r\nHost: t\r\n\r\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let body = String::from_utf8_lossy(&resp);
+        assert!(body.starts_with("HTTP/1.1 200"), "{}", body);
+        assert!(body.contains("\"available\":true"), "{}", body);
+        let want = format!("\"size\":{}", "fake companion zip".len());
+        assert!(body.contains(want.as_str()), "{}", body);
+
+        // And the generic file route streams it back byte-for-byte.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                "GET /api/file?root=documents&dir=&name=yb-mirror.zip HTTP/1.1\r\nHost: t\r\n\r\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let body = String::from_utf8_lossy(&resp);
+        assert!(body.starts_with("HTTP/1.1 200"), "{}", body);
+        assert!(
+            body.contains("\r\n\r\nfake companion zip"),
+            "body: {}",
+            body
         );
 
         srv.shutdown();

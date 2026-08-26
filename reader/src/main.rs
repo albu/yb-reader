@@ -16,9 +16,11 @@ mod crop_dialog;
 mod curtain;
 mod dialogs;
 mod document;
+mod easter_egg;
 mod flashcards;
 mod footnote_dialog;
 mod guard;
+pub mod guide;
 mod highlights_dialog;
 mod home;
 mod library;
@@ -167,6 +169,12 @@ fn main() {
     // purpose: a fast plug-pull with no park still deserves a respawn.
     if awake::usb_plugged() {
         log::plog("usb: cable owns the disk — bowing out (43)");
+        // Docked drive mode: e-ink holds the farewell frame for free,
+        // so the backlight is pure waste — off it goes for the plug.
+        if let Ok(fl) = ybdev::frontlight::Frontlight::open() {
+            fl.set(0);
+            fl.tone_set(0);
+        }
         guard::graceful_exit(43);
     }
     // Takeover mode: leaving the app means "back to the stock Kindle" —

@@ -45,7 +45,12 @@ HEARTBEAT=/tmp/yb-heartbeat
 [ -e "$FLAG" ] || exit 0
 
 mkdir -p "$STATE"
-echo "---- $(date) boot.sh start (pid $$) ----" >> "$LOG"
+echo "---- $(date) boot.sh start (pid $$, ppid $PPID) ----" >> "$LOG"
+trap 'sig=$?; echo "$(date) boot.sh EXIT (pid $$) rc=$sig" >> "$LOG"' EXIT
+trap 'echo "$(date) boot.sh TRAP: SIGTERM received (pid $$)" >> "$LOG"; exit 143' TERM
+trap 'echo "$(date) boot.sh TRAP: SIGINT received (pid $$)" >> "$LOG"; exit 130' INT
+trap 'echo "$(date) boot.sh TRAP: SIGHUP received (pid $$)" >> "$LOG"; exit 129' HUP
+trap 'echo "$(date) boot.sh TRAP: SIGQUIT received (pid $$)" >> "$LOG"; exit 131' QUIT
 
 # USB power present (the wired charger input; sysinfo::vbus reads the
 # same node). Shell-side, cheap, no dependencies.
@@ -190,17 +195,20 @@ rpid=$!
 # hang watchdog runs the same comm as the reader, and the old
 # `killall -0 reader` let a healthy watchdog vouch for a dead reader.
 (sleep 60; kill -0 "$rpid" 2>/dev/null && rm -f "$STATE/fails") &
-trap 'kill -TERM "$rpid" 2>/dev/null' TERM INT
+trap 'echo "$(date) boot.sh: forwarding TERM to reader (rpid $rpid)" >> "$LOG"; kill -TERM "$rpid" 2>/dev/null' TERM
+trap 'echo "$(date) boot.sh: forwarding INT to reader (rpid $rpid)" >> "$LOG"; kill -INT "$rpid" 2>/dev/null' INT
 wait "$rpid"
 rc=$?
-trap - TERM INT
+trap 'echo "$(date) boot.sh TRAP: post-wait SIGTERM received (pid $$)" >> "$LOG"; exit 143' TERM
+trap 'echo "$(date) boot.sh TRAP: post-wait SIGINT received (pid $$)" >> "$LOG"; exit 130' INT
 
-echo "$(date) reader exited rc=$rc" >> "$LOG"
+echo "$(date) boot.sh [step 1]: reader exited rc=$rc" >> "$LOG"
 # Observed exit: the boot audit's `running` marker has served its turn.
 # Removed BEFORE the plug wait below — a power-hold during that wait must
 # find no marker and classify as clean, not strike an already-accounted
 # death a second time.
 rm -f "$STATE/running"
+echo "$(date) boot.sh [step 2]: removed running marker; vbus=$(cat /sys/class/power_supply/bd71827_ac/online 2>/dev/null) udc=$(cat /sys/class/udc/*/state 2>/dev/null)" >> "$LOG"
 # Export death (the common one: plug pulled the disk from under the
 # reader) OR the graceful bow-out (rc 43 — the reader saw USB power,
 # painted its farewell screen and exited so the stock drive-mode dance
@@ -213,13 +221,15 @@ rm -f "$STATE/running"
 # too — conservative, self-correcting, and the price of never
 # respawning against a possibly-exported disk.
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 42 ] && { vbus || drive_mode; }; then
-    echo "$(date) usb: reader died to the export (rc=$rc)" >> "$LOG"
+    echo "$(date) boot.sh [step 3]: usb export/bow-out branch taken (rc=$rc)" >> "$LOG"
     wait_unplug "export death"
+    echo "$(date) boot.sh [step 4]: wait_unplug finished, checking if /mnt/us is mounted" >> "$LOG"
     if ! wait_us_mounted; then
-        echo "$(date) usb: /mnt/us did not come back — falling back" >> "$LOG"
+        echo "$(date) boot.sh [step 5]: /mnt/us did not come back — falling back" >> "$LOG"
         fallback_to_stock
         exit 1
     fi
+    echo "$(date) boot.sh [step 6]: /mnt/us confirmed mounted, clearing fails and exiting 1 for clean upstart respawn" >> "$LOG"
     # Expected death — clear fails too, not just strikes: plug cycles
     # faster than the 60 s runtime proof would otherwise accumulate
     # toward the won't-run fallback and hand a healthy device to stock
@@ -228,6 +238,7 @@ if [ "$rc" -ne 0 ] && [ "$rc" -ne 42 ] && { vbus || drive_mode; }; then
     rm -f "$STATE/fails"
     exit 1
 fi
+echo "$(date) boot.sh [step 7]: non-usb exit path (rc=$rc)" >> "$LOG"
 if [ "$rc" -eq 0 ] || [ "$rc" -eq 42 ]; then
     rm -f "$STATE/fails" "$STATE/strikes"
 fi

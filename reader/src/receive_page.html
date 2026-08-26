@@ -159,6 +159,56 @@ body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webki
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-primary:hover { background: #2563eb; }
 
+/* Companion download card (macOS mirror; shown only when the zip is deployed) */
+.companion-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  margin-bottom: 20px;
+}
+.companion-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: 0;
+}
+.companion-icon {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--accent-glow);
+  color: var(--accent-text);
+}
+.companion-text { flex: 1; min-width: 0; }
+.companion-title { font-weight: 700; font-size: 0.95rem; letter-spacing: -0.2px; }
+.companion-sub {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+  line-height: 1.45;
+}
+.companion-sub code {
+  background: var(--border-subtle);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 0.78rem;
+}
+.companion-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 /* Breadcrumbs bar */
 .breadcrumbs-bar {
   display: flex;
@@ -518,6 +568,21 @@ body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webki
   .screensavers-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
   .dropzone { padding: 22px 14px; }
   .poster-body { padding: 10px 10px; }
+  .companion-card {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding: 14px;
+  }
+  .companion-header {
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .companion-btn {
+    width: 100%;
+    justify-content: center;
+    padding: 10px 14px;
+  }
 }
 </style>
 </head>
@@ -552,6 +617,20 @@ body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webki
       </div>
     </div>
   </header>
+
+  <!-- Companion download (hidden unless /api/companion reports the zip) -->
+  <div class="companion-card" id="companion-card" style="display:none;">
+    <div class="companion-header">
+      <div class="companion-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/><path d="M12 6v6"/><path d="m15 9-3 3-3-3"/></svg>
+      </div>
+      <div class="companion-text">
+        <div class="companion-title">yb-mirror companion (macOS)</div>
+        <div class="companion-sub">Live screen mirroring for Mac. Unzip, then run <code>uv sync</code> and <code>bash mac/make-app.sh</code>.</div>
+      </div>
+    </div>
+    <a class="btn btn-primary companion-btn" id="companion-dl" href="#" download>Download</a>
+  </div>
 
   <!-- Hero Dropzone -->
   <div class="dropzone" id="dropzone" onclick="f.click()">
@@ -1046,6 +1125,26 @@ async function upload(files) {
   }, 900);
 }
 
+async function initCompanion() {
+  // The companion zip is served from documents/ by the generic file route;
+  // this probe just decides whether the card is worth showing. Failure
+  // (session expired, offline) leaves the card hidden — never an error.
+  const card = document.getElementById('companion-card');
+  const dl = document.getElementById('companion-dl');
+  try {
+    const res = await fetch(withToken('/api/companion'));
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data || !data.available) return;
+    dl.href = withToken('/api/file?root=documents&dir=&name=' + encodeURIComponent(data.name));
+    dl.textContent = 'Download ' + data.name + ' (' + formatBytes(data.size) + ')';
+    card.style.display = 'flex';
+  } catch (e) {
+    /* keep hidden */
+  }
+}
+
+initCompanion();
 load();
 </script>
 </body>

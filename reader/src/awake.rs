@@ -43,7 +43,14 @@ static HEAL_BUSY: AtomicBool = AtomicBool::new(false);
 static USB_PLUGGED: AtomicBool = AtomicBool::new(false);
 
 pub fn usb_plugged() -> bool {
-    USB_PLUGGED.load(Ordering::Relaxed)
+    if USB_PLUGGED.load(Ordering::Relaxed) {
+        return true;
+    }
+    if sysinfo::vbus() {
+        USB_PLUGGED.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
 }
 
 /// Pure decision, host-testable: a screen's live reason, USB power, or
@@ -154,6 +161,10 @@ pub fn spawn() {
 /// framework owns the radio and our policy must not fight it. Off the
 /// UI thread — boot's first paint must not wait on lipc round-trips.
 pub fn boot_restore() {
+    // Restore frontlight per saved levels / custom point so fresh boots,
+    // deploys, and post-unplug respawns re-light immediately.
+    reassert_frontlight();
+
     // Reload the persisted manual-off latch before any policy reads it:
     // the atomic starts false in a fresh process.
     ybdev::wifi::hydrate_user_off();

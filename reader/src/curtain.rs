@@ -65,16 +65,13 @@ fn save_custom(b: f32, w: f32) {
     let _ = std::fs::write(CUSTOM_FL_PATH, format!("{b:.4} {w:.4}\n"));
 }
 
-/// Apply slider-space levels and remember them when the result is OFF
-/// every preset (custom mode). Preset tiles apply exact preset values
-/// and never save. The hardware read-back (not the requested fraction)
-/// is what gets saved, so re-applying reproduces identical registers.
+/// Apply slider-space levels and remember them across sessions.
+/// The hardware read-back is what gets saved, so re-applying reproduces
+/// identical registers.
 fn apply_and_remember(fl: &mut Frontlight, b: f32, w: f32) {
     fl.apply_levels(b, w);
     let (lb, lw) = fl.levels();
-    if ybdev::frontlight::nearest_preset(lb, lw).is_none() {
-        save_custom(lb, lw);
-    }
+    save_custom(lb, lw);
 }
 
 // --- grays on white ---
@@ -613,7 +610,7 @@ impl Screen for CurtainScreen {
                     if let Some(i) = seg_at(x, w) {
                         if i < ybdev::frontlight::PRESETS.len() {
                             let (_, pb, pw) = ybdev::frontlight::PRESETS[i];
-                            fl.apply_levels(pb, pw);
+                            apply_and_remember(fl, pb, pw);
                         } else if let Some((cb, cw)) = load_custom() {
                             fl.apply_levels(cb, cw);
                         } else {
