@@ -4,6 +4,9 @@
 
 packages/yb-reader/bin/reader
 
+# Per-device SSH key for the dropbear ssh lifeline — never commit yours.
+packages/yb-reader/settings/SSH/authorized_keys
+
 # compiled tooling binaries (rebuilt from their .c sources)
 /tools/ruler
 /tools/inject

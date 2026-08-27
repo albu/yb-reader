@@ -175,6 +175,16 @@ scp packages/yb-reader/{launch.sh,install.sh,uninstall.sh,scriptlets/YBReader.sh
 | `/mnt/us/kmc/kpm/packages/yb-reader/` | the KPM package (install/upgrade via KPM) |
 | `/mnt/us/extensions/mirror/plugin.log` | our log (same file the Lua plugin used) |
 
+**Your SSH key is not committed** — `packages/yb-reader/settings/SSH/authorized_keys`
+is per-device config (the patched dropbear ssh lifeline reads it at runtime), so
+it's gitignored. Put your own public key there or the device won't authenticate
+you — and the deploy loop won't work:
+
+```sh
+mkdir -p packages/yb-reader/settings/SSH
+cat ~/.ssh/id_ed25519.pub > packages/yb-reader/settings/SSH/authorized_keys
+```
+
 ### Running headless & reading logs
 
 ```sh
