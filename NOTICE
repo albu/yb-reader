@@ -1,0 +1,34 @@
+yb-reader
+=========
+
+Copyright (C) 2026 albu
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, version 3 of the License (see LICENSE).
+
+The complete corresponding source of the combined work is available in
+this repository.
+
+Third-party components
+----------------------
+
+* MuPDF — Copyright Artifex Software, Inc.
+  Licensed under the GNU Affero General Public License v3.0.
+  This binary statically links MuPDF through the `mupdf` / `mupdf-sys`
+  crates. Upstream source: https://mupdf.com and
+  https://github.com/ArtifexSoftware/mupdf
+
+* Literata — Copyright The Literata Project Authors.
+  SIL Open Font License 1.1.
+
+* PT Serif / PT Sans — Copyright ParaType Ltd.
+  SIL Open Font License 1.1.
+
+* Bitter — Copyright Sol Matas.
+  SIL Open Font License 1.1.
+
+* Noto Sans — Copyright Google Inc.
+  SIL Open Font License 1.1.
+
+  (Font license texts: resources/fonts/OFL-*.txt)

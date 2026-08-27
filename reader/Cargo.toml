@@ -2,6 +2,7 @@
 name = "yb-reader"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 ybdev = { path = "../ybdev" }

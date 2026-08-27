@@ -2,8 +2,8 @@
 name = "yb-probe"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 ybdev = { path = "../ybdev" }
 libc = "0.2"
-

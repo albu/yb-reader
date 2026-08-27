@@ -461,8 +461,11 @@ Same files as the Lua plugin, same semantics:
 - Touch device is discovered from `/proc/bus/input/devices`
   (`ABS_MT_POSITION_X`); if discovery fails it falls back to
   `/dev/input/touch`. The `probe` output will confirm the real path.
-- MuPDF is AGPL-3.0 — fine for personal use; keep that in mind if this ever
-  gets distributed.
+- The binary statically links **MuPDF** (AGPL-3.0, © Artifex Software).
+  Personal use on your own device is unrestricted, but *distributing* the
+  built binary carries AGPL obligations (license alongside the binary,
+  notice, and an offer of the complete corresponding source) — see
+  `LICENSE` and `NOTICE`.
 
 ## Roadmap
 
@@ -473,3 +476,10 @@ Same files as the Lua plugin, same semantics:
 - Idle policy in takeover mode: release `preventScreenSaver` during plain
   reading; hold awake while USB VBUS is present (~100 s window today).
 - Suspend/resume hooks (lipc event → re-enable Wi-Fi, full refresh).
+
+## License
+
+AGPL-3.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The fonts are
+SIL Open Font License 1.1 (license texts in `resources/fonts/OFL-*.txt`);
+the statically-linked MuPDF is AGPL-3.0 (© Artifex Software, source at
+[mupdf.com](https://mupdf.com)).
