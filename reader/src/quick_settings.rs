@@ -184,7 +184,7 @@ impl QuickSettingsSheet {
             y + pt(15.0),
             7.5,
             120,
-            "live preview updates as you tap",
+            "TYPOGRAPHY · 2/2",
         );
     }
 
@@ -498,7 +498,7 @@ impl Screen for QuickSettingsSheet {
             y + pt(15.0),
             7.5,
             120,
-            "tap above · swipe down",
+            "QUICK SETTINGS · 1/2",
         );
         let typog_btn = Rect::new(w - pad - pt(88.0), y - pt(4.0), pt(88.0), pt(BTN_H_PT));
         p.rect_outline_t(typog_btn, 1, 120);
@@ -508,7 +508,7 @@ impl Screen for QuickSettingsSheet {
             typog_btn.y + pt(15.0),
             7.5,
             0,
-            "TYPOG ›",
+            "TYPE ›",
         );
     }
 
