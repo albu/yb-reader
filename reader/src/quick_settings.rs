@@ -516,9 +516,15 @@ impl Screen for QuickSettingsSheet {
         let (w, h) = self.dims;
         let (vx, vy) = match g {
             Gesture::Tap { x, y } => (x as i32, y as i32),
-            Gesture::Swipe { dir: ybdev::input::SwipeDir::South, .. } => {
-                return Action::Pop
-            }
+        // Either vertical swipe dismisses the sheet — pull it down or push
+        // it up. The footnote dialog uses the same both-directions-at-the-
+        // boundary convention; a north swipe alone used to be swallowed.
+        Gesture::Swipe {
+            dir: ybdev::input::SwipeDir::South | ybdev::input::SwipeDir::North,
+            ..
+        } => {
+            return Action::Pop
+        }
             // Long-press, drags and north/east/west swipes mean nothing
             // here; they must not fall through to (0,0) — which sits above
             // the sheet and read as "tap outside", dismissing it.
