@@ -344,6 +344,23 @@ pub fn resume_page(name: &str) -> usize {
 /// ticks) and a same-second duplicate must not become a flash write.
 fn record_at(path: &str, name: &str, pos: Pos) {
     let mut map = load_at(path);
+    // The yread backend reports total=1 until the landing chapter is
+    // paginated, and dialogs (settings sheet, TOC, scrubber, curtain,
+    // footnotes) capture that placeholder at open time — so a settings
+    // change or jump inside that window would clobber the real total with
+    // "page X of 1" (the hero card then shows the wrong count after a
+    // restart). A real book never shrinks to 1 page, so a stored total
+    // larger than 1 always wins over an incoming 1.
+    let pos = if pos.total == 1 {
+        let stored = map.get(name).map(|p| p.total).unwrap_or(0);
+        if stored > 1 {
+            Pos { total: stored, ..pos }
+        } else {
+            pos
+        }
+    } else {
+        pos
+    };
     if map.get(name) == Some(&pos) {
         return;
     }
@@ -591,6 +608,32 @@ mod tests {
         assert!(!s.hyphenate);
         assert_eq!(s.body_align, yread::model::TextAlign::Left);
         assert_eq!(s.font_family, yread::font::FontFamily::Bitter);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn placeholder_total_never_clobbers_a_real_total() {
+        // The yread backend reports total=1 until pagination; a dialog
+        // opened in that window records "page X of 1" over the real
+        // total. The write path must keep the larger stored total.
+        let path = std::env::temp_dir().join("yb-positions-total-guard.txt");
+        let p = path.to_str().unwrap();
+        let _ = std::fs::remove_file(p);
+
+        record_at(p, "book.epub", Pos::simple(10, 200, 1000));
+        // A settings change captured before pagination: total=1.
+        record_at(p, "book.epub", Pos::simple(12, 1, 1001));
+        assert_eq!(
+            load_at(p)["book.epub"].total,
+            200,
+            "placeholder 1 must not downgrade the real 200"
+        );
+        // But the page/settings still updated (only the total was kept).
+        assert_eq!(load_at(p)["book.epub"].page, 12);
+
+        // A genuinely one-page book stays 1.
+        record_at(p, "short.txt", Pos::simple(0, 1, 2000));
+        assert_eq!(load_at(p)["short.txt"].total, 1);
         let _ = std::fs::remove_file(p);
     }
 }
