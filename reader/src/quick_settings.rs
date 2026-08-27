@@ -154,7 +154,7 @@ impl QuickSettingsSheet {
         y += pt(ROW_H_PT) + pt(4.0);
 
         // Row 4: PARA SPACE (paragraph spacing in em)
-        p.text(pad, y + pt(15.0), 8.5, 0, "PARA SPACE");
+        p.text(pad, y + pt(15.0), 8.5, 0, "PARAGRAPH SPACE");
         let ps_str = format!("{:.2}em", self.settings.paragraph_spacing);
         p.text_center_in(
             pad + pt(70.0),
@@ -368,7 +368,7 @@ impl Screen for QuickSettingsSheet {
             y += pt(ROW_H_PT) + pt(4.0);
 
             // Row 3: Line spacing (multiplier over the book's leading)
-            p.text(pad, y + pt(15.0), 8.5, 0, "SPACING");
+            p.text(pad, y + pt(15.0), 8.5, 0, "LINE SPACING");
             let sp_str = format!("{:.1}\u{d7}", self.settings.line_spacing);
             p.text_center_in(
                 pad + pt(70.0),
@@ -466,7 +466,7 @@ impl Screen for QuickSettingsSheet {
 
         // Row 4: Night / Invert (page inversion — the old night-reading
         // toggle the settings unification dropped).
-        p.text(pad, y + pt(15.0), 8.5, 0, "NIGHT");
+        p.text(pad, y + pt(15.0), 8.5, 0, "NIGHT MODE");
         let inv_btn = Rect::new(w - pad - pt(120.0), y, pt(120.0), pt(BTN_H_PT));
         if self.settings.invert {
             p.rect(inv_btn, 0);
@@ -508,7 +508,7 @@ impl Screen for QuickSettingsSheet {
             typog_btn.y + pt(15.0),
             7.5,
             0,
-            "TYPE ›",
+            "TYPOGRAPHY ›",
         );
     }
 
