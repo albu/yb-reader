@@ -85,7 +85,9 @@ impl QuickSettingsSheet {
 
         // Row 1: FONT (body family)
         p.text(pad, y + pt(15.0), 8.5, 0, "FONT");
-        let fam_btn_w = pt(58.0);
+        // Four buttons: keep them narrow enough to clear the "FONT"
+        // label — pt(58) started at x≈133 and collided with the label's T.
+        let fam_btn_w = pt(52.0);
         for (i, family) in yread::font::FontFamily::ALL.iter().enumerate() {
             let bx = w - pad - (4 - i as i32) * (fam_btn_w + pt(4.0));
             let br = Rect::new(bx, y, fam_btn_w, pt(BTN_H_PT));
@@ -173,7 +175,9 @@ impl QuickSettingsSheet {
         // Row 5: BACK
         let back_btn = Rect::new(pad, y, pt(90.0), pt(BTN_H_PT));
         p.rect_outline_t(back_btn, 1, 0);
-        p.text_center_in(back_btn.x, back_btn.x + back_btn.w, y + pt(15.0), 8.0, 0, "◀ BACK");
+        // ‹/› are the chevrons the UI font actually carries (▶/◀ are
+        // missing from Noto Sans and rendered as nothing on-device).
+        p.text_center_in(back_btn.x, back_btn.x + back_btn.w, y + pt(15.0), 8.0, 0, "‹ BACK");
         p.text_center_in(
             pad + pt(96.0),
             w - pad,
@@ -191,7 +195,7 @@ impl QuickSettingsSheet {
         let mut y = sheet_y + pt(12.0);
 
         // Row 1: FONT
-        let fam_btn_w = pt(58.0);
+        let fam_btn_w = pt(52.0);
         for (i, family) in yread::font::FontFamily::ALL.iter().enumerate() {
             let bx = w - pad - (4 - i as i32) * (fam_btn_w + pt(4.0));
             let br = Rect::new(bx, y, fam_btn_w, pt(BTN_H_PT));
@@ -501,10 +505,10 @@ impl Screen for QuickSettingsSheet {
         p.text_center_in(
             typog_btn.x,
             typog_btn.x + typog_btn.w,
-            y + pt(15.0),
+            typog_btn.y + pt(15.0),
             7.5,
             0,
-            "TYPOG ▶",
+            "TYPOG ›",
         );
     }
 
