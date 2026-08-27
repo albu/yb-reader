@@ -17,6 +17,11 @@ One static binary, one job: **read**.
   the panel width. Per-book positions/settings persisted on `/mnt/us`.
 - **Reading tools** — TOC navigation, live-preview page scrubber, footnotes as
   a bottom sheet, split-column/landscape modes, contrast curves, night mode.
+- **Typography** — four embedded OFL typefaces (Literata, PT Serif, Bitter,
+  PT Sans), a Quick Settings → Typography page (family, alignment,
+  hyphenation, indent, paragraph spacing), a unified justification width
+  model, hyphenation hygiene, and a verification gallery that scores every
+  typesetting change. See [Typography & the reading engine](#typography--the-reading-engine).
 - **Vocabulary** — Word Wise–style inline translations (57k+ word Russian
   dictionary) and an SM-2 flashcard deck fed from looked-up words.
 - **Frontlight** — `/dev/frontlight` ioctls (white + amber), two-finger tap from
@@ -46,6 +51,62 @@ yb-reader/
              (the takeover pieces) + bin/dropbear (bundled ssh server)
   deploy.sh  build + deploy: SSH fast loop (default), `usb`, or `probe`
 ```
+
+## Typography & the reading engine
+
+The reflowable engine (yread) is a from-scratch typesetter: XHTML/FB2 →
+Block/Run tree → line breaking with hypher hyphenation → rustybuzz shaping →
+swash rasterization onto the e-ink framebuffer.
+
+**Typefaces** — four embedded OFL-1.1 families (license texts live next to
+them as `resources/fonts/OFL-*.txt`):
+
+| Family | Character | Notes |
+|---|---|---|
+| Literata (default) | book serif | Google Books' reading face, full-size faces |
+| PT Serif | news serif | native Cyrillic — the Russian-book workhorse |
+| Bitter | slab serif | designed for screens / e-paper |
+| PT Sans | humanist sans | the clean / accessible option |
+
+The non-Literata faces are subsetted (Latin + Cyrillic + punctuation,
+`pyftsubset`) to ~35–190 KB/face; Bitter is instanced from its variable font
+to static TTFs (variable fonts can quirk on e-ink firmware). All four carry
+real Cyrillic — the Russian Word Wise / book corpus is the stated
+requirement. Code and fallback stay Noto Sans.
+
+**Settings** — Quick Settings (swipe up bottom-left, or swipe down below the
+top edge) carries the per-session knobs: font size, margins, line spacing,
+contrast, night mode. Its `TYPOGRAPHY ›` button opens the page for the
+set-once style: font family, alignment, hyphenation, first-line indent,
+paragraph spacing — plus engine-level word/letter spacing. Every change
+repaginates live and persists per book (positions.txt), and the page
+snapshot cache keys on a **layout fingerprint** over every layout-affecting
+field, so a stale-styled pixel is structurally impossible.
+
+**The width model** — justification (leading offset + per-gap stretch) is
+solved once at line-build time and stored on the line; the rasterizer and
+word-rect hit-testing both consume the stored values, so the two width
+models that once drifted apart (and broke dictionary taps) cannot exist
+anymore. Per-space TeX-style stretch/shrink tolerances are stored for
+future optimal (Knuth-Plass) breaking.
+
+**Correctness work** — non-breaking spaces (NBSP) never split "10 km";
+soft hyphens break with a real hyphen at line ends and stay invisible
+mid-line; hyphenation is hygienic (max 2 consecutive hyphenated line ends,
+min 3-char prefix / 2-char suffix, no break next to an existing dash);
+justified lines land exactly on both margins.
+
+**Verification gate** — the breaker is pinned by property tests (extent,
+justify-fill, byte tiling, hyphen rules, cache-key invariants) and an
+opt-in real-book gate:
+
+```sh
+YB_TEST_EPUB=/path/to/book.epub cargo test -p yread --test real_book_test
+```
+
+`cargo run -p rendertest -- <book.epub> <chapter> gallery` renders a
+settings matrix to PNGs with per-config stats (extent violations, rivers,
+hyphen ladders) — the before/after scoreboard for any typesetting change.
 
 ## Prerequisites (macOS)
 
@@ -335,7 +396,7 @@ decoder now uses `Transformations::EXPAND` and there are unit tests
 | Reader | tap top-right bookmark | toggle selection mode (long-press selects instead of dictionary) |
 | Reader | hold word + drag (selection mode) | highlight span → saved with persistent underline |
 | Scrubber | 🖍 Highlights | highlights list: tap = jump back, hold = delete |
-| Reader | swipe down (below the top edge) | reader settings (font, margins, contrast, split) |
+| Reader | swipe down (below the top edge) / swipe up bottom-left | reader settings (size, margins, spacing, contrast, night; `TYPOGRAPHY ›` page for type style) |
 | Reader | swipe down from the top edge | curtain |
 | Reader | swipe up, bottom-left | reader settings |
 | Reader | swipe up, bottom-center | table of contents |
