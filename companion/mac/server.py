@@ -77,6 +77,8 @@ from Quartz import (
     CGPointMake,
 )
 
+import pairing
+
 # Kindles send key *names*; the values are mac virtual-key codes.
 KEY_CODES = {
     "left": 0x7B, "right": 0x7C, "up": 0x7E, "down": 0x7D,
@@ -86,6 +88,7 @@ KEY_CODES = {
 
 BMP_PATH = tempfile.gettempdir() + "/ybm_frame.bmp"
 LAST_URL_PATH = os.path.expanduser("~/.yb-mirror-last-url")
+LAST_KINDLE_PATH = os.path.expanduser("~/.yb-mirror-last-kindle")
 
 
 def log(*a):
@@ -265,16 +268,12 @@ def find_window(app, title_substr):
     return max(matches, key=lambda m: m[3] * m[4])
 
 
-def activate_tab(app, tab_substr):
-    """Bring the app (and its front window) forward.
-
-    With a single tab/window this is all that is needed to make the mirror
-    show the same content the user is looking at, and it ensures the
-    synthetic arrow keys land in the right app. Returns True on success,
-    False if the script failed (missing Automation permission, ...).
-    """
-    if not tab_substr:
-        return True
+def activate_front(app):
+    """Bring the app (and its front window) forward. With a single
+    tab/window this is all that is needed to make the mirror show the same
+    content the user is looking at, and it ensures the synthetic arrow
+    keys land in the right app. Returns True on success, False if the
+    script failed (missing Automation permission, ...)."""
     script = f'''
     tell application "{app}"
         activate
@@ -655,10 +654,10 @@ def to_fb_layout(gray, fbw, fbh, depth, stride):
 # ---------------------------------------------------------------- server ---
 
 class Mirror:
-    def __init__(self, app, title, tab="", contrast=2.0,
+    def __init__(self, app, title, activate=False, contrast=2.0,
                  crop=(0.0, 0.0, 0.0, 0.0), no_shadow_crop=False,
                  no_aspect_crop=False):
-        self.app, self.title, self.tab = app, title, tab
+        self.app, self.title, self.activate = app, title, activate
         self.contrast = contrast
         self.crop = crop              # (top, bottom, left, right) in points
         self.no_shadow_crop = no_shadow_crop
@@ -673,12 +672,36 @@ class Mirror:
         self.display_released = True  # display may be asleep; wake on next contact
         self.win = None
         self.lock = threading.Lock()
+        self.kindle_lock = threading.Lock()
+        self.last_kindle_ip = None   # learned from the Kindle's own requests
+        self.last_kindle_seen = 0.0
         self.fb = None          # dict from client: w,h,depth,stride
         self.seq = 0
 
+    def note_client(self, ip):
+        """Remember the Kindle's address from the handshake: every request
+        the Kindle makes (frame polls, page turns, pings) carries its source
+        IP, so no address ever has to be configured or hardcoded. Persisted
+        so the menu bar can reopen the Kindle's web manager later, and the
+        paired-device record can attach a name once /api/pair has seen it.
+        Loopback (our own /status probes) is ignored."""
+        if not ip or ip.startswith("127.") or ip == "::1":
+            return
+        with self.kindle_lock:
+            if ip == self.last_kindle_ip:
+                return
+            self.last_kindle_ip = ip
+            self.last_kindle_seen = time.time()
+        try:
+            with open(LAST_KINDLE_PATH, "w") as f:
+                f.write(ip + "\n")
+            log(f"remembered Kindle at {ip}")
+        except OSError as e:
+            log(f"remembering kindle ip failed: {e}")
+
     def rewin(self):
-        if self.tab:
-            activate_tab(self.app, self.tab)
+        if self.activate:
+            activate_front(self.app)
         self.win = find_window(self.app, self.title)
         if self.win:
             log(f"window: id={self.win[0]} {self.win[3]}x{self.win[4]} "
@@ -1027,7 +1050,9 @@ def run_discovery(tcp_port, udp_port):
     """Answer 'ybmirror' UDP probes so the Kindle can find this Mac with no
     configuration at all: the plugin broadcasts on udp/<port+1> and uses the
     reply's *source address* as the server IP (nothing in the payload to
-    misparse), learning the TCP port from the reply body."""
+    misparse), learning the TCP port from the reply body. The reply also
+    announces id=/name= (pairing.announcement) so the reader's trust check
+    can attach a paired token to this server."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     try:
@@ -1040,7 +1065,22 @@ def run_discovery(tcp_port, udp_port):
         try:
             data, addr = s.recvfrom(256)
             if data.startswith(b"ybmirror"):
-                s.sendto(f"ybmirror {tcp_port}".encode(), addr)
+                # The reader's second probe carries its own identity:
+                # "ybmirror-discover id=<kindle_id> nonce=<hex>". Answer
+                # with THAT Kindle's paired device_id (so a Mac serving
+                # several Kindles announces the right identity to each) and
+                # mac=HMAC-SHA256(token, nonce) — the proof that this Mac
+                # holds the pairing, so the reader can trust the reply from
+                # any IP (a host that merely echoes the id gets nothing).
+                kindle_id = None
+                nonce = None
+                text = data.decode("utf-8", "replace")
+                if " id=" in text:
+                    kindle_id = text.split(" id=", 1)[1].split(" ", 1)[0].strip() or None
+                if " nonce=" in text:
+                    nonce = text.split(" nonce=", 1)[1].split(" ", 1)[0].strip() or None
+                s.sendto(pairing.announcement(tcp_port, kindle_id, nonce).encode(),
+                         addr)
         except OSError:
             continue
 
@@ -1070,13 +1110,48 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 30
 
-    def _json(self, obj, code=200):
+    def _json(self, obj, code=200, cors=False):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        if cors:
+            self._cors_headers()
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _cors_headers(self):
+        """CORS for the receive page's pairing handshake: the page runs on
+        http://<kindle-ip>:8080 and talks to http://localhost:8765. Only the
+        pairing endpoints get this; /status and the frame endpoints stay
+        CORS-free so a hostile web page can't read them."""
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Access-Control-Max-Age", "86400")
+
+    def do_OPTIONS(self):
+        """Preflight for the browser's cross-origin /api/pair POST."""
+        self.send_response(204)
+        self._cors_headers()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    @staticmethod
+    def _is_loopback(client):
+        ip = client[0]
+        return ip.startswith("127.") or ip == "::1"
+
+    def _admin_only(self):
+        """Mac-side admin endpoints (/status, /rewin, /autosize, /api/pair)
+        are localhost-only: the pairing browser runs on this Mac, and the
+        reader never calls them, so a LAN peer must not be able to read the
+        paired identities or re-resize the window."""
+        if not self._is_loopback(self.client_address):
+            self._json({"error": "admin endpoint — localhost only"}, 403)
+            return False
+        return True
 
     def _query(self):
         """First value of every query-string param, as a plain dict."""
@@ -1097,12 +1172,26 @@ class Handler(BaseHTTPRequestHandler):
         if "bpp" in q:
             m.png_bits = int(q["bpp"])
 
+    def _authorized(self):
+        """True when a Kindle-facing request may proceed. Enforcement is
+        OFF until at least one Kindle has paired (see pairing.authorized);
+        after that, the request must carry the paired token as
+        X-YB-Secret (X-YB-Kindle-Id says which Kindle it is, optional)."""
+        return pairing.authorized(
+            self.headers.get("X-YB-Kindle-Id") or None,
+            self.headers.get("X-YB-Secret") or "")
+
     def do_GET(self):
         m = self.mirror
         # Kindle-facing endpoints refresh the activity clock that scopes
         # the display keep-awake; /status (our own curl probes) does not.
         if self.path.startswith(("/ping", "/frame")):
+            if not self._authorized():
+                return self._json(
+                    {"error": "unauthorized — open the receive page from "
+                              "the Mac and re-pair this Kindle"}, 401)
             m.last_activity = time.time()
+            m.note_client(self.client_address[0])
         if self.path.startswith("/ping"):
             return self._json({"ok": True})
         if self.path.startswith("/health"):
@@ -1111,16 +1200,25 @@ class Handler(BaseHTTPRequestHandler):
             # Kindle heartbeat and the display keep-awake signal; a probe
             # refreshing it would keep the screen lit with no Kindle
             # anywhere near.
-            return self._json({"ok": True})
+            return self._json({"ok": True}, cors=True)
         if self.path.startswith("/status"):
+            if not self._admin_only():
+                return
             if m.win is None:
                 m.rewin()
             w = m.win or (None, None, None, None, None, None)
+            paired = pairing.load()
             return self._json({
                 "app": m.app, "title_substr": m.title,
                 "window": {"id": w[0], "x": w[1], "y": w[2], "w": w[3], "h": w[4],
                            "name": w[5]} if m.win else None,
                 "fb": m.fb, "seq": m.seq, "geo": m.geo,
+                "kindle": {
+                    "ip": m.last_kindle_ip,
+                    "last_seen": m.last_kindle_seen or None,
+                },
+                "paired": [{"id": k, "name": v.get("name")}
+                           for k, v in paired.items()],
             })
         if self.path.startswith("/frame"):
             self._apply_frame_params()
@@ -1236,11 +1334,48 @@ class Handler(BaseHTTPRequestHandler):
         m = self.mirror
         q = self._query()
         if self.path.startswith(("/next", "/prev", "/key", "/scroll", "/tap")):
+            if not self._authorized():
+                return self._json(
+                    {"error": "unauthorized — open the receive page from "
+                              "the Mac and re-pair this Kindle"}, 401)
             m.last_activity = time.time()
+            m.note_client(self.client_address[0])
         wait = "wait" in q
         turn_id = q.get("id")
         n = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(n) if n else b""
+        if self.path.startswith("/api/pair"):
+            if not self._admin_only():
+                return
+            # Completes the pairing the Kindle's receive page starts: its
+            # browser POSTs the PIN-minted token here after /api/pair on
+            # the Kindle succeeds (see receive_page.html — this endpoint is
+            # what that fetch() is talking to).
+            try:
+                p = json.loads(body or b"{}")
+            except ValueError:
+                return self._json({"error": "bad json"}, 400)
+            kid = p.get("kindle_id") or ""
+            name = p.get("kindle_name") or "Kindle"
+            tok = p.get("token") or ""
+            dev_id = p.get("device_id") or ""
+            if not kid or not tok:
+                return self._json(
+                    {"error": "kindle_id and token are required"}, 400)
+            ok = pairing.pair(kid, name, tok, dev_id)
+            if ok:
+                log(f"paired Kindle {name!r} ({kid})")
+            return self._json({"ok": ok}, cors=True)
+        if self.path.startswith("/api/challenge"):
+            # Pairing self-heal: the reader proves this Mac still holds the
+            # pairing by challenging it with a fresh nonce (HMAC-SHA256 of
+            # the nonce with the paired token). A matching answer lets the
+            # reader refresh its stored IP after a DHCP change — nothing
+            # secret travels in the request.
+            mac = pairing.challenge(q.get("kindle_id", ""), q.get("nonce", ""))
+            if mac is None:
+                return self._json({"error": "unknown kindle"}, 404)
+            return self._json({"mac": mac})
         if self.path.startswith("/tap"):
             # Coordinates from the query string (the Rust client's HTTP
             # layer sends no bodies) or the legacy JSON body.
@@ -1284,8 +1419,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._turn_reply(act, {"scroll": scrolled}, turn_id, wait,
                                     fast=True)
         if self.path.startswith("/rewin"):
+            if not self._admin_only():
+                return
             return self._json({"window": bool(m.rewin())})
         if self.path.startswith("/autosize"):
+            if not self._admin_only():
+                return
             return self._json({"window": bool(m.autosize()),
                                "info": ("id", m.win[0], m.win[3], m.win[4])
                                if m.win else None})
@@ -1299,10 +1438,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--app", default="Safari")
     ap.add_argument("--title", default="")
-    ap.add_argument("--tab", default="",
-                    help="bring the app to the foreground before each "
-                         "capture (use with a single-tab browser; needs macOS "
-                         "Automation permission for osascript)")
+    ap.add_argument("--activate", action="store_true",
+                    help="bring the app (and its front window) to the "
+                         "foreground before each capture (use with a "
+                         "single-tab browser; needs macOS Automation "
+                         "permission for osascript)")
     ap.add_argument("--contrast", type=float, default=2.0,
                     help="gamma applied to grayscale frames; higher = darker "
                          "text/blacks, 1.0 = unchanged (default 2.0)")
@@ -1365,7 +1505,7 @@ def main():
         if saved and open_url(args.app, saved):
             log(f"resumed last page: {saved}")
 
-    Handler.mirror = Mirror(args.app, args.title, args.tab, args.contrast,
+    Handler.mirror = Mirror(args.app, args.title, args.activate, args.contrast,
                             (args.crop_top, args.crop_bottom,
                              args.crop_left, args.crop_right),
                             args.no_shadow_crop, args.no_aspect_crop)

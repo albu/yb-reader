@@ -22,8 +22,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.parse
 
+import pairing
+
 STREAM_PORT = 8768
 DISCOVER_PORT = 8766
+MIRROR_PORT = 8765  # the mirror server's port; probes for it must not point here
 
 
 def log(*args):
@@ -151,6 +154,8 @@ class SessionWatcher:
         self.active_source = "None"
         self.force_reload = False
         self._stop = False
+        self.pipe_buffer = []
+        self.pipe_dirty = threading.Event()
 
     def set_mode(self, mode):
         with self.lock:
@@ -336,44 +341,123 @@ class SessionWatcher:
         }
 
     def start(self):
-        t = threading.Thread(target=self._watch_loop, daemon=True)
-        t.start()
+        if self.pipe_mode:
+            threading.Thread(target=self._pipe_reader, daemon=True).start()
+        threading.Thread(target=self._watch_loop, daemon=True).start()
 
     def stop(self):
         self._stop = True
 
+    def _pipe_reader(self):
+        """Read raw markdown from stdin (--pipe) into a rolling buffer.
+        Blocks on readline in this thread; the watch loop picks up whatever
+        accumulated since the last tick."""
+        try:
+            for line in sys.stdin.buffer:
+                line = line.decode("utf-8", errors="replace")
+                with self.lock:
+                    self.pipe_buffer.append(line)
+                    if len(self.pipe_buffer) > 4000:  # bound memory
+                        del self.pipe_buffer[: len(self.pipe_buffer) // 2]
+                self.pipe_dirty.set()
+        except Exception as e:
+            log("pipe reader ended:", e)
+
+    def _newest_jsonl(self, directory):
+        """Newest *.jsonl under a directory (recursive), or None."""
+        try:
+            files = glob.glob(os.path.join(directory, "**", "*.jsonl"),
+                              recursive=True)
+            # A session file can be rotated/deleted between the glob and
+            # the stat — a vanished file must not kill the watcher thread.
+            files = [f for f in files if os.path.exists(f)]
+            return max(files, key=os.path.getmtime) if files else None
+        except OSError:
+            return None
+
+    def _parse_auto(self, path):
+        """Parse a transcript in either known format (antigravity first,
+        then claude); returns (turn, source_label) or (None, None)."""
+        turn = self.parse_antigravity_transcript(path)
+        if turn:
+            return turn, "Antigravity"
+        turn = self.parse_claude_transcript(path)
+        if turn:
+            return turn, "Claude Code"
+        return None, None
+
     def _watch_loop(self):
         last_mtime = 0
         current_file = self.watch_path
-        current_type = "agy"
 
         while not self._stop:
-            if not self.watch_path and not self.pipe_mode:
+            # --pipe: stdin is the transcript; no file watching at all.
+            if self.pipe_mode:
+                if self.pipe_dirty.is_set():
+                    self.pipe_dirty.clear()
+                    with self.lock:
+                        text = "".join(self.pipe_buffer).strip()
+                    if text:
+                        turn = {
+                            "id": f"pipe_{int(time.time())}",
+                            "assistant": "Terminal pipe",
+                            "prompt": (text.splitlines() or [""])[0].strip(),
+                            "timestamp": time.strftime("%H:%M"),
+                            "status": "idle",
+                            "tool_status": None,
+                            "raw_markdown": text,
+                            "blocks": parse_markdown_blocks(text),
+                        }
+                        with self.lock:
+                            turn["source_mode"] = self.mode
+                            turn["active_source"] = "stdin pipe"
+                            if (not self.current_turn or
+                                    self.current_turn.get("raw_markdown") != text):
+                                self.revision += 1
+                                turn["revision"] = self.revision
+                                self.current_turn = turn
+                                if (not self.history or
+                                        self.history[-1].get("raw_markdown") != text):
+                                    self.history.append(turn)
+                                    if len(self.history) > 30:
+                                        self.history.pop(0)
+                                log(f"Updated pipe turn rev {self.revision}: "
+                                    f"{turn['prompt'][:30]}...")
+                time.sleep(0.5)
+                continue
+
+            if not self.watch_path:
                 agy_f = self.find_latest_antigravity_transcript()
                 claude_f = self.find_latest_claude_transcript()
-                
+
                 agy_mt = os.path.getmtime(agy_f) if agy_f and os.path.exists(agy_f) else 0
                 claude_mt = os.path.getmtime(claude_f) if claude_f and os.path.exists(claude_f) else 0
 
                 if self.mode == "antigravity" and agy_f:
                     current_file = agy_f
-                    current_type = "agy"
                     self.active_source = "Antigravity"
                 elif self.mode == "claude" and claude_f:
                     current_file = claude_f
-                    current_type = "claude"
                     self.active_source = "Claude Code"
                 else:
                     # Auto mode: pick newer
                     if claude_mt > agy_mt and claude_f:
                         current_file = claude_f
-                        current_type = "claude"
                         self.active_source = "Claude Code (Auto)"
                     elif agy_f:
                         current_file = agy_f
-                        current_type = "agy"
                         self.active_source = "Antigravity (Auto)"
-            
+            elif os.path.isdir(self.watch_path):
+                # --watch DIR: follow the newest transcript under it.
+                try:
+                    newest = self._newest_jsonl(self.watch_path)
+                    if newest and newest != current_file:
+                        current_file = newest
+                        last_mtime = 0
+                        log(f"watch: following {current_file}")
+                except Exception as e:
+                    log("watch dir scan error:", e)
+
             if self.force_reload:
                 last_mtime = 0
                 self.force_reload = False
@@ -383,16 +467,15 @@ class SessionWatcher:
                     mtime = os.path.getmtime(current_file)
                     if mtime != last_mtime:
                         last_mtime = mtime
-                        if current_type == "claude":
-                            turn = self.parse_claude_transcript(current_file)
-                        else:
-                            turn = self.parse_antigravity_transcript(current_file)
-                            
+                        turn, source = self._parse_auto(current_file)
                         if turn:
                             with self.lock:
                                 turn["source_mode"] = self.mode
-                                turn["active_source"] = self.active_source
-                                if not self.current_turn or self.current_turn.get("raw_markdown") != turn.get("raw_markdown") or self.current_turn.get("prompt") != turn.get("prompt") or self.current_turn.get("tool_status") != turn.get("tool_status"):
+                                turn["active_source"] = source
+                                if (not self.current_turn or
+                                        self.current_turn.get("raw_markdown") != turn.get("raw_markdown") or
+                                        self.current_turn.get("prompt") != turn.get("prompt") or
+                                        self.current_turn.get("tool_status") != turn.get("tool_status")):
                                     self.revision += 1
                                     turn["revision"] = self.revision
                                     self.current_turn = turn
@@ -400,7 +483,8 @@ class SessionWatcher:
                                         self.history.append(turn)
                                         if len(self.history) > 30:
                                             self.history.pop(0)
-                                    log(f"Updated {self.active_source} turn rev {self.revision}: {turn.get('prompt')[:30]}...")
+                                    log(f"Updated {source} turn rev {self.revision}: "
+                                        f"{turn.get('prompt')[:30]}...")
                 except Exception as e:
                     log("Watch error:", e)
 
@@ -413,19 +497,48 @@ WATCHER: SessionWatcher = None
 class StreamHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def _json(self, obj, code=200):
+    def _authorized(self):
+        """Same enforcement as the mirror server: off until a Kindle has
+        paired, then the request must carry the paired token."""
+        return pairing.authorized(
+            self.headers.get("X-YB-Kindle-Id") or None,
+            self.headers.get("X-YB-Secret") or "")
+
+    def _json(self, obj, code=200, cors=False):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        """Preflight for the receive page's cross-origin /api/pair POST."""
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    @staticmethod
+    def _is_loopback(client):
+        ip = client[0]
+        return ip.startswith("127.") or ip == "::1"
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+        if path != "/health" and not self._authorized():
+            self._json(
+                {"error": "unauthorized — open the receive page from "
+                          "the Mac and re-pair this Kindle"}, 401)
+            return
 
         if path == "/live":
             with WATCHER.lock:
@@ -459,7 +572,11 @@ class StreamHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/turn":
-            idx = int(query.get("idx", ["-1"])[0])
+            try:
+                idx = int(query.get("idx", ["-1"])[0])
+            except ValueError:
+                self._json({"error": "idx must be an integer"}, 400)
+                return
             with WATCHER.lock:
                 if WATCHER.history:
                     if idx < 0 or idx >= len(WATCHER.history):
@@ -482,7 +599,7 @@ class StreamHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/health":
-            self._json({"ok": True, "mode": WATCHER.mode, "active_source": WATCHER.active_source, "revision": WATCHER.revision})
+            self._json({"ok": True, "mode": WATCHER.mode, "active_source": WATCHER.active_source, "revision": WATCHER.revision}, cors=True)
             return
 
         self.send_response(404)
@@ -492,6 +609,48 @@ class StreamHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+        if path == "/api/pair":
+            # Same loopback-only pairing endpoint as the mirror server, so
+            # the receive page can link a Mac where only the AI stream runs.
+            if not self._is_loopback(self.client_address):
+                self._json({"error": "admin endpoint — localhost only"}, 403)
+                return
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(n) if n else b"{}"
+                p = json.loads(body)
+            except (ValueError, OSError):
+                self._json({"error": "bad json"}, 400)
+                return
+            kid = p.get("kindle_id") or ""
+            name = p.get("kindle_name") or "Kindle"
+            tok = p.get("token") or ""
+            dev_id = p.get("device_id") or ""
+            if not kid or not tok:
+                self._json({"error": "kindle_id and token are required"}, 400)
+                return
+            ok = pairing.pair(kid, name, tok, dev_id)
+            if ok:
+                log(f"paired Kindle {name!r} ({kid})")
+            self._json({"ok": ok}, cors=True)
+            return
+        if path == "/api/challenge":
+            # Pairing self-heal, same as the mirror server: prove this Mac
+            # still holds the pairing to a reader that found us at a new IP.
+            mac = pairing.challenge(
+                query.get("kindle_id", [""])[0],
+                query.get("nonce", [""])[0],
+            )
+            if mac is None:
+                self._json({"error": "unknown kindle"}, 404)
+            else:
+                self._json({"mac": mac})
+            return
+        if not self._authorized():
+            self._json(
+                {"error": "unauthorized — open the receive page from "
+                          "the Mac and re-pair this Kindle"}, 401)
+            return
 
         if path == "/source":
             new_source = query.get("set", ["auto"])[0]
@@ -516,8 +675,24 @@ def run_discovery(tcp_port=STREAM_PORT):
     while True:
         try:
             data, addr = s.recvfrom(256)
-            if data.startswith(b"ybmirror") or data.startswith(b"ybstream"):
-                s.sendto(f"ybmirror {tcp_port}".encode(), addr)
+            kindle_id = None
+            nonce = None
+            text = data.decode("utf-8", "replace")
+            if " id=" in text:
+                kindle_id = text.split(" id=", 1)[1].split(" ", 1)[0].strip() or None
+            if " nonce=" in text:
+                nonce = text.split(" nonce=", 1)[1].split(" ", 1)[0].strip() or None
+            if data.startswith(b"ybstream"):
+                s.sendto(pairing.announcement(tcp_port, kindle_id, nonce).encode(),
+                         addr)
+            elif data.startswith(b"ybmirror"):
+                # A mirror-protocol probe wants the mirror server, which
+                # this process does not serve. Answer with the mirror port
+                # so the reader gets a clean connection-refused instead of
+                # a confusing 404 on the AI port. When the mirror server is
+                # running it owns 8766, so this branch never fires.
+                s.sendto(pairing.announcement(MIRROR_PORT, kindle_id, nonce).encode(),
+                         addr)
         except OSError:
             continue
 

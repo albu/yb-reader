@@ -16,7 +16,7 @@ STAGE="$ROOT/dist/stage"
 cd "$ROOT"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/yb-mirror"
-cp -R README.md pyproject.toml uv.lock sync-ip.sh mac kindle "$STAGE/yb-mirror/"
+cp -R README.md pyproject.toml uv.lock sync-ip.sh mirror.conf mac "$STAGE/yb-mirror/"
 
 cd "$STAGE"
 rm -f "$OUT"

@@ -177,6 +177,10 @@ pub struct MirrorScreen {
     /// Screen, so runtime state (control/preset) never leaves this
     /// screen and settle ticks stay owned here.
     settings: bool,
+    /// True after a 401: the Mac enforces a pairing this Kindle doesn't
+    /// satisfy. draw() shows the re-pair hint instead of the frame; cleared
+    /// on the next successful exchange.
+    auth_required: bool,
     /// Settle correction in flight: the frame from the last action is on
     /// glass, but the server did not confirm it settled. on_tick fetches
     /// the settled frame until it does (or the deadline passes); taps
@@ -209,6 +213,7 @@ impl MirrorScreen {
             control: false,
             preset,
             settings: false,
+            auth_required: false,
             settle_deadline: None,
         }
     }
@@ -298,17 +303,11 @@ impl MirrorScreen {
         let Some(host) = self.host.clone() else {
             return false;
         };
-        let devices_path = ybdev::devices::devices_path();
-        let kindle_id_path = ybdev::devices::kindle_id_path();
-        let store = ybdev::devices::DeviceStore::load(&devices_path);
-        let profile = ybdev::devices::KindleProfile::load_or_create(&kindle_id_path, self.w, self.h);
+        let (kindle_id, secret) = self.profile_and_secret(&host);
 
         let mut conn = Conn::new(&host, self.port);
-        let secret = self.conf.secret.clone().or_else(|| {
-            store.find_by_ip_for_control(&host).map(|d| d.token.clone())
-        });
         conn.set_secret(secret);
-        conn.set_kindle_id(Some(profile.id));
+        conn.set_kindle_id(Some(kindle_id));
         if !conn.open() {
             return false;
         }
@@ -322,6 +321,22 @@ impl MirrorScreen {
             return true;
         }
         false
+    }
+
+    /// The credential + identity for a host: the configured static SECRET=
+    /// (trust-by-config) or the paired device token for that IP. probe_alive
+    /// and the keepalive retry both need it — once the Mac enforces, a
+    /// discovery-paired Kindle must not fall back to an anonymous request.
+    fn profile_and_secret(&self, host: &str) -> (String, Option<String>) {
+        let devices_path = ybdev::devices::devices_path();
+        let kindle_id_path = ybdev::devices::kindle_id_path();
+        let profile =
+            ybdev::devices::KindleProfile::load_or_create(&kindle_id_path, self.w, self.h);
+        let store = ybdev::devices::DeviceStore::load(&devices_path);
+        let secret = self.conf.secret.clone().or_else(|| {
+            store.find_by_ip_for_control(&host).map(|d| d.token.clone())
+        });
+        (profile.id, secret)
     }
 
     /// Stream one request's body into a buffer. Returns headers, or None
@@ -402,6 +417,7 @@ impl MirrorScreen {
         ));
         match r {
             Some(resp) if resp.status == 200 => {
+                self.auth_required = false;
                 // Pin SERVER= only now — after the host proved itself with a
                 // real (and, when the server enforces it, secret-authenticated)
                 // exchange. A rogue first-responder can win one UDP race; it
@@ -414,6 +430,20 @@ impl MirrorScreen {
                 }
                 self.last_frame = Some(buf);
                 Some(resp)
+            }
+            Some(resp) if resp.status == 401 => {
+                // Once per process: the mirror cannot recover on its own
+                // and the screen now shows the pairing hint — no point
+                // repeating the line on every tap + settle poll.
+                static AUTH_401_PLOGGED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !AUTH_401_PLOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    plog(concat!(
+                        "mirror: unauthorized (401) - open the receive page ",
+                        "from the Mac and re-pair this Kindle"));
+                }
+                self.auth_required = true;
+                None
             }
             _ => None,
         }
@@ -590,10 +620,15 @@ impl MirrorScreen {
         }
         if !ok {
             // One retry through a fresh connection (a dozing radio must not
-            // tear the connection down while its reply is in flight).
+            // tear the connection down while its reply is in flight). The
+            // retry must carry the same credential as the live connection —
+            // once the Mac enforces, an anonymous keepalive ping would 401
+            // and drop a perfectly alive pairing every heartbeat cycle.
             if let Some(host) = self.host.clone() {
+                let (kindle_id, secret) = self.profile_and_secret(&host);
                 let mut conn = Conn::new(&host, self.port);
-                conn.set_secret(self.conf.secret.clone());
+                conn.set_secret(secret);
+                conn.set_kindle_id(Some(kindle_id));
                 if conn.open() {
                     ok = conn
                         .request("GET", "/ping", &mut sink)
@@ -785,7 +820,16 @@ impl Screen for MirrorScreen {
     fn draw(&mut self, p: &mut Painter) {
         p.clear(255);
         let (_, h) = p.size();
-        if let Some(gray) = &self.gray {
+        if self.auth_required {
+            // The Mac enforces a pairing this Kindle doesn't satisfy.
+            // Owning the screen (like the not-found state) keeps the
+            // dismiss gesture from landing on a blank mirror; re-pairing
+            // from the receive page is the only way out, so say so instead
+            // of pretending the Mac vanished or hunting for Wi-Fi.
+            p.text_center(h / 2 - pt(14.0), 10.0, 0, "Mirror: pairing required");
+            p.text_center(h / 2 + pt(6.0), 8.0, 120,
+                          "open the receive page from the Mac · swipe: exit");
+        } else if let Some(gray) = &self.gray {
             p.blit_gray(0, 0, self.w as i32, self.h as i32, gray, self.w as usize);
             if self.control {
                 // The frame is WYSIWYG, so mark the one state that changes

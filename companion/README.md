@@ -1,13 +1,17 @@
-# yb-mirror — Kindle as a mirror screen for your Mac
+# yb-mirror — Kindle as a mirror screen for your Mac (plus a live AI stream)
 
 Your Mac runs everything (browser, reader, whatever); the Kindle shows a
 grayscale copy of one window; taps become real ←/→ arrow keys on the Mac.
 
 ```
-Mac (server.py)                        Kindle (KOReader plugin)
-  Quartz window capture ── PNG gray ─▶  ImageWidget fullscreen
+Mac (server.py)                        Kindle (yb-reader mirror)
+  Quartz window capture ── PNG gray ─▶  e-ink fullscreen
   CGEventPostToPid ←/→  ◀── tap zones ──  tap/swipe gestures
 ```
+
+The same zip also ships **ai_stream.py**: a live feed of your AI coding
+session (Antigravity, Claude Code, or any terminal pipe), rendered as
+paginated e-ink pages in yb-reader's **Live AI Stream** screen.
 
 Page-turn budget: one request tells the server to press the key and return
 the new frame as soon as the window content changes *and settles* — chapter
@@ -19,10 +23,10 @@ zlib level 1); what you feel on top of that is the site's own re-render
 after the keypress, Wi-Fi + Kindle-side PNG decode, and the e-ink partial
 refresh (~0.1–0.25 s, panel physics). 4-bit grayscale PNGs halve the Wi-Fi
 transfer; levels are rounded, not truncated, so paper stays pure white. The
-plugin keeps one HTTP/1.1 connection open for the whole session (a `/ping`
-heartbeat every 15 s keeps it — and the Kindle's power-saving radio — warm)
-and finds the Mac by itself: it broadcasts a UDP probe on `<port>+1`, and
-whatever answers becomes `SERVER=` in `mirror.conf`.
+Kindle side keeps one HTTP/1.1 connection open for the whole session (a
+`/ping` heartbeat every few seconds keeps it — and the Kindle's power-saving
+radio — warm) and finds the Mac by itself: it broadcasts a UDP probe on
+`<port>+1`, and whatever answers becomes `SERVER=` in `mirror.conf`.
 
 ## Getting it
 
@@ -77,19 +81,31 @@ bash mac/make-app.sh     # once; needs Xcode Command Line Tools (clang)
 open ~/Applications/yb-mirror.app
 ```
 
-A `YB` icon in the menu bar — with a **dot in its bottom-right corner
-while the mirror is on** (template-mode, adapts to dark menu bars):
-**Start mirror** / **Stop mirror** (same
-flags as the quick start; refuses politely if a server already runs in a
-Terminal), **Send book to Kindle…** (file picker → send.py → notification;
-click it again to cancel), **Open log**, **Quit** — quitting stops
-everything it started. No Dock icon (`LSUIElement`). Everything runs
-inside the project's uv venv — the launcher only `cd`s to the repo and
-execs `uv run`; nothing ever installs into system python. To start it at
-login: System Settings → General → Login Items → add `yb-mirror.app`.
-If the repo moves, rebuild with `make-app.sh` (the path is baked into the
-compiled launcher — a *script* executable there is refused by macOS
-LaunchServices with `-10669`, which is why it's C).
+A `YB` icon in the menu bar — with status dots in its bottom corners
+(template-mode, adapts to dark menu bars): **bottom-right while the mirror
+is on**, **bottom-left while the AI stream is on**:
+
+- **Start mirror** / **Stop mirror** (same flags as the quick start;
+  refuses politely if a server already runs in a Terminal)
+- **Start AI stream** / **Stop AI stream** (the live AI session feed, see
+  below; port 8768)
+- **Open Kindle Web Manager…** (opens yb-reader's receive page on the
+  Kindle, port 8080 — the address comes from the handshake: the mirror
+  server learns the Kindle's IP from the Kindle's own requests and
+  remembers it across sessions, so there is nothing to configure; mDNS
+  `kindle.local` is the fallback)
+- **Open log**, **Quit** — quitting stops everything it started.
+
+No Dock icon (`LSUIElement`). Everything runs inside the project's uv venv —
+the launcher only `cd`s to the repo and execs `uv run`; nothing ever
+installs into system python. To start it at login: System Settings → Login
+Items → add `yb-mirror.app`. If the repo moves, rebuild with `make-app.sh`
+(the path is baked into the compiled launcher — a *script* executable there
+is refused by macOS LaunchServices with `-10669`, which is why it's C).
+
+**Auto-start**: on launch, if no mirror server is already running, the app
+starts one by itself after ~2 s — a cold start with no Terminal resumes
+your last book. The AI stream always starts explicitly.
 
 **Last-book memory**: a background job follows the mirrored window and
 remembers its URL in `~/.yb-mirror-last-url` (refreshed every minute; it
@@ -104,8 +120,8 @@ comes back exactly where you left it. `--no-resume` disables this.
   sets the window height, reads back the real (possibly clamped) height, then
   sets the width to match.
 - `--crop-top 55` removes the Safari title bar / traffic lights (the one
-  "crop" that's safe — it's browser chrome, not text). Compare the demo
-  images in `debug/` (`crop_demo_top*.png`) and tune the number.
+  "crop" that's safe — it's browser chrome, not text). Tune the number to
+  your browser (Chrome's tab bar is taller).
 - The server automatically removes the window shadow/rounded corners via the
   alpha channel, applies a gamma contrast curve (default 2.0), and resamples
   with bilinear interpolation for clean text.
@@ -122,8 +138,8 @@ curl http://127.0.0.1:8765/status
   (both the in-process Quartz path and the `screencapture` fallback).
   Without it, captures come back empty or title-bar-only.
 - **Accessibility** for your terminal app — synthetic arrow keys need it.
-- **Automation** for your terminal app → Safari/Chrome — used by `--tab`
-  and by the last-book memory (it reads the mirrored window's URL via
+- **Automation** for your terminal app → Safari/Chrome — used by
+  `--activate` and by the last-book memory (it reads the mirrored window's URL via
   AppleScript; without it there's simply nothing to resume).
 
 ### One-time: stable signing identity (recommended)
@@ -163,7 +179,8 @@ ad-hoc (with a warning) when it's absent.
 ```
 --app NAME            app to mirror (default Safari)
 --title SUBSTR        only consider windows whose title contains SUBSTR
---tab SUBSTR          bring the app forward before capturing (single-tab use)
+--activate            bring the app (and its front window) forward before
+                      each capture (single-tab use; needs Automation)
 --autosize            resize the window to the optimal mirror size at startup
 --url URL             open this URL at startup (fresh sessions)
 --no-resume           don't reopen the last remembered page on a cold start
@@ -180,30 +197,62 @@ ad-hoc (with a warning) when it's absent.
 --port N              HTTP port (default 8765)
 ```
 
-## Kindle side (KOReader plugin — primary)
+## AI Stream
 
-> **If you run yb-reader, you don't need this section.** The reader ships
-> its own Rust port of this plugin (same `/mnt/us/extensions/mirror/`
-> config and log paths) — start it from the reader's menu instead. The
-> KOReader plugin below is the standalone path for non-yb-reader Kindles.
+`mac/ai_stream.py` turns your Mac's AI coding session into a live,
+paginated e-ink feed for the Kindle's **Live AI Stream** screen (yb-reader
+home → the `>_` chip).
 
-1. Copy `kindle/koreader-plugin/mirror.koplugin/` into
-   `/mnt/us/koreader/plugins/` over USB (only needed when it changes).
-2. Eject the Kindle, restart KOReader, then:
-   **menu → Tools → Screen mirror (Mac)**.
+```bash
+uv run mac/ai_stream.py                        # auto-detect the newest session
+uv run mac/ai_stream.py --watch /path/to/log   # watch one transcript file or a directory
+claude | uv run mac/ai_stream.py --pipe        # stream raw terminal output
+```
 
-No configuration: on first start (or whenever the remembered address stops
-working — DHCP lease changed, laptop moved networks) the plugin broadcasts a
-UDP probe on port 8766, the Mac answers, and the address is remembered in
-`/mnt/us/extensions/mirror/mirror.conf`. `SERVER=http://<mac-ip>:8765` in
-that file just pins the address to skip the ~1 s discovery; delete the file
-to re-discover from scratch. The Mac's firewall must allow **UDP 8766** in
-addition to TCP 8765 for discovery (a pinned `SERVER=` works without it).
+By default it follows the newest transcript it can find — Antigravity
+(under `~/.gemini/antigravity-cli/brain`) or Claude Code (under
+`~/.claude/projects`) — and picks the more recently updated one. Both
+transcript formats are recognized regardless of which one you point
+`--watch` at; `--watch DIR` follows the newest `*.jsonl` under the
+directory. Markdown (headings, lists, code blocks, tables, alerts) is
+parsed into e-ink blocks; the response is re-rendered whenever the file
+changes, and the reader repaginates it into book pages.
 
-`REFRESH_EVERY=N` in the same file tunes the anti-ghosting safety net: a
-full (flashing) refresh every N frames, default 60, `0` = never (rely on
-corner-tap cleaning). The plugin re-reads the file at every start, so no
-re-copy needed to change it.
+On the Kindle, open **Live AI Stream** and swipe up for the control sheet:
+switch the source (`auto` / `antigravity` / `claude`), step through turn
+history, force a poll, or clear ghosting.
+
+Serving: HTTP on **8768**, same UDP discovery family on **8766**. One
+caveat: only one process can own the discovery socket at a time, and the
+mirror server takes it — with the mirror running, the AI stream is
+discovered via the Mac address already pinned in `mirror.conf` (same Mac,
+port 8768), so in practice this just means a fresh Kindle can't discover
+the AI stream *while* mirroring.
+
+## Kindle side (yb-reader)
+
+> **If you run yb-reader, you don't need to install anything.** The reader
+> ships its own Rust mirror (a port of the old KOReader plugin, same
+> `/mnt/us/extensions/mirror/` config and log paths) — start it from the
+> reader's menu.
+
+The mirror reads `/mnt/us/extensions/mirror/mirror.conf` at every start:
+
+```
+SERVER=http://<mac-ip>:8765   # pinned Mac; delete the line to re-discover
+REFRESH_EVERY=60              # full (flashing) anti-ghosting refresh every N frames, 0 = never
+TURN_KEYS=arrows              # arrows | space | pages — page-turn keys the server sends
+SECRET=                       # optional shared secret, sent as X-YB-Secret
+```
+
+On first start (or whenever the remembered address stops working — DHCP
+lease changed, laptop moved networks) the mirror broadcasts a UDP probe on
+port 8766, the Mac answers, and the address is remembered in the file.
+`sync-ip.sh` on the Mac pins `SERVER=` to the Mac's current Wi-Fi IP and
+copies the file to a mounted Kindle. The Mac's firewall must allow **UDP
+8766** in addition to TCP 8765 for discovery (a pinned `SERVER=` works
+without it). The file is re-read at every start, so no re-copy is needed to
+change it.
 
 ### Controls
 
@@ -212,40 +261,60 @@ re-copy needed to change it.
 - **tap top-right corner** = screen clean: re-fetch the frame with a full
   (flashing) refresh to wipe ghosting. Normal turns never flash.
 - **two-finger tap** = frontlight dialog, without leaving the mirror
-- **swipe down (or up)** = exit back to KOReader (works even mid-sync)
+- **swipe down (or up)** = exit back to the reader (works even mid-sync)
 
-## Sending a file to the Kindle (send.py)
+## Pairing & trust
 
-USB is only needed when the *plugin* itself changes. For the everyday
-"put this book on the Kindle", the direction flips: the Mac briefly
-serves one file, and the Kindle fetches it.
+Mirror and AI stream work unauthenticated out of the box — the legacy
+wire, byte-for-byte. If you want the LAN-only link to actually require
+your Kindle, pair once:
 
-```bash
-uv run mac/send.py ~/Downloads/some-book.epub
-```
+1. Start the mirror (menu bar or `uv run mac/server.py`) so the Mac side
+   of the handshake is listening.
+2. Open the Kindle's receive page (**Open Kindle Web Manager…**), enter
+   the PIN from the Kindle screen, check **link mirror**, and submit.
+3. The receive page finishes the handshake by POSTing the PIN-minted
+   token to the mirror server (`localhost:8765`) and, when it is running,
+   the AI stream server (`localhost:8768`); the Mac stores it — together
+   with the browser device id it announces in discovery — in
+   `~/.yb-mirror-devices.json` (0600). The Kindle already holds the same
+   record on its side. If no yb-mirror server is running on the Mac at
+   that moment, the page tells you instead of silently half-pairing.
+4. From then on both stream servers **require `X-YB-Secret`** on
+   Kindle-facing requests. The reader attaches the paired token by itself
+   (every discovery probe carries a fresh nonce, and the Mac's reply must
+   return `HMAC-SHA256(token, nonce)` — proof it holds the pairing), so
+   nothing needs configuring on the Kindle and trust works from any IP.
 
-The server prints its address, answers the same UDP discovery as the
-mirror server, and **exits by itself** once the file has been received —
-or after 10 idle minutes (`--wait`). On the Kindle: KOReader →
-**Tools → Fetch book from Mac**. The file streams into `/documents`
-under its own name (an existing file is overwritten) and the file
-manager refreshes by itself.
+Two details that keep this honest: the pairing endpoint and the Mac-side
+admin endpoints (`/status`, `/rewin`, `/autosize`) are **localhost-only**
+— a LAN peer can't mint pairings or read the paired identities; and a Mac
+serving several Kindles announces **each Kindle's own identity** in
+discovery (the reader's probe carries its `kindle_id`), so pairing a
+second Kindle can't break the first.
 
-Delivery is *ack*-based, not write-based: a fetch only counts when the
-Kindle confirms the full body arrived intact (`GET /ack`), because a
-whole small file can sit in kernel socket buffers while the reader dies
-— counting the last `write()` would let the server quit with the file
-never delivered. A Wi-Fi drop mid-download is absorbed the usual way:
-the plugin retries the same server, send.py re-serves from scratch. The
-fetch menu finds send.py at the saved mirror address (port 8767), via
-discovery, or at whatever port discovery reported (a `--port` run).
+**DHCP moves self-heal.** A paired Mac's address isn't part of trust: the
+reader's discovery probe carries a fresh nonce, and the Mac's reply must
+return `HMAC-SHA256(token, nonce)` — the proof that it still holds the
+pairing. An IP change is therefore trusted automatically (no receive-page
+visit, no manual steps), the stored IP refreshes itself, and a host that
+echoes an overheard id from a squatted lease gets nothing. The token
+itself is never transmitted. If the proof fails (the Mac genuinely lost
+its pairing record), the mirror answers 401 with a logged pairing hint
+(`/mnt/us/extensions/mirror/plugin.log`) — re-pair from the receive page.
 
-## Kindle side (python client — alternative)
+One honest caveat: steady-state requests still carry `X-YB-Secret` in
+plaintext HTTP, so the trust layer protects against a rogue server
+harvesting the token — not against passive LAN sniffing.
 
-`kindle/mirror.py` + the KUAL extension in `kindle/extensions/mirror/` write
-raw frames straight to `/dev/fb0` via evdev taps. No python3 package is
-readily available for modern jailbroken Kindles, which is why the KOReader
-plugin is the primary path. `kindle/probe.sh` reports fb geometry etc.
+**Unpairing** (not IP changes — those self-heal): delete
+`~/.yb-mirror-devices.json` on the Mac to drop the requirement and the
+legacy wire returns; the Kindle's copy is forgotten by re-pairing. The
+optional static `SECRET=` in `mirror.conf` is the alternative credential
+path: set the same value in the Kindle's `mirror.conf` **and** in
+`companion/mirror.conf` on the Mac (the servers read their copy at
+startup); the reader then sends it to the pinned host and the Mac accepts
+it alongside paired tokens.
 
 ## Troubleshooting
 
@@ -253,18 +322,21 @@ plugin is the primary path. `kindle/probe.sh` reports fb geometry etc.
 - The server isn't reachable and UDP discovery found nothing. Check the
   server is up (`curl http://127.0.0.1:8765/status`), that both devices are
   on the same Wi-Fi, and that the Mac firewall allows incoming TCP 8765 and
-  UDP 8766. The plugin retries on the next tap; it re-discovers
+  UDP 8766. The mirror retries on the next tap; it re-discovers
   automatically, so a changed IP is not something to fix by hand anymore.
   Details land in `/mnt/us/extensions/mirror/plugin.log`.
+- **Your network drops UDP broadcast between clients.** Some APs/routers
+  forward unicast but drop broadcast (a home network that answered a
+  unicast probe while the broadcast got nothing). The reader now falls back
+  to a unicast sweep of the local /24 when broadcast finds nothing, so
+  discovery works there too — but if even unicast is blocked (client
+  isolation), pin the address in `mirror.conf` (`SERVER=…`, or
+  `./sync-ip.sh`).
 
 **The mirror shows the wrong window/tab**
 - The server logs every candidate window at startup (`candidate windows: …`)
   and picks the largest. Use `--title "some text from the window title"` to
-  force the right one, or `--tab` to bring the browser forward first.
-
-**Tapping crashes KOReader**
-- The plugin on the Kindle is outdated. Re-copy `main.lua` and restart
-  KOReader (older versions had a gesture-handling bug).
+  force the right one, or `--activate` to bring the browser forward first.
 
 **Text is cropped on the sides**
 - That happens only when the window aspect isn't 0.75 (the fallback
@@ -311,15 +383,9 @@ plugin is the primary path. `kindle/probe.sh` reports fb geometry etc.
   Terminal window (the built-in caffeinate keeps it foreground-honest);
   `ps -o state= -p <pid>` showing `SN` is the signature.
 
-**"Fetch book from Mac" says Mac not found**
-- send.py isn't running (start it with the file as its argument). If the
-  mirror server is running at the same time, that's fine — discovery
-  finds the Mac, and the fetch talks to send.py on port 8767 next door.
-  The fetch sequence lands in `/mnt/us/extensions/mirror/plugin.log`.
-
 **"client … dropped the connection" lines in the server log**
 - Routine: the Kindle's power-saving radio resets the TCP connection every
-  ~20–30 s. The protocol absorbs it — the plugin retries the turn with the
+  ~20–30 s. The protocol absorbs it — the mirror retries the turn with the
   same id, the server answers "duplicate: frame only, no keypress", and no
   page is skipped. It's logged as one quiet line, not a traceback.
 
@@ -332,18 +398,29 @@ plugin is the primary path. `kindle/probe.sh` reports fb geometry etc.
 **Page turns feel slow**
 - Read the budget off the two logs before guessing. The server logs
   `turn: site+capture=… changed=… settled=… encode=…` per turn, and the
-  plugin appends one line per request to
+  Kindle side appends one line per request to
   `/mnt/us/extensions/mirror/plugin.log`. `site+capture` is the reader
   site's own re-render (plus ~15 ms capture per poll; chapter boundaries
-  add the loader wait); the plugin's `POST /next … ms` line minus the
+  add the loader wait); the Kindle's `POST /next … ms` line minus the
   server total is Wi-Fi + Kindle decode; the rest is the e-ink panel. If
-  the site is still loading when the server's 3 s wait ends, the plugin
+  the site is still loading when the server's 3 s wait ends, the Kindle
   keeps polling (up to 8 s) rather than re-pressing the key, so slow pages
   don't skip. Normal turns never flash the screen; the anti-ghosting flash
   is every `REFRESH_EVERY` frames (60 by default) or a top-right corner
   tap.
 
+**AI Stream shows nothing**
+- The stream server must be running (`uv run mac/ai_stream.py`, or
+  menu bar → **Start AI stream**) and a session must exist (a Claude /
+  Antigravity transcript, or `--pipe`). Check
+  `curl http://127.0.0.1:8768/health`. With the mirror server also up,
+  discovery of the stream is off (one UDP socket) — the reader then needs
+  the Mac address already pinned in `mirror.conf`, which the mirror writes
+  after its first discovery.
+
 ## Endpoints
+
+**Mirror server** (`mac/server.py`, port 8765):
 
 `GET /frame[.png]?w&h[&depth&stride&bpp]` raw-fb or PNG frame, loader-waited
 and settled (w/h/bpp are remembered, and any frame-bearing request re-sets
@@ -354,12 +431,26 @@ answers with the current frame instead of pressing the key again — that's
 what makes radio-drop retries safe); the wait reply is the new PNG plus
 `X-Seq`/`X-Changed`/`X-Settled` headers (`X-Dup` on deduplicated retries) ·
 `GET /ping` keep-alive heartbeat · `POST /tap {x,y}` coordinate-mapped mouse
-click (for menus; unused by the plugin) · `GET /status` · `POST /rewin` ·
-`POST /autosize`. UDP discovery on `<port>+1` answers
-`ybmirror <tcp-port>` to broadcast probes. Separately, `mac/send.py`
-speaks `GET /book` (raw bytes + `X-Filename`, percent-encoded) ·
-`GET /ack` (delivery confirmation — its exit signal) · `GET /status` ·
-`GET /ping`, self-exiting after the ack or `--wait`.
+click (for menus; unused by the mirror) · `GET /status` · `POST /rewin` ·
+`POST /autosize` · `POST /api/pair` (completes the pairing the Kindle's
+receive page starts: after the PIN-verified `/api/pair` on the Kindle, its
+browser posts the token + device id here, and `/status` then reports the
+paired Kindle by id/name). Once a Kindle has paired, the Kindle-facing
+endpoints require `X-YB-Secret` (see "Pairing & trust"). `/status` also
+reports the Kindle's handshake-learned IP (`kindle.ip`, persisted to
+`~/.yb-mirror-last-kindle`) — that is how the menu bar opens the web
+manager without any configured address. UDP discovery on `<port>+1`
+answers `ybmirror <port> id=… name="…"` to broadcast probes (the id/name
+is what lets the reader attach its paired token).
+
+**AI stream server** (`mac/ai_stream.py`, port 8768):
+
+`GET /live` current turn (JSON: prompt, assistant, markdown blocks,
+revision) · `GET /history` / `GET /turn?idx=` turn list / one turn
+(negative indices count from the newest) · `GET /sources` /
+`POST /source?set=auto|antigravity|claude` switch the watched source ·
+`GET /health` liveness (the one endpoint exempt from the pairing secret).
+Same UDP discovery on 8766 when the port is free.
 
 ## Known limits
 
@@ -373,13 +464,12 @@ speaks `GET /book` (raw bytes + `X-Filename`, percent-encoded) ·
   a *minimized* one can't be captured (unminimize first).
 - Occluded-window capture works via window ID, but keep the window visible.
 - Avoid opening Kindle menus while mirroring; the fullscreen view is modal.
-- The python client (`mirror.py`) is a legacy path (no /dev/fb0 niceties
-  from the plugin: no discovery, no idempotent turns); evdev axis issues
-  are addressed with `SWAP_AXES` per `probe.out`.
 
 ## Why this shape
 
 The remote books reader is a client-only JS app (see project notes); the
 Kindle's browser renders it blank. Mirroring sidesteps all of it: no
 automation, no undocumented APIs — the Mac side is just you, in a normal
-browser, with a very patient external monitor attached.
+browser, with a very patient external monitor attached. The AI stream fills
+the same screen with the one other thing that's long-form and worth reading
+on e-ink while you work: the transcript of the session doing the work.

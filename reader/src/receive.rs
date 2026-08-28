@@ -222,6 +222,7 @@ button { margin-top:20px; width:100%; padding:12px; font-size:.95rem; font-weigh
          background:#3b82f6; color:#fff; border:none; border-radius:12px; cursor:pointer; }
 button:hover { background:#2563eb; }
 .err { color:#ef4444; margin-top:12px; font-size:.8rem; display:none; }
+.note { color:#fbbf24; margin-top:12px; font-size:.8rem; line-height:1.4; display:none; }
 </style>
 </head>
 <body>
@@ -253,6 +254,7 @@ button:hover { background:#2563eb; }
     </div>
     <button id="submitBtn">Open Book Manager</button>
     <div id="errMsg" class="err">Invalid code. Please check your Kindle screen.</div>
+    <div id="linkNote" class="note"></div>
   </form>
 </div>
 <script>
@@ -310,19 +312,36 @@ button:hover { background:#2563eb; }
       if (data && data.token) {
         // No client-side document.cookie: the server's Set-Cookie already
         // carries the token with HttpOnly (JS must not be able to read it
-        // back). data.token is used in-memory for the mirror-link POST only.
+        // back). data.token is used in-memory for the mirror-link POSTs only.
         if (linkMirror.checked) {
-          try {
-            await fetch('http://localhost:8765/api/pair', {
+          const linked = [];
+          for (const port of [8765, 8768]) {
+            const up = await fetch('http://localhost:' + port + '/health', { signal: AbortSignal.timeout(800) }).then(r => r.ok).catch(() => false);
+            if (!up) continue;
+            const ok = await fetch('http://localhost:' + port + '/api/pair', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 token: data.token,
                 kindle_id: data.kindle_id,
-                kindle_name: data.kindle_name
+                kindle_name: data.kindle_name,
+                device_id: devId
               })
-            }).catch(() => {});
-          } catch (_) {}
+            }).then(r => r.ok).catch(() => false);
+            if (ok) linked.push(port);
+          }
+          if (linked.length === 0) {
+            // Pairing on the Kindle succeeded, but no yb-mirror server is
+            // running on this Mac, so the mirror link would silently not
+            // take. Say so instead of leaving a half-pairing.
+            const note = document.getElementById('linkNote');
+            if (note) {
+              note.style.display = 'block';
+              note.textContent = 'Paired on the Kindle, but no yb-mirror server is running on this Mac. Start it (menu bar), then pair again — otherwise the mirror stays unlinked.';
+            }
+            setTimeout(() => { location.href = '/'; }, 3500);
+            return;
+          }
         }
 
         location.href = '/';

@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
-"""menubar.py — a menu-bar control surface for the mirror, no Terminal.
+"""menubar.py — a menu-bar control surface for the mirror + AI stream, no
+Terminal.
 
-Runs the server and send.py as subprocesses of *this* interpreter — which
-is always the project's uv venv (launch via `uv run mac/menubar.py` or the
-yb-mirror.app bundle), so nothing ever installs into system python.
+Runs server.py and ai_stream.py as subprocesses of *this* interpreter —
+which is always the project's uv venv (launch via `uv run mac/menubar.py`
+or the yb-mirror.app bundle), so nothing ever installs into system python.
 
   ▸ Mirror: off            (status, updated every few seconds)
-  ▸ Start mirror           (same flags as the README quick start)
-  ▸ Stop mirror
-  ▸ Send book to Kindle…   (file picker → send.py; click again to cancel)
+  ▸ Start mirror / Stop mirror
+  ▸ AI Stream: off         (status, updated every few seconds)
+  ▸ Start AI stream / Stop AI stream
+  ▸ Open Kindle Web Manager…
   ▸ Open log
   ▸ Quit                   (stops everything it started)
 
-The server keeps its own stay-awake/display logic; this app only owns
-process lifetimes. One deliberate detail: if a mirror server is already
-running (started from a Terminal, e.g. during development), Start refuses
-rather than fighting over the port.
+The mirror server keeps its own stay-awake/display logic; this app only
+owns process lifetimes. Two deliberate details:
+  - if a mirror server is already running (started from a Terminal, e.g.
+    during development), Start refuses rather than fighting over the port;
+  - on launch, if no server is up, the mirror starts by itself (2 s
+    later) — "cold start resumes the last book" without a Terminal.
 """
 
 import atexit
+import json
 import os
 import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 import rumps
@@ -89,7 +95,6 @@ ICON_OFF = ICONS[(False, False)]
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(REPO, "mac", "server.py")
-SEND = os.path.join(REPO, "mac", "send.py")
 AI_STREAM = os.path.join(REPO, "mac", "ai_stream.py")
 LOG = os.path.join("/tmp", "yb-mirror-menubar.log")
 PORT = 8765
@@ -245,16 +250,63 @@ class MirrorBar(rumps.App):
     # ------------------------------------------------------- web manager ---
 
     def open_web_manager(self, _):
-        # Default known Kindle port on LAN
-        for ip in ["192.168.1.100", "kindle.local"]:
+        # The Kindle's receive page serves port 8080. Its address comes from
+        # the handshake, never from a hardcoded IP: the mirror server learns
+        # it from the Kindle's own requests (and persists it), so this works
+        # as long as the two have talked once. mDNS is the last resort.
+        ip = self._kindle_ip()
+        if ip:
+            if self._probe_web_manager(f"http://{ip}:8080/", timeout=1.5):
+                subprocess.Popen(["open", f"http://{ip}:8080/"])
+                return
+            notify("Web Manager",
+                   f"kindle at {ip} isn't answering :8080 — is the reader "
+                   "receiving?")
+            return
+        if self._probe_web_manager("http://kindle.local:8080/", timeout=1.0):
+            subprocess.Popen(["open", "http://kindle.local:8080/"])
+            return
+        notify("Web Manager",
+               "start the mirror once so the Mac learns the Kindle's "
+               "address (or open the receive page from the Kindle's QR code)")
+
+    @staticmethod
+    def _probe_web_manager(url, timeout):
+        """True when *anything* answers HTTP on the Kindle's 8080. The
+        receive page itself often answers 403 (the PIN screen) when not yet
+        authorized — that is the normal state, so any HTTP response counts;
+        only a connection failure means the Kindle isn't there."""
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                return True
+        except urllib.error.HTTPError:
+            return True
+        except Exception:
+            return False
+
+    def _kindle_ip(self):
+        """Learned Kindle address: the running mirror server's memory first
+        (it refreshes on every Kindle request), then the persisted handshake
+        record from previous sessions."""
+        if ping_ok(PORT):
             try:
-                with urllib.request.urlopen(f"http://{ip}:8080/api/list?root=documents", timeout=0.8) as r:
-                    if r.status == 200:
-                        subprocess.Popen(["open", f"http://{ip}:8080/"])
-                        return
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{PORT}/status", timeout=2.0) as r:
+                    d = json.loads(r.read())
+                ip = (d.get("kindle") or {}).get("ip")
+                if ip:
+                    return ip
             except Exception:
-                continue
-        subprocess.Popen(["open", "http://192.168.1.100:8080/"])
+                pass
+        p = os.path.expanduser("~/.yb-mirror-last-kindle")
+        try:
+            with open(p) as f:
+                ip = f.read().strip()
+            if ip:
+                return ip
+        except OSError:
+            pass
+        return None
 
     # ----------------------------------------------------------- ai stream ---
 
@@ -341,4 +393,3 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _graceful)
     signal.signal(signal.SIGINT, _graceful)
     bar.run()
-

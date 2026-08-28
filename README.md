@@ -43,10 +43,11 @@ yb-reader/
   probe/     on-device introspection tool (fb geometry, input, frontlight)
   kual/      KUAL extension (kept for reference; the library scriptlet in
              documents/ is the real launcher on this unit — no KUAL here)
-  companion/ macOS mirror companion (source). `make dist` builds the small
-             source zip the receive page offers in its "Companion (macOS)"
-             card — unzip on a Mac, `uv sync` + `bash mac/make-app.sh`, and
-             the menu-bar app is built locally (no Gatekeeper, no signing)
+  companion/ macOS mirror + AI-stream companion (source). `make dist` builds
+             the small source zip the receive page offers in its "Companion
+             (macOS)" card — unzip on a Mac, `uv sync` +
+             `bash mac/make-app.sh`, and the menu-bar app is built locally
+             (no Gatekeeper, no signing)
   packages/  KPM package incl. bin/{start,boot}.sh + upstart/yb-reader.conf
              (the takeover pieces) + bin/dropbear (bundled ssh server)
   deploy.sh  build + deploy: SSH fast loop (default), `usb`, or `probe`

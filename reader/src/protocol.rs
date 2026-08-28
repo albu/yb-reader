@@ -26,6 +26,12 @@ const MAX_LINE_BYTES: usize = 16 * 1024;
 /// where "forever" freezes the device. Legit frames land in tens of ms on
 /// a warm link (radio wake adds ~0.2 s); 2.5 s is ~10× headroom.
 pub const REQUEST_BUDGET: Duration = Duration::from_millis(2_500);
+/// The pairing challenge runs synchronously on the tap/gesture path, so it
+/// must never hang a tap: dedicated short timeouts instead of the mirror's
+/// normal 3 s connect / 2.5 s request budget.
+const CHALLENGE_CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
+const CHALLENGE_IO_TIMEOUT: Duration = Duration::from_millis(1000);
+const CHALLENGE_MAX_BODY: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -370,6 +376,10 @@ pub struct DiscoveredServer {
     pub port: u16,
     pub device_id: Option<String>,
     pub device_name: Option<String>,
+    /// `mac=HMAC-SHA256(token, nonce)` from the reply — the proof that the
+    /// server holds the pairing for the claimed device. Absent on legacy
+    /// replies (which therefore earn no token).
+    pub mac: Option<String>,
 }
 
 pub fn parse_discovery_response(src_ip: &str, text: &str) -> Option<DiscoveredServer> {
@@ -382,6 +392,7 @@ pub fn parse_discovery_response(src_ip: &str, text: &str) -> Option<DiscoveredSe
 
     let mut device_id = None;
     let mut device_name = None;
+    let mut mac = None;
 
     let mut s = rest;
     while !s.is_empty() {
@@ -395,6 +406,12 @@ pub fn parse_discovery_response(src_ip: &str, text: &str) -> Option<DiscoveredSe
             let (val, next) = parse_quoted_or_token(tail);
             if !val.is_empty() {
                 device_name = Some(val);
+            }
+            s = next.trim_start();
+        } else if let Some(tail) = s.strip_prefix("mac=") {
+            let (val, next) = parse_quoted_or_token(tail);
+            if !val.is_empty() {
+                mac = Some(val);
             }
             s = next.trim_start();
         } else {
@@ -411,6 +428,7 @@ pub fn parse_discovery_response(src_ip: &str, text: &str) -> Option<DiscoveredSe
         port,
         device_id,
         device_name,
+        mac,
     })
 }
 
@@ -440,6 +458,10 @@ pub fn merge_reply(servers: &mut Vec<DiscoveredServer>, srv: DiscoveredServer) -
             existing.device_name = srv.device_name;
             merged = true;
         }
+        if existing.mac.is_none() && srv.mac.is_some() {
+            existing.mac = srv.mac;
+            merged = true;
+        }
         merged
     } else {
         servers.push(srv);
@@ -448,9 +470,15 @@ pub fn merge_reply(servers: &mut Vec<DiscoveredServer>, srv: DiscoveredServer) -
 }
 
 /// Broadcast discovery probes and return all servers that reply within timeout.
-pub fn discover_all(timeout: Duration, kindle_id: Option<&str>) -> Vec<DiscoveredServer> {
+pub fn discover_all(
+    timeout: Duration,
+    kindle_id: Option<&str>,
+    nonce_hex: &str,
+) -> Vec<DiscoveredServer> {
     let mut servers: Vec<DiscoveredServer> = Vec::new();
     let mut targets = vec!["255.255.255.255".to_string()];
+    // The local /24 for the unicast sweep fallback (last octet stripped).
+    let mut sweep_base: Option<String> = None;
     // Best-effort local subnet broadcast, like the Lua version.
     if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
         if let Ok(addr) = "192.0.2.1:9".parse::<std::net::SocketAddr>() {
@@ -458,6 +486,9 @@ pub fn discover_all(timeout: Duration, kindle_id: Option<&str>) -> Vec<Discovere
                 if let Ok(local) = s.local_addr() {
                     if local.ip().is_ipv4() {
                         let ip = local.ip().to_string();
+                        if let Some((pre, _)) = ip.rsplit_once('.') {
+                            sweep_base = Some(pre.to_string());
+                        }
                         let mut parts: Vec<&str> = ip.split('.').collect();
                         if let Some(last) = parts.last_mut() {
                             *last = "255";
@@ -474,28 +505,52 @@ pub fn discover_all(timeout: Duration, kindle_id: Option<&str>) -> Vec<Discovere
 
     let p1 = b"ybmirror-discover".to_vec();
     let p2 = match kindle_id {
-        Some(id) if !id.trim().is_empty() => format!("ybmirror-discover id={}", id.trim()).into_bytes(),
+        Some(id) if !id.trim().is_empty() => format!(
+            "ybmirror-discover id={} nonce={}",
+            id.trim(),
+            nonce_hex
+        )
+        .into_bytes(),
         _ => Vec::new(),
     };
-    let payloads: Vec<&[u8]> = if p2.is_empty() {
-        vec![&p1]
-    } else {
-        vec![&p1, &p2]
-    };
+    // When we know our own identity, send ONLY the id-carrying probe: a
+    // reply to the id-less probe would carry the server's generic identity
+    // (the first pairing's device id on a multi-Kindle Mac), and
+    // merge_reply keeps the FIRST id it sees — so that generic reply could
+    // stick the wrong identity to this Kindle and break its trust check.
+    let payloads: Vec<&[u8]> = if p2.is_empty() { vec![&p1] } else { vec![&p2] };
 
+    // Broadcast first, with a short listen: on networks that forward
+    // broadcast the reply arrives in milliseconds.
+    let short = timeout.min(Duration::from_millis(300));
     for bcast in targets {
         if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
             let _ = s.set_broadcast(true);
-            let _ = s.set_read_timeout(Some(timeout));
+            let _ = s.set_read_timeout(Some(short));
             for payload in &payloads {
                 let _ = s.send_to(payload, (bcast.as_str(), DISCOVER_PORT));
             }
-            let mut buf = [0u8; 256];
-            while let Ok((n, src)) = s.recv_from(&mut buf) {
-                let text = String::from_utf8_lossy(&buf[..n]);
-                if let Some(srv) = parse_discovery_response(&src.ip().to_string(), &text) {
-                    merge_reply(&mut servers, srv);
+            collect_discovery_replies(&s, &mut servers);
+        }
+    }
+
+    // Some APs/routers drop broadcast (and multicast) between clients while
+    // allowing unicast — verified on a home network where the mirror's
+    // broadcast discovery got no answer but a unicast probe did. Sweep the
+    // local /24 with the same probe so those networks still find the
+    // server. Only when broadcast found nothing, so normal networks stay
+    // quiet (discovery runs once per connection, not constantly).
+    if servers.is_empty() {
+        if let Some(base) = &sweep_base {
+            if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
+                let _ = s.set_read_timeout(Some(timeout));
+                for i in 1..=254u32 {
+                    let dst = format!("{}.{}", base, i);
+                    for payload in &payloads {
+                        let _ = s.send_to(payload, (dst.as_str(), DISCOVER_PORT));
+                    }
                 }
+                collect_discovery_replies(&s, &mut servers);
             }
         }
     }
@@ -503,23 +558,93 @@ pub fn discover_all(timeout: Duration, kindle_id: Option<&str>) -> Vec<Discovere
     servers
 }
 
+/// Drain every reply currently arriving on `s` until the socket's read
+/// timeout fires, merging them into `servers`.
+fn collect_discovery_replies(s: &UdpSocket, servers: &mut Vec<DiscoveredServer>) {
+    let mut buf = [0u8; 256];
+    while let Ok((n, src)) = s.recv_from(&mut buf) {
+        let text = String::from_utf8_lossy(&buf[..n]);
+        if let Some(srv) = parse_discovery_response(&src.ip().to_string(), &text) {
+            merge_reply(servers, srv);
+        }
+    }
+}
+
 /// Decide whether a discovery reply has earned a stored control token.
 ///
-/// Trust requires BOTH the reply's UDP source IP to resolve to a registered
-/// control-scope device AND the reply's claimed device_id to match that
-/// stored record. Neither alone is enough:
-///   - an IP is not an identity — DHCP hands a lapsed lease to the next
-///     host, so a bare legacy reply (`ybmirror 8765`, no `id=`) from a
-///     trusted IP gets NO token;
-///   - a claimed id is not proof — any LAN host can type `id=<victim>`.
-/// Only the pairing channel (PIN-verified /api/pair) mints trust.
-pub fn trust_reply(srv: &DiscoveredServer, store: &ybdev::devices::DeviceStore) -> Option<String> {
-    let dev = store.find_by_ip_for_control(&srv.ip)?;
-    match &srv.device_id {
-        Some(claimed) if &dev.id != claimed => None, // impersonator or reinstalled host
-        Some(_) => Some(dev.token.clone()),
-        None => None, // legacy id-less reply: IP alone is not identity
+/// The reply must PROVE it holds the pairing: it carries
+/// `mac=HMAC-SHA256(token, nonce)` over the per-probe nonce this probe
+/// carried. The claimed `device_id` only says *which* device's token was
+/// used; the MAC is the identity. Neither the IP nor the bare id alone is
+/// proof — an IP is not an identity (DHCP hands a lapsed lease to the next
+/// host), and a bare id can be echoed by a host that overheard one reply.
+/// Only the PIN-verified pairing channel mints the token the MAC requires.
+pub fn trust_reply(
+    srv: &DiscoveredServer,
+    store: &ybdev::devices::DeviceStore,
+    nonce_hex: &str,
+) -> Option<String> {
+    let id = srv.device_id.as_deref()?;
+    let dev = store.find_by_id_for_control(id)?;
+    let mac = srv.mac.as_deref()?;
+    let expected = ybdev::hmac::hmac_sha256_hex(dev.token.as_bytes(), nonce_hex.as_bytes());
+    ybdev::hmac::const_time_eq_hex(mac, &expected).then(|| dev.token.clone())
+}
+
+/// Prove a server still holds a pairing without putting the token on the
+/// wire: send a fresh nonce and expect HMAC-SHA256(token, nonce) back.
+/// Only the Mac that stored the token at pairing time can answer. Used to
+/// self-heal a paired Mac's IP after a DHCP change.
+///
+/// Runs synchronously on the tap/gesture path, so it uses dedicated short
+/// timeouts (750 ms connect / 1 s I/O): a host that accepts TCP but never
+/// answers costs ~1 s, not seconds, and never blocks a tap for long.
+pub fn challenge_verify(host: &str, port: u16, kindle_id: &str, token: &str) -> bool {
+    let mut nonce = [0u8; 16];
+    ybdev::devices::fill_random_bytes(&mut nonce);
+    let nonce_hex = ybdev::hmac::hex(&nonce);
+    let path = format!(
+        "/api/challenge?kindle_id={}&nonce={}",
+        kindle_id, nonce_hex
+    );
+    let Some(addr) = (host, port).to_socket_addrs().ok().and_then(|mut a| a.next()) else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, CHALLENGE_CONNECT_TIMEOUT) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(CHALLENGE_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CHALLENGE_IO_TIMEOUT));
+    let req = format!(
+        concat!(
+            "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Length: 0\r\n",
+            "Connection: close\r\n\r\n"),
+        path, host, port
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
     }
+    let mut buf = Vec::with_capacity(1024);
+    let mut tmp = [0u8; 512];
+    loop {
+        if buf.len() >= CHALLENGE_MAX_BODY {
+            return false;
+        }
+        match stream.read(&mut tmp) {
+            Ok(0) => break, // server closed (Connection: close)
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(_) => return false, // timeout or reset
+        }
+    }
+    let text = String::from_utf8_lossy(&buf);
+    if !(text.starts_with("HTTP/1.1 200") || text.starts_with("HTTP/1.0 200")) {
+        return false;
+    }
+    let Some(got) = ybdev::devices::extract_json_str(&text, "mac") else {
+        return false;
+    };
+    let expected = ybdev::hmac::hmac_sha256_hex(token.as_bytes(), nonce_hex.as_bytes());
+    ybdev::hmac::const_time_eq_hex(&got, &expected)
 }
 
 /// Discovers servers and resolves the target's credential from DeviceStore.
@@ -530,7 +655,13 @@ pub fn discover_trusted(
     kindle_id: Option<&str>,
     store: &ybdev::devices::DeviceStore,
 ) -> Option<(DiscoveredServer, Option<String>)> {
-    let servers = discover_all(timeout, kindle_id);
+    // One fresh nonce per discovery round: the probe carries it, and any
+    // reply that returns HMAC-SHA256(token, nonce) proves it holds the
+    // pairing — the token never leaves the device.
+    let mut nonce = [0u8; 16];
+    ybdev::devices::fill_random_bytes(&mut nonce);
+    let nonce_hex = ybdev::hmac::hex(&nonce);
+    let servers = discover_all(timeout, kindle_id, &nonce_hex);
     if servers.is_empty() {
         return None;
     }
@@ -538,26 +669,64 @@ pub fn discover_trusted(
     // 1. Attach a stored token only to replies that pass the trust check
     if !store.devices.is_empty() {
         for s in &servers {
-            if let Some(token) = trust_reply(s, store) {
+            if let Some(token) = trust_reply(s, store, &nonce_hex) {
                 return Some((s.clone(), Some(token)));
             }
         }
-        // Diagnosability, not a trust grant: a reply claiming a registered
-        // control id from an unrecognized IP is the DHCP-move signature.
-        // Without this, a lease reshuffle silently downgrades the device to
-        // unauthenticated with no on-device hint.
-        if let Some(s) = servers.iter().find(|s| {
+
+        // A reply claiming a registered control id from an unrecognized IP
+        // is the DHCP-move signature. Don't just log it — self-heal:
+        // challenge the server (it proves it still holds the pairing by
+        // HMAC-ing our nonce with the token) and refresh the stored IP, so
+        // a Mac that changed address keeps working with zero manual steps.
+        let candidates: Vec<&DiscoveredServer> = servers
+            .iter()
+            .filter(|s| {
             s.device_id
                 .as_ref()
                 .is_some_and(|id| store.find_by_id_for_control(id).is_some())
-        }) {
+            })
+            .collect();
+        let had_candidates = !candidates.is_empty();
+        // Cap the challenge attempts: a spoofer that claims a registered id
+        // and stalls must cost a bounded slice of a tap, not one full
+        // timeout per candidate.
+        for s in candidates.iter().take(2) {
+            let Some(id) = s.device_id.as_deref() else { continue };
+            let Some(dev) = store.find_by_id_for_control(id) else { continue };
+            let Some(kid) = kindle_id else { continue };
+            let token = dev.token.clone();
+            if challenge_verify(&s.ip, s.port, kid, &token) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let ip = s.ip.clone();
+                // refresh_device_ip persists only when the IP actually
+                // changed — an unchanged address costs no flash write.
+                let _ = ybdev::devices::refresh_device_ip(
+                    &ybdev::devices::devices_path(), &token, &ip, now);
+                ybdev::log::plog(&format!(
+                    "mirror: pairing self-heal — '{}' answered from new IP {}, token verified, IP refreshed",
+                    id, ip
+                ));
+                return Some(((**s).clone(), Some(token)));
+            }
+        }
+        // Challenge failed: the Mac at the new address doesn't hold the
+        // pairing. Diagnosability only, once per process, and only when a
+        // registered id actually answered — an unrelated yb-mirror
+        // instance must not burn the flag or claim a failed pairing. The
+        // mirror stays unauthenticated (and a paired server will 401 it).
+        if had_candidates {
             static IP_MISMATCH_PLOGGED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !IP_MISMATCH_PLOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let first = candidates.first();
                 ybdev::log::plog(&format!(
-                    "mirror: trusted device '{}' answered from new IP {} — open the receive page once from that device (or re-pair) to refresh its IP",
-                    s.device_id.as_deref().unwrap_or("?"),
-                    s.ip
+                    "mirror: paired device '{}' answered from new IP {} but the pairing challenge failed — re-pair via the receive page if this Mac lost its pairing record",
+                    first.and_then(|s| s.device_id.as_deref()).unwrap_or("?"),
+                    first.map(|s| s.ip.as_str()).unwrap_or("?"),
                 ));
             }
         }
@@ -631,6 +800,69 @@ mod tests {
         assert_eq!(got, body);
     }
 
+    /// The Mac server answers the challenge with HMAC-SHA256(token, nonce)
+    /// parsed out of the request; the reader must accept it.
+    #[test]
+    fn challenge_verify_accepts_the_paired_macs_answer() {
+        use std::io::{Read as _, Write as _};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let n = s.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let nonce = req
+                .split("nonce=")
+                .nth(1)
+                .unwrap_or("")
+                .split(|c: char| !c.is_ascii_hexdigit())
+                .next()
+                .unwrap_or("");
+            let mac = ybdev::hmac::hmac_sha256_hex(b"tok_secret", nonce.as_bytes());
+            let body = format!("{{\"mac\":\"{}\"}}", mac);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            s.write_all(resp.as_bytes()).unwrap();
+        });
+        assert!(challenge_verify(
+            &addr.ip().to_string(),
+            addr.port(),
+            "knd_t",
+            "tok_secret"
+        ));
+    }
+
+    /// A host that doesn't hold the pairing cannot produce the right MAC;
+    /// the reader must reject it.
+    #[test]
+    fn challenge_verify_rejects_a_spoofers_answer() {
+        use std::io::{Read as _, Write as _};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf).unwrap();
+            let body = "{\"mac\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            s.write_all(resp.as_bytes()).unwrap();
+        });
+        assert!(!challenge_verify(
+            &addr.ip().to_string(),
+            addr.port(),
+            "knd_t",
+            "tok_secret"
+        ));
+    }
+
     #[test]
     fn secret_header_sent_when_configured_and_absent_when_not() {
         use std::io::Write as _;
@@ -700,19 +932,21 @@ mod tests {
         // Pure parser test — no UDP: broadcasting in a unit test both spams
         // the LAN and flips this assertion to flaky on any machine that
         // happens to run a yb-mirror responder. Trust routing is covered by
-        // trust_reply_requires_ip_and_id_match below.
-        let raw1 = "ybmirror 8765 id=mac_m3 name=\"MacBook\"";
+        // trust_reply_requires_a_provable_mac below.
+        let raw1 = "ybmirror 8765 id=mac_m3 name=\"MacBook\" mac=0123456789abcdef";
         let parsed1 = parse_discovery_response("192.168.1.10", raw1).unwrap();
         assert_eq!(parsed1.ip, "192.168.1.10");
         assert_eq!(parsed1.port, 8765);
         assert_eq!(parsed1.device_id.as_deref(), Some("mac_m3"));
         assert_eq!(parsed1.device_name.as_deref(), Some("MacBook"));
+        assert_eq!(parsed1.mac.as_deref(), Some("0123456789abcdef"));
 
         let raw2 = "ybmirror 9000";
         let parsed2 = parse_discovery_response("192.168.1.20", raw2).unwrap();
         assert_eq!(parsed2.ip, "192.168.1.20");
         assert_eq!(parsed2.port, 9000);
         assert_eq!(parsed2.device_id, None);
+        assert_eq!(parsed2.mac, None);
 
         // Malformed port is rejected, not defaulted.
         assert!(parse_discovery_response("192.168.1.30", "ybmirror notaport").is_none());
@@ -723,23 +957,26 @@ mod tests {
     #[test]
     fn packet_order_discovery_merge() {
         let legacy_reply = "ybmirror 8765";
-        let new_reply = "ybmirror 8765 id=mac_studio name=\"Studio Mac\"";
+        let new_reply = "ybmirror 8765 id=mac_studio name=\"Studio Mac\" mac=abcd";
 
         let mut servers: Vec<DiscoveredServer> = Vec::new();
 
         // 1. Legacy reply arrives first
         let srv1 = parse_discovery_response("192.168.1.50", legacy_reply).unwrap();
         assert_eq!(srv1.device_id, None);
+        assert_eq!(srv1.mac, None);
         assert!(merge_reply(&mut servers, srv1));
 
         // 2. New id-bearing reply arrives second: merge_reply upgrades the existing entry
         let srv2 = parse_discovery_response("192.168.1.50", new_reply).unwrap();
         assert_eq!(srv2.device_id.as_deref(), Some("mac_studio"));
+        assert_eq!(srv2.mac.as_deref(), Some("abcd"));
         assert!(merge_reply(&mut servers, srv2));
 
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].device_id.as_deref(), Some("mac_studio"));
         assert_eq!(servers[0].device_name.as_deref(), Some("Studio Mac"));
+        assert_eq!(servers[0].mac.as_deref(), Some("abcd"));
 
         // 3. A later name-only reply still fills a missing name (id already present)
         let mut named: Vec<DiscoveredServer> = vec![DiscoveredServer {
@@ -747,6 +984,7 @@ mod tests {
             port: 8765,
             device_id: Some("mac_air".to_string()),
             device_name: None,
+            mac: None,
         }];
         let name_only = parse_discovery_response("192.168.1.60", "ybmirror 8765 name=\"Mac Air\"").unwrap();
         assert!(merge_reply(&mut named, name_only));
@@ -755,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_reply_requires_ip_and_id_match() {
+    fn trust_reply_requires_a_provable_mac() {
         let mut store = ybdev::devices::DeviceStore::default();
         store.add_or_update(ybdev::devices::TrustedDevice::new(
             "victim_mac",
@@ -771,51 +1009,68 @@ mod tests {
             Some("192.168.1.101"),
             "inbound",
         ));
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let good = ybdev::hmac::hmac_sha256_hex(b"tok_victim_secret", nonce.as_bytes());
 
-        // Attacker at another IP claiming the victim's id: no token.
-        let spoofed_id = DiscoveredServer {
-            ip: "192.168.1.200".to_string(),
+        // Bare id, no MAC — the old echo attack (a host that overheard one
+        // reply and squats a lapsed lease): no token, even from the
+        // device's stored IP.
+        let echoed_id = DiscoveredServer {
+            ip: "192.168.1.100".to_string(),
             port: 8765,
             device_id: Some("victim_mac".to_string()),
             device_name: None,
+            mac: None,
         };
-        assert_eq!(trust_reply(&spoofed_id, &store), None);
+        assert_eq!(trust_reply(&echoed_id, &store, nonce), None);
 
-        // Legacy id-less reply from the victim's (or a reassigned) IP: IP
-        // alone is not an identity — no token.
-        let legacy_at_trusted_ip = DiscoveredServer {
+        // MAC computed with the WRONG token (an attacker who knows another
+        // pairing): no token.
+        let wrong_mac = ybdev::hmac::hmac_sha256_hex(b"tok_phone", nonce.as_bytes());
+        let wrong = DiscoveredServer {
             ip: "192.168.1.100".to_string(),
             port: 8765,
-            device_id: None,
+            device_id: Some("victim_mac".to_string()),
             device_name: None,
+            mac: Some(wrong_mac),
         };
-        assert_eq!(trust_reply(&legacy_at_trusted_ip, &store), None);
+        assert_eq!(trust_reply(&wrong, &store, nonce), None);
 
-        // Right IP with the WRONG id (reinstalled host / impersonator): no token.
-        let wrong_id = DiscoveredServer {
-            ip: "192.168.1.100".to_string(),
-            port: 8765,
-            device_id: Some("someone_else".to_string()),
-            device_name: None,
-        };
-        assert_eq!(trust_reply(&wrong_id, &store), None);
-
-        // Inbound-scope device claiming control at its own IP with its own id: no token.
+        // Inbound-scope device with a valid MAC for its own token: no
+        // control token.
+        let inbound_mac = ybdev::hmac::hmac_sha256_hex(b"tok_phone", nonce.as_bytes());
         let inbound = DiscoveredServer {
             ip: "192.168.1.101".to_string(),
             port: 8765,
             device_id: Some("phone_inbound".to_string()),
             device_name: None,
+            mac: Some(inbound_mac),
         };
-        assert_eq!(trust_reply(&inbound, &store), None);
+        assert_eq!(trust_reply(&inbound, &store, nonce), None);
 
-        // IP + id match on a control-scope device: token attached.
-        let legit = DiscoveredServer {
+        // Legacy id-less reply: no token.
+        let legacy = DiscoveredServer {
             ip: "192.168.1.100".to_string(),
+            port: 8765,
+            device_id: None,
+            device_name: None,
+            mac: None,
+        };
+        assert_eq!(trust_reply(&legacy, &store, nonce), None);
+
+        // Correct id + MAC — even from a NEW IP (the DHCP-move case): the
+        // MAC is the identity, so token possession, not the address, earns
+        // the token.
+        let legit_new_ip = DiscoveredServer {
+            ip: "192.168.1.222".to_string(),
             port: 8765,
             device_id: Some("victim_mac".to_string()),
             device_name: Some("Victim's Mac".to_string()),
+            mac: Some(good),
         };
-        assert_eq!(trust_reply(&legit, &store), Some("tok_victim_secret".to_string()));
+        assert_eq!(
+            trust_reply(&legit_new_ip, &store, nonce),
+            Some("tok_victim_secret".to_string())
+        );
     }
 }

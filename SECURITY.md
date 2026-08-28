@@ -124,12 +124,29 @@ parser panic surfaces as an open error, not a crash loop.
   whenever present (see `protocol::Conn::set_secret`). Without it the wire
   is byte-identical to the legacy protocol, so old servers keep working.
 - *Paired device tokens* (scope `all`) — attached to discovery replies
-  only when **both** the reply's UDP source IP matches the device's stored
-  IP **and** the reply's claimed `device_id` matches the stored record
-  (`protocol::trust_reply`). Neither alone suffices: an IP is not an
-  identity (DHCP hands lapsed leases to the next host — a legacy id-less
-  reply from a trusted IP gets nothing), and a claimed id is not proof
-  (any host can type `id=<victim>`).
+  only when the reply **proves token possession**: it carries
+  `mac=HMAC-SHA256(token, nonce)` over the per-probe nonce the reader sent
+  (`protocol::trust_reply`). The claimed `device_id` only says which
+  device's token was used; the MAC is the identity. Neither an IP nor a
+  bare id is proof — DHCP hands lapsed leases to the next host, and a bare
+  id can be echoed by a host that overheard one reply. The token itself
+  never leaves the device.
+
+The bundled Mac companion (`companion/mac/server.py`, `companion/mac/
+ai_stream.py`) implements the server side: it answers discovery probes
+with `id=`/`name=` **and** `mac=HMAC-SHA256(token, nonce)` (the nonce from
+the probe) and, once at least one Kindle has paired via the receive page
+(whose browser POSTs the PIN-minted token to
+`http://localhost:8765/api/pair` — CORS/preflight handled, so the browser
+handshake actually completes), requires `X-YB-Secret` on Kindle-facing
+endpoints — 401 otherwise. The pairing endpoint and the Mac-side admin
+endpoints (`/status`, `/rewin`, `/autosize`) are localhost-only, so a LAN
+peer can neither mint pairings nor read the paired identities. Discovery
+replies announce the *requesting* Kindle's own `device_id` (the probe
+carries its `kindle_id`), so one Mac can serve several Kindles without
+their trust checks colliding. A static `SECRET=` in `companion/mirror.conf`
+is accepted alongside paired tokens. Deleting `~/.yb-mirror-devices.json`
+on the Mac restores the unauthenticated wire.
 
 **SERVER= is pinned only after proof.** A discovered host is persisted to
 `mirror.conf` only after it completes a real exchange (a 200 frame fetch /
@@ -137,11 +154,20 @@ parser panic surfaces as an open error, not a crash loop.
 discovery round; it cannot fake a working stream, so it stays
 session-scoped and is forgotten on restart.
 
-**DHCP moves downgrade, loudly.** If a paired Mac changes IP, its token is
-not sent (the IP+id match fails) and mirror/ai_stream degrade to
-unauthenticated until the device opens the receive web page once from its
-new IP (which refreshes the stored IP) or re-pairs. A one-line hint is
-plogged at most once per process.
+**DHCP moves self-heal.** A paired Mac's address is not part of trust at
+all: every discovery probe carries a fresh nonce, and the reply must carry
+`HMAC-SHA256(token, nonce)`, which only the real pairing holder can
+compute. A Mac that changed IP is therefore trusted automatically — the
+stored IP refreshes itself, no manual step — and a host that merely echoes
+an overheard id from a squatted lapsed lease gets nothing (it cannot
+produce the MAC). The token never leaves the device; a captured
+nonce/response pair is useless against the 128-bit token and cannot be
+replayed (every round uses a fresh nonce). The `/api/challenge` endpoint
+remains as a fallback for servers that answer discovery without a `mac=`
+(older builds). If the proof fails, the mirror stays unauthenticated and a
+paired server answers 401 with a logged pairing hint. Steady-state
+requests still carry `X-YB-Secret` in cleartext HTTP; the trust layer
+stops active impersonation by rogue responders, not passive LAN sniffing.
 
 **conf.secret never reaches a discovery fallback.** The static `SECRET=`
 is sent to the explicitly configured `SERVER=` host only — including when
