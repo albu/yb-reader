@@ -435,13 +435,15 @@ click (for menus; unused by the mirror) · `GET /status` · `POST /rewin` ·
 `POST /autosize` · `POST /api/pair` (completes the pairing the Kindle's
 receive page starts: after the PIN-verified `/api/pair` on the Kindle, its
 browser posts the token + device id here, and `/status` then reports the
-paired Kindle by id/name). Once a Kindle has paired, the Kindle-facing
-endpoints require `X-YB-Secret` (see "Pairing & trust"). `/status` also
-reports the Kindle's handshake-learned IP (`kindle.ip`, persisted to
-`~/.yb-mirror-last-kindle`) — that is how the menu bar opens the web
-manager without any configured address. UDP discovery on `<port>+1`
-answers `ybmirror <port> id=… name="…"` to broadcast probes (the id/name
-is what lets the reader attach its paired token).
+paired Kindle by id/name) · `POST /api/challenge?kindle_id=&nonce=` (the
+pairing self-heal: returns `{"mac": HMAC-SHA256(token, nonce)}` so the
+reader can verify this Mac still holds the pairing from any IP). Once a
+Kindle has paired, the Kindle-facing endpoints require `X-YB-Secret` (see
+"Pairing & trust"). `/status` also reports the Kindle's handshake-learned
+IP (`kindle.ip`, persisted to `~/.yb-mirror-last-kindle`) — that is how
+the menu bar opens the web manager without any configured address. UDP
+discovery on `<port>+1` answers `ybmirror <port> id=… name="…" mac=…` to
+broadcast probes (the mac is what lets the reader attach its paired token).
 
 **AI stream server** (`mac/ai_stream.py`, port 8768):
 
@@ -449,8 +451,9 @@ is what lets the reader attach its paired token).
 revision) · `GET /history` / `GET /turn?idx=` turn list / one turn
 (negative indices count from the newest) · `GET /sources` /
 `POST /source?set=auto|antigravity|claude` switch the watched source ·
-`GET /health` liveness (the one endpoint exempt from the pairing secret).
-Same UDP discovery on 8766 when the port is free.
+`POST /api/pair` / `POST /api/challenge` (pairing, same as the mirror
+server) · `GET /health` liveness (the one endpoint exempt from the pairing
+secret). Same UDP discovery on 8766 when the port is free.
 
 ## Known limits
 
