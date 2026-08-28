@@ -260,7 +260,7 @@ change it.
   (swipe left/right works too)
 - **tap top-right corner** = screen clean: re-fetch the frame with a full
   (flashing) refresh to wipe ghosting. Normal turns never flash.
-- **two-finger tap** = frontlight dialog, without leaving the mirror
+- **two-finger tap** = screen clean too (the same full flashing refresh)
 - **swipe down (or up)** = exit back to the reader (works even mid-sync)
 
 ## Pairing & trust

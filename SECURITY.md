@@ -78,16 +78,6 @@ and use is visible — deliveries on screen, and auth misses land in the
 persistent log (first one only; logging every miss of a sustained attack
 would burn flash writes for noise).
 
-**Hardening already in place**, mostly from audit rounds:
-
-- upload bodies stream to disk in 64 KB chunks (no RAM-sized files);
-- writes are capped to the declared Content-Length (underflow bypass fixed);
-- duplicate conflicting Content-Length → 400;
-- filename sanitization plus an extension allowlist (`.sh`, `.mobi`, … refused);
-- path traversal neutralized (`..%2F..%2Fescape.epub` lands as `escape.epub`);
-- `My Clippings.txt` / `JAILBROKEN.txt` protected from delete **and move**;
-- error bodies JSON-escaped; header phase capped (16 KB / 30 s).
-
 **Accepted residuals.**
 
 - The guest PIN rides in URLs: it lands in the phone's browser history and

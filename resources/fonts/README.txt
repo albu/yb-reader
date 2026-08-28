@@ -24,7 +24,7 @@ Code / fallback / UI:
   (https://github.com/googlefonts/noto-fonts)
 
 The non-Literata faces are SUBSETTED with pyftsubset to Latin + Cyrillic +
-punctuation (~35-190 KB/face vs ~320 KB full) to keep the binary small.
+punctuation (~85-225 KB/face vs ~300-330 KB full) to keep the binary small.
 Bitter is instanced from its variable font to static TTFs first — variable
 fonts can show rendering quirks on e-ink firmware, and the engine shapes
 static faces.
