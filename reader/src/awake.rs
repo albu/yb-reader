@@ -53,12 +53,11 @@ pub fn usb_plugged() -> bool {
     false
 }
 
-/// Pure decision, host-testable: a screen's live reason, USB power, or
-/// the Wi-Fi link being up (reachable ⇒ awake — a sleeping device
-/// can't be deployed to, and it shouldn't silently drop off the network
-/// mid-session; turn Wi-Fi off in the curtain to let it sleep).
-pub fn desired_awake(screen_wants: bool, vbus: bool, wifi_up: bool) -> bool {
-    screen_wants || vbus || wifi_up
+/// Pure decision, host-testable: a screen's live reason or USB power.
+/// Reading a book deliberately holds nothing: page turns are input,
+/// and stillness means the reader put the device down.
+pub fn desired_awake(screen_wants: bool, vbus: bool) -> bool {
+    screen_wants || vbus
 }
 
 /// Screens with a live reason not to suspend call this on enter/leave
@@ -214,7 +213,6 @@ fn loop_fn() {
         let want = desired_awake(
             ybdev::wifi::session_wants(),
             sysinfo::vbus(),
-            sysinfo::wifi_up(),
         );
         wifi::keep_awake(want);
         // Wi-Fi healing is gated to live-session screens only: the sleep
@@ -252,11 +250,10 @@ mod tests {
 
     #[test]
     fn awake_truth_table() {
-        assert!(!desired_awake(false, false, false));
-        assert!(desired_awake(true, false, false));
-        assert!(desired_awake(false, true, false));
-        assert!(desired_awake(false, false, true));
-        assert!(desired_awake(true, true, true));
+        assert!(!desired_awake(false, false));
+        assert!(desired_awake(true, false));
+        assert!(desired_awake(false, true));
+        assert!(desired_awake(true, true));
     }
 
     #[test]

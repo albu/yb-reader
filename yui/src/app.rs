@@ -234,6 +234,7 @@ impl App {
                 && !self.stack.last().map(|s| s.is_sleep()).unwrap_or(false)
             {
                 woke = true;
+                last_input = std::time::SystemTime::now();
                 if let Some(f) = &self.resume {
                     f(wall);
                 }
@@ -257,8 +258,6 @@ impl App {
             // on top, no USB power → the sleep screen, exactly as if
             // the power button had been pressed. Its 300ms tick is
             // what carries us into suspend; the wake path restores.
-            // Wi-Fi up counts as a reason to stay awake (reachable ⇒
-            // awake; the curtain's Wi-Fi toggle is the opt-out).
             if last_input.elapsed().unwrap_or_default() >= IDLE_SUSPEND
                 && !self
                     .stack
@@ -266,7 +265,6 @@ impl App {
                     .map(|s| s.is_sleep() || s.holds_awake())
                     .unwrap_or(false)
                 && !ybdev::sysinfo::vbus()
-                && !ybdev::sysinfo::wifi_up()
                 && !self.apply(Action::Push(Box::new(crate::widgets::SleepScreen::new()))) {
                     break;
                 }
