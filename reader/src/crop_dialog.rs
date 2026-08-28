@@ -866,11 +866,10 @@ impl Screen for CropDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn test_render_sample_crop_preview() {
-        let path = Path::new("/tmp/sample.pdf");
+        let path = std::env::temp_dir().join("sample.pdf");
         if !path.exists() {
             return;
         }
@@ -891,8 +890,8 @@ mod tests {
         settings.split.margin_bottom = mb;
         settings.split.mirror_even_odd = true;
 
-        let out_dir = "/tmp/yb-crop-preview";
-        std::fs::create_dir_all(out_dir).unwrap();
+        let out_dir = std::env::temp_dir().join("yb-crop-preview");
+        std::fs::create_dir_all(&out_dir).unwrap();
 
         // 2. Render Crop Studio on Odd Page (Page 11, index 10)
         let mut dialog = CropDialog::new(
@@ -920,7 +919,7 @@ mod tests {
             dialog.draw(&mut p);
         }
 
-        let file = std::fs::File::create(format!("{out_dir}/crop_studio_odd_p11.png")).unwrap();
+        let file = std::fs::File::create(format!("{}/crop_studio_odd_p11.png", out_dir.display())).unwrap();
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
         enc.set_color(png::ColorType::Grayscale);
         enc.set_depth(png::BitDepth::Eight);
@@ -941,7 +940,7 @@ mod tests {
             dialog.draw(&mut p);
         }
 
-        let file = std::fs::File::create(format!("{out_dir}/crop_studio_even_p12.png")).unwrap();
+        let file = std::fs::File::create(format!("{}/crop_studio_even_p12.png", out_dir.display())).unwrap();
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
         enc.set_color(png::ColorType::Grayscale);
         enc.set_depth(png::BitDepth::Eight);
@@ -950,13 +949,13 @@ mod tests {
         // 4. Render Auto-Cropped Reader view for Page 11 and Page 12
         for pno in [10, 11] {
             let gray = crate::render::render_page(doc.as_ref(), pno, 0, &settings, 1236, 1648).unwrap();
-            let file = std::fs::File::create(format!("{out_dir}/reader_cropped_p{}.png", pno + 1)).unwrap();
+            let file = std::fs::File::create(format!("{}/reader_cropped_p{}.png", out_dir.display(), pno + 1)).unwrap();
             let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
             enc.set_color(png::ColorType::Grayscale);
             enc.set_depth(png::BitDepth::Eight);
             enc.write_header().unwrap().write_image_data(&gray).unwrap();
         }
-        println!("Rendered crop studio and reader previews to {}", out_dir);
+        println!("Rendered crop studio and reader previews to {}", out_dir.display());
     }
 
     #[test]
