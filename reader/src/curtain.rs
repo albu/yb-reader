@@ -25,29 +25,29 @@ const HANDLE_TOP_PT: f32 = 8.0;
 const HANDLE_W_PT: f32 = 38.0;
 const HANDLE_H_PT: f32 = 3.0;
 
-const CLOCK_BASE_PT: f32 = 36.0;
-const CLOCK_SIZE_PT: f32 = 25.0;
-const DATE_BASE_PT: f32 = 49.0;
-const DATE_SIZE_PT: f32 = 8.0;
+const CLOCK_BASE_PT: f32 = 34.0;
+const CLOCK_SIZE_PT: f32 = 24.0;
+const DATE_BASE_PT: f32 = 46.0;
+const DATE_SIZE_PT: f32 = 7.5;
 
-const CARD_TOP_PT: f32 = 58.0;
-const CARD_H_PT: f32 = 32.0;
-const CARD_GAP_PT: f32 = 7.0;
+const CARD_TOP_PT: f32 = 54.0;
+const CARD_H_PT: f32 = 31.0;
+const CARD_GAP_PT: f32 = 6.0;
 const PAD_PT: f32 = 18.0;
 
-const BRIGHT_ROW_PT: f32 = 138.0;
-const TONE_ROW_PT: f32 = 164.0;
-const ROW_CY_OFF_PT: f32 = 11.0;
+const BRIGHT_ROW_PT: f32 = 168.0;
+const TONE_ROW_PT: f32 = 192.0;
+const ROW_CY_OFF_PT: f32 = 10.0;
 const SLIDER_X_OFF_PT: f32 = 44.0;
 
 /// Composite light presets as one segmented track: Day | Warm | Night,
 /// the active segment filled. One (brightness, warmth) pair per tap.
-const SEG_TOP_PT: f32 = 194.0;
+const SEG_TOP_PT: f32 = 220.0;
 const SEG_H_PT: f32 = 22.0;
 
 const KNOB_R_PX: i32 = 8;
 
-const SHEET_H_PT: f32 = 230.0;
+const SHEET_H_PT: f32 = 254.0;
 
 /// The user's own frontlight point, remembered across sessions — only
 /// written while the light sits OFF every preset (custom mode); preset
@@ -314,11 +314,15 @@ impl Screen for CurtainScreen {
             p.text_center(pt(DATE_BASE_PT), DATE_SIZE_PT, DIM, &self.date);
         }
 
-        // 3. Status Cards Grid (2x2): POWER | NETWORK, SSH | ORIENTATION
+        // 3. Status Cards Grid (3x2):
+        // Row 1: POWER | NETWORK
+        // Row 2: SSH REMOTE | ORIENTATION
+        // Row 3: FULL REFRESH | STORAGE
         let card_w = (w - 2 * pad - pt(CARD_GAP_PT)) / 2;
         let card_h = pt(CARD_H_PT);
         let row1_y = pt(CARD_TOP_PT);
         let row2_y = row1_y + card_h + pt(CARD_GAP_PT);
+        let row3_y = row2_y + card_h + pt(CARD_GAP_PT);
 
         // Card 1 (Top-Left): Power
         let (cap, plugged) = sysinfo::battery();
@@ -364,7 +368,7 @@ impl Screen for CurtainScreen {
             is_online,
         );
 
-        // Card 3 (Bottom-Left): SSH Remote toggle
+        // Card 3 (Middle-Left): SSH Remote toggle
         let ssh_running = ybdev::ssh::running();
         let (ssh_val, ssh_sub) = if ssh_running {
             ("Active", "Port 2222 · Tap to Stop")
@@ -384,7 +388,7 @@ impl Screen for CurtainScreen {
             ">_",
         );
 
-        // Card 4 (Bottom-Right): Orientation / Rotation
+        // Card 4 (Middle-Right): Orientation / Rotation
         let (rot_val, rot_sub, rot_icon_color) = if let Some(ctx) = &self.rotate {
             let val = match ctx.settings.split.rotation {
                 0 => "Portrait",
@@ -403,6 +407,40 @@ impl Screen for CurtainScreen {
             r_rot.x + r_rot.w - pt(15.0),
             r_rot.y + pt(16.0),
             rot_icon_color,
+        );
+
+        // Card 5 (Bottom-Left): Full Refresh (active in book and everywhere)
+        let refresh_cur = crate::positions::global_refresh_interval();
+        let refresh_val = match refresh_cur {
+            0 => "Off".to_string(),
+            1 => "Every 1p".to_string(),
+            n => format!("Every {n}p"),
+        };
+        let r_ref = Rect::new(pad, row3_y, card_w, card_h);
+        CurtainScreen::draw_card(p, r_ref, "FULL REFRESH", &refresh_val, "Tap to cycle");
+        draw_rotate_icon(
+            p,
+            r_ref.x + r_ref.w - pt(15.0),
+            r_ref.y + pt(16.0),
+            INK,
+        );
+
+        // Card 6 (Bottom-Right): Storage & RAM
+        let mut stor_val = "Kindle".to_string();
+        if let Some(g) = sysinfo::storage_free_gb() {
+            stor_val = format!("{g:.1} GB free");
+        }
+        let mut stor_sub = "Storage".to_string();
+        if let Some(k) = sysinfo::mem_available_kib() {
+            stor_sub = format!("{:.0}M RAM free", k as f64 / 1024.0);
+        }
+        let r_storage = Rect::new(pad + card_w + pt(CARD_GAP_PT), row3_y, card_w, card_h);
+        CurtainScreen::draw_card(p, r_storage, "STORAGE", &stor_val, &stor_sub);
+        draw_storage_icon(
+            p,
+            r_storage.x + r_storage.w - pt(18.0),
+            r_storage.y + pt(11.0),
+            INK,
         );
 
         // 4. Frontlight: two bare sliders
@@ -501,15 +539,16 @@ impl Screen for CurtainScreen {
             Gesture::Tap { x, y } => {
                 let (x, y) = (x as i32, y as i32);
 
-                // 0. Status card taps: Wi-Fi toggle (NETWORK), ssh
-                //    toggle (SSH), Rotation cycle (ORIENTATION in book).
+                // 0. Status card taps (3x2 grid): Wi-Fi, SSH, Rotation, Full Refresh, Storage
                 let card_w = (w - 2 * pad - pt(CARD_GAP_PT)) / 2;
                 let card_h = pt(CARD_H_PT);
-                let row2_y = pt(CARD_TOP_PT) + card_h + pt(CARD_GAP_PT);
+                let row1_y = pt(CARD_TOP_PT);
+                let row2_y = row1_y + card_h + pt(CARD_GAP_PT);
+                let row3_y = row2_y + card_h + pt(CARD_GAP_PT);
 
                 let r_net = Rect::new(
                     pad + card_w + pt(CARD_GAP_PT),
-                    pt(CARD_TOP_PT),
+                    row1_y,
                     card_w,
                     card_h,
                 );
@@ -601,6 +640,27 @@ impl Screen for CurtainScreen {
                         ctx.settings,
                     );
                     return Action::Pop;
+                }
+
+                // Row 3 Left: Full Refresh
+                let r_ref = Rect::new(pad, row3_y, card_w, card_h);
+                if r_ref.contains(x, y) {
+                    let cur = crate::positions::global_refresh_interval();
+                    let next = match cur {
+                        0 => 1,
+                        1 => 5,
+                        5 => 10,
+                        10 => 20,
+                        _ => 0,
+                    };
+                    crate::positions::set_global_refresh_interval(next);
+                    return Action::Redraw;
+                }
+
+                // Row 3 Right: Storage (redraws to refresh metrics)
+                let r_storage = Rect::new(pad + card_w + pt(CARD_GAP_PT), row3_y, card_w, card_h);
+                if r_storage.contains(x, y) {
+                    return Action::Redraw;
                 }
 
                 // 0b. Light points: presets apply their fixed pair; the
@@ -719,6 +779,15 @@ fn draw_rotate_icon(p: &mut Painter, cx: i32, cy: i32, color: u8) {
     p.line_w(ax, ay, ax + pt(3.0), ay + pt(3.0), 2, color);
 }
 
+/// Disk / Storage glyph.
+fn draw_storage_icon(p: &mut Painter, x: i32, y: i32, color: u8) {
+    let w = pt(12.0);
+    let h = pt(8.0);
+    p.rect_outline_t(Rect::new(x, y, w, h), 1, color);
+    p.hline_t(y + h - pt(3.0), x, x + w, 1, color);
+    p.rect(Rect::new(x + w - pt(3.5), y + h - pt(2.0), pt(1.5), pt(1.0)), color);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,8 +830,8 @@ mod tests {
         let font = Font::load().unwrap();
         let mut buf = vec![255u8; 1248 * 1648];
         let mut c = CurtainScreen::new();
+        let mut canvas = vec![0u8; 1236 * 1648];
         {
-            let mut canvas = vec![0u8; 1236 * 1648];
             let mut p = yui::Painter::new(
                 &mut buf,
                 1236,
@@ -774,6 +843,17 @@ mod tests {
             );
             c.draw(&mut p);
             p.flush();
+        }
+        if let Ok(dir) = std::env::var("YB_AI_PREVIEW_DIR").or_else(|_| std::env::var("ARTIFACT_DIR")) {
+            let path = std::path::Path::new(&dir).join("curtain_preview.png");
+            if let Ok(file) = std::fs::File::create(&path) {
+                let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
+                enc.set_color(png::ColorType::Grayscale);
+                enc.set_depth(png::BitDepth::Eight);
+                if let Ok(mut w) = enc.write_header() {
+                    let _ = w.write_image_data(&canvas);
+                }
+            }
         }
         let ink = |name: &str, y0: usize, y1: usize, min: usize| {
             let n = buf[y0 * 1248..y1 * 1248]

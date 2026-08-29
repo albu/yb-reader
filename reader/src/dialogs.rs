@@ -292,23 +292,35 @@ pub fn quick_settings_sheet(
     )))
 }
 
+/// The Learning pill matches the profile's stored form: record_lookup
+/// stores clean_word(), so the dictionary's display headword must be
+/// cleaned the same way before comparing ("power plant" → "powerplant").
+fn is_learning_word(prof: &crate::vocab::VocabProfile, word: &str) -> bool {
+    prof.learning_words.contains(&crate::vocab::clean_word(word))
+}
+
 pub fn word_dialog(
-    entry: crate::vocab::WordEntry,
+    result: crate::dictionary::WordResult,
     mut prof: crate::vocab::VocabProfile,
     bg: Option<Vec<u8>>,
+    dicts: std::rc::Rc<crate::dictionary::ActiveDicts>,
+    book: String,
 ) -> Action {
-    let word = entry.word.clone();
-    let diff = entry.difficulty;
-    let is_learning = prof.learning_words.contains(&word);
+    let word = result.word().to_string();
+    let is_learning = is_learning_word(&prof, &word);
 
     Action::Push(Box::new(crate::word_dialog::WordDialog::new(
-        entry,
+        result,
         is_learning,
         bg,
+        dicts,
+        book,
         move |action| {
             match action {
                 crate::word_dialog::WordAction::StarLearning => {
-                    prof.record_lookup(&word, diff);
+                    // User dictionaries carry no difficulty score; keep the
+                    // profile's default learning weight.
+                    prof.record_lookup(&word, 50);
                     let mut deck = crate::flashcards::FlashcardDeck::load();
                     deck.add_word(&word);
                 }
@@ -323,9 +335,37 @@ pub fn word_dialog(
 pub fn dict_miss(word: &str, bg: Option<Vec<u8>>) -> Action {
     Action::Push(Box::new(crate::footnote_dialog::FootnoteDialog::new(
         "Dictionary",
-        &format!("«{}» — no entry in the dictionary", word),
+        &format!(
+            "«{}» — no entry in the active dictionaries.\n\n\
+             Add one over Wi-Fi (receive page → Dictionaries) or pick one \
+             in System → Dictionaries.",
+            word
+        ),
         None,
         bg,
         |_act| Action::Pop,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The F7 regression: the Learning pill used to compare the raw
+    // display headword against the stored set, so multi-word entries
+    // ("power plant", stored by record_lookup as "powerplant") never
+    // matched. Both sides of that contract must go through clean_word.
+    #[test]
+    fn learning_pill_matches_multi_word_headwords() {
+        let mut prof = crate::vocab::VocabProfile::default();
+        assert!(!is_learning_word(&prof, "Power Plant"));
+
+        // Marking it learning stores the clean form…
+        prof.record_lookup("Power Plant", 50);
+        assert!(prof.learning_words.contains("powerplant"));
+
+        // …and the pill matches the display form the dictionary reports.
+        assert!(is_learning_word(&prof, "Power Plant"));
+        assert!(is_learning_word(&prof, "power plant"));
+    }
 }

@@ -143,6 +143,17 @@ pub fn mem_total_kib() -> Option<u64> {
     parse_kv_kb(&fs::read_to_string("/proc/meminfo").ok()?, "MemTotal")
 }
 
+/// Instruct the allocator to release free arena memory back to the OS (if supported).
+pub fn trim_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        extern "C" {
+            fn malloc_trim(pad: libc::size_t) -> libc::c_int;
+        }
+        malloc_trim(0);
+    }
+}
+
 /// External power present (USB cable / charger). bd71827_ac is the VBUS
 /// node on this PMIC (probed on device 2026-08-19); the battery node's
 /// own `online` is always 1 and must not be used. Falls back to the

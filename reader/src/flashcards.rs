@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::vocab::{VocabDb, WordEntry};
+use crate::dictionary::DictEntry;
 use ybdev::input::Gesture;
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
@@ -198,20 +198,25 @@ enum CardSide {
 
 pub struct FlashcardsScreen {
     deck: FlashcardDeck,
-    /// &'static: shared process-wide dictionary (vocab::open caches it).
-    vocab_db: Option<&'static VocabDb>,
+    /// Active user dictionaries.
+    dicts: crate::dictionary::ActiveDicts,
+    /// Builtin WordNet (English definitions) — the fallback meaning when
+    /// no active user dictionary has a translation, so the trainer's card
+    /// backs are never blank in the default deployment.
+    builtin: Option<crate::dictionary::Dictionary>,
     due_queue: Vec<String>,
     current_idx: usize,
     side: CardSide,
     reviewed_count: usize,
-    current_entry: Option<WordEntry>,
+    current_entry: Option<DictEntry>,
     dims: (i32, i32),
 }
 
 impl FlashcardsScreen {
     pub fn new() -> Self {
         let deck = FlashcardDeck::load();
-        let vocab_db = VocabDb::open();
+        let dicts = crate::dictionary::open_active();
+        let builtin = crate::dictionary::open_builtin();
         let mut due_queue = deck.due_words();
 
         // If no cards due, offer reviewing all words in deck
@@ -221,11 +226,15 @@ impl FlashcardsScreen {
 
         let first_entry = due_queue
             .first()
-            .and_then(|w| vocab_db.as_ref().and_then(|db| db.lookup(w)));
+            .and_then(|w| {
+                let r = dicts.lookup_result(builtin.as_ref(), w, None);
+                r.translation.or(r.definition)
+            });
 
         FlashcardsScreen {
             deck,
-            vocab_db,
+            dicts,
+            builtin,
             due_queue,
             current_idx: 0,
             side: CardSide::Front,
@@ -237,7 +246,8 @@ impl FlashcardsScreen {
 
     fn load_current_entry(&mut self) {
         if let Some(word) = self.due_queue.get(self.current_idx) {
-            self.current_entry = self.vocab_db.as_ref().and_then(|db| db.lookup(word));
+            let r = self.dicts.lookup_result(self.builtin.as_ref(), word, None);
+            self.current_entry = r.translation.or(r.definition);
         } else {
             self.current_entry = None;
         }
@@ -345,9 +355,9 @@ impl Screen for FlashcardsScreen {
 
         let cur_word = &self.due_queue[self.current_idx];
         let entry = self.current_entry.as_ref();
-        let cefr_badge = entry
-            .map(|e| format!("{} · lvl {}", e.cefr_str(), e.difficulty))
-            .unwrap_or_else(|| "Vocab".to_string());
+        let source_badge = entry
+            .map(|e| e.source.clone())
+            .unwrap_or_else(|| "No dictionary".to_string());
 
         match self.side {
             CardSide::Front => {
@@ -365,7 +375,7 @@ impl Screen for FlashcardsScreen {
                     badge_y + pt(13.0),
                     8.5,
                     60,
-                    &cefr_badge,
+                    &source_badge,
                 );
 
                 p.text_center(card_y + card_h - pt(30.0), 9.0, 120, "Tap card to flip");
@@ -379,46 +389,23 @@ impl Screen for FlashcardsScreen {
                     top_y - pt(2.0),
                     8.5,
                     90,
-                    &cefr_badge,
+                    &source_badge,
                 );
                 top_y += pt(10.0);
                 p.hline_t(top_y, card_x + pt(18.0), card_x + card_w - pt(18.0), 1, 220);
 
                 top_y += pt(24.0);
                 if let Some(e) = entry {
-                    if !e.gloss_ru.is_empty() {
-                        p.text(card_x + pt(20.0), top_y, 8.0, 110, "РУССКИЙ ПЕРЕВОД");
-                        top_y += pt(16.0);
-                        p.text(card_x + pt(20.0), top_y, 13.0, 0, &e.gloss_ru);
-                        top_y += pt(26.0);
-                    }
+                    p.text(card_x + pt(20.0), top_y, 8.0, 110, "MEANING");
+                    top_y += pt(16.0);
 
-                    if !e.gloss_en.is_empty() {
-                        p.text(card_x + pt(20.0), top_y, 8.0, 110, "ENGLISH DEFINITION");
-                        top_y += pt(16.0);
-
-                        // Wrap English definition text
-                        let max_w = (card_w - pt(40.0)) as f32;
-                        let mut cur_line = String::new();
-                        for word in e.gloss_en.split_whitespace() {
-                            let test = if cur_line.is_empty() {
-                                word.to_string()
-                            } else {
-                                format!("{} {}", cur_line, word)
-                            };
-                            if p.text_width(10.0, &test) > max_w {
-                                if !cur_line.is_empty() {
-                                    p.text(card_x + pt(20.0), top_y, 10.0, 30, &cur_line);
-                                    top_y += pt(15.0);
-                                }
-                                cur_line = word.to_string();
-                            } else {
-                                cur_line = test;
-                            }
-                        }
-                        if !cur_line.is_empty() {
-                            p.text(card_x + pt(20.0), top_y, 10.0, 30, &cur_line);
-                        }
+                    // Wrap the meaning text, preserving WordNet's sense
+                    // blocks (hard newlines) — same wrapping the word card
+                    // uses, so "1. gloss" / example lines stay apart.
+                    let max_w = (card_w - pt(40.0)) as f32;
+                    for line in crate::word_dialog::wrap_lines(p, &e.meaning, max_w, 10.0) {
+                        p.text(card_x + pt(20.0), top_y, 10.0, 30, &line);
+                        top_y += pt(15.0);
                     }
                 }
 
@@ -535,5 +522,66 @@ impl Screen for FlashcardsScreen {
             Gesture::Swipe { .. } => Action::Pop,
             _ => Action::Keep,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn save_preview_artifact(name: &str, canvas: &[u8]) {
+        let artifact_dir = match std::env::var("YB_AI_PREVIEW_DIR")
+            .or_else(|_| std::env::var("ARTIFACT_DIR"))
+        {
+            Ok(d) if !d.is_empty() => d,
+            _ => return,
+        };
+        let path = std::path::Path::new(&artifact_dir).join(name);
+        if let Ok(file) = std::fs::File::create(&path) {
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            if let Ok(mut w) = enc.write_header() {
+                let _ = w.write_image_data(canvas);
+            }
+        }
+    }
+
+    // The default-deployment card back: builtin WordNet only (no user
+    // translation dictionaries), so the back must render the definition —
+    // never a blank card. FlashcardDeck::load() has no test path override,
+    // so the deck/entry fields are set directly; the meaning is the exact
+    // two-sense markup the build_wordnet fixture pins in dictionary.rs.
+    #[test]
+    fn flashcard_back_renders_preview() {
+        let font = yui::font::Font::load().unwrap();
+        let (mut canvas, mut panel) = (vec![255u8; 1236 * 1648], vec![255u8; 1248 * 1648]);
+        let mut p = yui::Painter::new(
+            &mut panel,
+            1236,
+            1648,
+            1248,
+            yui::Orientation::Portrait,
+            &mut canvas,
+            &font,
+        );
+
+        let mut s = FlashcardsScreen::new();
+        s.due_queue = vec!["power plant".to_string()];
+        s.current_idx = 0;
+        s.side = CardSide::Back;
+        s.current_entry = Some(crate::dictionary::DictEntry {
+            word: "power plant".to_string(),
+            meaning: "1. buildings for carrying on industrial labor\n\"they built a large factory\" · \"the plant employs 500 workers\"\n2. put or set (seeds or seedlings) into the ground\n\"plant the seedlings in spring\"".to_string(),
+            source: "WordNet".to_string(),
+        });
+
+        s.draw(&mut p);
+        save_preview_artifact("flashcard_back_preview.png", &canvas);
+
+        let lit = canvas.iter().filter(|&&b| b > 200).count();
+        assert!(lit > 1236 * 1648 * 60 / 100, "card back is mostly white");
+        let ink = canvas.iter().filter(|&&b| b < 100).count();
+        assert!(ink > 1000, "card back carries real text ink");
     }
 }

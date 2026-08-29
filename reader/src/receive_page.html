@@ -146,6 +146,13 @@ body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webki
 .drop-title span { color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; }
 .drop-subtitle { font-size: 0.78rem; color: var(--text-dim); }
 
+/* Dictionaries instructions */
+.dict-instructions { margin: 14px 0 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px 14px; font-size: 0.82rem; color: var(--text-dim); line-height: 1.55; }
+.dict-step { margin-bottom: 6px; }
+.dict-step:last-child { margin-bottom: 0; }
+.dict-instructions a { color: var(--accent); }
+.dict-instructions code { background: rgba(255,255,255,0.07); padding: 1px 5px; border-radius: 4px; }
+
 /* Action & Search Bar */
 .action-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .search-input-wrap { position: relative; flex: 1; min-width: 220px; }
@@ -608,6 +615,10 @@ body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webki
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
         Screensavers
       </button>
+      <button class="nav-tab" id="tab-dictionaries" onclick="setRoot('dictionaries')">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M9 7h6"/><path d="M9 11h6"/></svg>
+        Dictionaries
+      </button>
     </nav>
 
     <div class="nav-stats">
@@ -639,6 +650,13 @@ body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webki
     </div>
     <div class="drop-title" id="drop-title">Drag & drop books here, or <span>browse</span></div>
     <div class="drop-subtitle" id="drop-subtitle">Supports EPUB, PDF, CBZ, FB2, TXT</div>
+  </div>
+
+  <!-- Dictionaries instructions (shown on the Dictionaries tab) -->
+  <div class="dict-instructions" id="dict-instructions" style="display:none;">
+    <div class="dict-step"><b>1.</b> Get a free FreeDict dictionary — <a href="https://freedict.org" target="_blank" rel="noopener">freedict.org</a> has hundreds; pick the <b>src</b> download (<code>*.src.tar.xz</code>) for your language pair.</div>
+    <div class="dict-step"><b>2.</b> Upload the <code>.src.tar.xz</code> archive you downloaded — or just its <code>.tei</code> file — or over USB, unpack the archive into <code>dictionaries/</code> on the Kindle (top level, next to <code>documents/</code>).</div>
+    <div class="dict-step"><b>3.</b> On the Kindle: <b>System → Dictionaries</b>, tap the dictionary to build it, then tap again to activate. In a book, long-press a word and tap the dictionary label on the card to switch dictionaries — the book remembers your pick. English words always get the built-in <b>WordNet</b> definition.</div>
   </div>
 
   <!-- Action Bar -->
@@ -744,6 +762,7 @@ const storageText = document.getElementById('storage-text');
 const newFolderBtn = document.getElementById('new-folder-btn');
 const dropTitle = document.getElementById('drop-title');
 const dropSubtitle = document.getElementById('drop-subtitle');
+const dictInstructions = document.getElementById('dict-instructions');
 const hud = document.getElementById('upload-hud');
 const hudTitle = document.getElementById('hud-title');
 const hudPct = document.getElementById('hud-pct');
@@ -762,6 +781,7 @@ function setRoot(r) {
   curDir = '';
   document.getElementById('tab-books').classList.toggle('active', r === 'documents');
   document.getElementById('tab-screensavers').classList.toggle('active', r === 'screensavers');
+  document.getElementById('tab-dictionaries').classList.toggle('active', r === 'dictionaries');
   
   if (r === 'screensavers') {
     newFolderBtn.style.display = 'none';
@@ -770,12 +790,22 @@ function setRoot(r) {
     dropTitle.innerHTML = 'Drag & drop screensavers here, or <span>browse</span>';
     dropSubtitle.textContent = 'Supports JPG, PNG · Optimized for 1236 × 1648 Paperwhite display';
     f.accept = '.png,.jpg,.jpeg';
+    dictInstructions.style.display = 'none';
+  } else if (r === 'dictionaries') {
+    newFolderBtn.style.display = 'none';
+    breadcrumbs.style.display = 'none';
+    searchInput.placeholder = 'Filter dictionaries...';
+    dropTitle.innerHTML = 'Drag & drop a dictionary file here, or <span>browse</span>';
+    dropSubtitle.textContent = 'Upload a FreeDict *.src.tar.xz from freedict.org (.tar.xz / .tar.gz / .zip) or the .tei / .ybdict file';
+    f.accept = '.tei,.ybdict,.zip,.tar,.gz,.xz,.tgz';
+    dictInstructions.style.display = 'block';
   } else {
     newFolderBtn.style.display = 'inline-flex';
     searchInput.placeholder = 'Filter books...';
     dropTitle.innerHTML = 'Drag & drop books here, or <span>browse</span>';
     dropSubtitle.textContent = 'Supports EPUB, PDF, CBZ, FB2, TXT';
     f.accept = '.epub,.pdf,.cbz,.fb2,.txt';
+    dictInstructions.style.display = 'none';
   }
   searchInput.value = '';
   load(curDir);
@@ -853,7 +883,8 @@ function renderContent(data) {
   const files = data.files || [];
   
   if (folders.length === 0 && files.length === 0) {
-    contentCont.innerHTML = `<div class="empty-box">No ${root === 'screensavers' ? 'screensavers' : 'books'} found in this directory.</div>`;
+    const label = root === 'screensavers' ? 'screensavers' : (root === 'dictionaries' ? 'dictionaries' : 'books');
+    contentCont.innerHTML = `<div class="empty-box">No ${label} found in this directory.</div>`;
     return;
   }
 
@@ -910,7 +941,8 @@ function renderContent(data) {
   }
 
   if (files.length > 0) {
-    html += `<div class="section-label">Books (${files.length})</div><div class="books-table" id="items-table">`;
+    const fileLabel = root === 'dictionaries' ? 'Dictionary files' : 'Books';
+    html += `<div class="section-label">${fileLabel} (${files.length})</div><div class="books-table" id="items-table">`;
     for (const file of files) {
       const fileUrl = withToken('/api/file?root=' + root + '&dir=' + encodeURIComponent(curDir) + '&name=' + encodeURIComponent(file.name));
       let badgeClass = '';

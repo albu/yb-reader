@@ -36,6 +36,11 @@ fn save_dir() -> String {
 /// documents/ but never appear in the library. (mobi/azw3 are refused —
 /// there is no parser for them; converting to epub is the supported path.)
 const OK_EXTS: [&str; 5] = ["epub", "pdf", "fb2", "txt", "cbz"];
+/// FreeDict TEI sources accepted by the Dictionaries tab (plus archives
+/// of them, and the already-converted .ybdict).
+const DICT_EXTS: [&str; 7] = [
+    "tei", "ybdict", "zip", "tar", "gz", "xz", "tgz",
+];
 /// The screensaver root accepts exactly what the sleep screen renders.
 const SS_EXTS: [&str; 3] = ["png", "jpg", "jpeg"];
 /// The companion source zip the receive page offers ("Companion (macOS)").
@@ -54,6 +59,9 @@ fn base_dir(root: Option<&str>) -> Option<String> {
         "screensavers" => {
             Some(std::env::var("YB_SS_DIR").unwrap_or_else(|_| "/mnt/us/screensavers".to_string()))
         }
+        "dictionaries" => Some(
+            std::env::var("YB_DICT_DIR").unwrap_or_else(|_| crate::dictionary::DICT_DIR.to_string()),
+        ),
         _ => None,
     }
 }
@@ -604,6 +612,184 @@ fn sanitize_rel_dir(d: &str) -> Option<std::path::PathBuf> {
     Some(clean)
 }
 
+/// True when an uploaded dictionary file is an archive to extract
+/// (zip / tar / tar.gz / tgz / tar.xz).
+fn is_dict_archive(name: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    l.ends_with(".zip")
+        || l.ends_with(".tar")
+        || l.ends_with(".tar.gz")
+        || l.ends_with(".tgz")
+        || l.ends_with(".tar.xz")
+}
+
+/// Dictionary source files we extract out of an archive (everything else
+/// in a FreeDict src archive — the DTD, CSS, Makefile, README — is
+/// dropped), plus ready-made `.ybdict`s.
+fn is_dict_file(rel: &str) -> bool {
+    let l = rel.to_ascii_lowercase();
+    l.ends_with(".tei") || l.ends_with(".ybdict")
+}
+
+fn sanitize_archive_rel(name: &str) -> Result<String, String> {
+    let name = name.replace('\\', "/");
+    if name.starts_with('/') || name.split('/').any(|c| c == "..") {
+        return Err("unsafe archive path".to_string());
+    }
+    let trimmed = name.trim_matches('/');
+    if trimmed.is_empty() {
+        return Err("empty archive path".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Extract a FreeDict source archive into `base` (the dictionaries
+/// folder), keeping the archive's folder structure. Returns the number of
+/// files written; rejects path traversal and bounds the total extracted
+/// size.
+fn extract_dictionary_archive(path: &str, base: &str, name: &str) -> Result<usize, String> {
+    use std::io::Read;
+    use std::io::Write;
+    const MAX_TOTAL: u64 = 256 * 1024 * 1024;
+
+    /// A writer that refuses to accept more than MAX_TOTAL bytes: the
+    /// lzma path decompresses into it, so a legit 30 MB .tar.xz that
+    /// inflates to hundreds of MB errors out instead of OOM-killing the
+    /// 32-bit reader (lzma-rs offers no cap on its own).
+    struct BudgetWriter<W: Write> {
+        inner: W,
+        n: u64,
+    }
+    impl<W: Write> Write for BudgetWriter<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.n + buf.len() as u64 > MAX_TOTAL {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "archive too large",
+                ));
+            }
+            self.n += buf.len() as u64;
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    /// Removes a scratch file on scope exit (success or failure).
+    struct TempFile(std::path::PathBuf);
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn extract_one(
+        base: &std::path::Path,
+        rel: &str,
+        r: &mut dyn Read,
+        count: &mut usize,
+        total: &mut u64,
+        written: &mut Vec<std::path::PathBuf>,
+    ) -> Result<(), String> {
+        let rel = sanitize_archive_rel(rel)?;
+        if !is_dict_file(&rel) {
+            return Ok(());
+        }
+        let out = base.join(&rel);
+        if let Some(p) = out.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        let mut f = std::io::BufWriter::new(
+            std::fs::File::create(&out).map_err(|e| e.to_string())?,
+        );
+        let n = std::io::copy(r, &mut f).map_err(|e| e.to_string())?;
+        *total += n;
+        if *total > MAX_TOTAL {
+            return Err("archive too large".to_string());
+        }
+        written.push(out);
+        *count += 1;
+        Ok(())
+    }
+
+    let base = std::path::Path::new(base);
+    let lower = name.to_ascii_lowercase();
+    let mut count = 0usize;
+    let mut total: u64 = 0;
+    let mut written: Vec<std::path::PathBuf> = Vec::new();
+
+    let result = (|| -> Result<usize, String> {
+        if lower.ends_with(".zip") {
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut z = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+            for i in 0..z.len() {
+                let mut entry = z.by_index(i).map_err(|e| e.to_string())?;
+                if entry.is_dir() {
+                    continue;
+                }
+                let rel = entry.name().to_string();
+                extract_one(&base, &rel, &mut entry, &mut count, &mut total, &mut written)?;
+            }
+        } else {
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut scratch: Option<TempFile> = None;
+            let rd: Box<dyn Read> = if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+                Box::new(flate2::read::GzDecoder::new(file))
+            } else if lower.ends_with(".tar.xz") {
+                let mut reader = std::io::BufReader::new(file);
+                static XZ_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let scratch_path = std::env::temp_dir().join(format!(
+                    "yb_dict_xz_{}_{}",
+                    std::process::id(),
+                    XZ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                scratch = Some(TempFile(scratch_path.clone()));
+                let mut outf = std::fs::File::create(&scratch_path).map_err(|e| e.to_string())?;
+                {
+                    let mut budget = BudgetWriter { inner: &mut outf, n: 0 };
+                    lzma_rs::xz_decompress(&mut reader, &mut budget)
+                        .map_err(|e| e.to_string())?;
+                }
+                Box::new(std::fs::File::open(&scratch_path).map_err(|e| e.to_string())?)
+            } else {
+                Box::new(file)
+            };
+            let mut ar = tar::Archive::new(rd);
+            for entry in ar.entries().map_err(|e| e.to_string())? {
+                let mut e = entry.map_err(|e| e.to_string())?;
+                if !e.header().entry_type().is_file() {
+                    continue;
+                }
+                let rel = e
+                    .path()
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .into_owned();
+                extract_one(&base, &rel, &mut e, &mut count, &mut total, &mut written)?;
+            }
+            // Keep `scratch` alive until after the archive is read (its
+            // Drop removes the temp file; the read also silences the
+            // never-read lint on a guard that only exists for cleanup).
+            let _ = &scratch;
+        }
+
+        if count == 0 {
+            return Err("no dictionary files in archive".to_string());
+        }
+        Ok(count)
+    })();
+
+    if result.is_err() {
+        // Roll back: a mid-archive failure must not leave a half-installed
+        // set that scan() lists and the importer then trips over.
+        for p in &written {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    result
+}
+
 fn sanitize_folder_name(name: &str) -> Option<String> {
     let s = name.trim();
     if s.is_empty()
@@ -965,6 +1151,7 @@ fn handle_conn(
             let mut folders = Vec::new();
             let mut files = Vec::new();
             let ss_root = root_param(query_str).as_deref() == Some("screensavers");
+            let dict_root = root_param(query_str).as_deref() == Some("dictionaries");
 
             if let Ok(rd) = std::fs::read_dir(&target_dir) {
                 for e in rd.flatten() {
@@ -986,6 +1173,8 @@ fn handle_conn(
                                 .unwrap_or_default();
                             let ok = if ss_root {
                                 SS_EXTS.contains(&ext.as_str())
+                            } else if dict_root {
+                                DICT_EXTS.contains(&ext.as_str())
                             } else {
                                 OK_EXTS.contains(&ext.as_str())
                             };
@@ -1396,6 +1585,7 @@ fn handle_conn(
                 return;
             };
             let ss_root = root.as_deref() == Some("screensavers");
+            let dict_root = root.as_deref() == Some("dictionaries");
 
             let rel_dir = query_param(query_str, "dir").unwrap_or_default();
             let Some(clean_rel) = sanitize_rel_dir(&rel_dir) else {
@@ -1415,8 +1605,15 @@ fn handle_conn(
                 return;
             };
             // The allowlist is per-root: books in documents, exactly the
-            // renderable image types in screensavers.
-            let allow: &[&str] = if ss_root { &SS_EXTS } else { &OK_EXTS };
+            // renderable image types in screensavers, dictionary parts in
+            // the dictionaries folder.
+            let allow: &[&str] = if ss_root {
+                &SS_EXTS
+            } else if dict_root {
+                &DICT_EXTS
+            } else {
+                &OK_EXTS
+            };
             let ext_ok = name
                 .rsplit('.')
                 .next()
@@ -1459,7 +1656,46 @@ fn handle_conn(
 
             match write_body(&mut stream, &body_prefix, len, &part_str, &final_str) {
                 Ok(()) => {
-                    let msg = format!("{} ({:.1} MB)", name, len as f64 / 1048576.0);
+                    let mut msg = format!("{} ({:.1} MB)", name, len as f64 / 1048576.0);
+                    if dict_root && is_dict_archive(&name) {
+                        match extract_dictionary_archive(&final_str, &base, &name) {
+                            Ok(n) => {
+                                let _ = std::fs::remove_file(&final_str);
+                                msg = format!("extracted {n} dictionary file(s) from {name}");
+                            }
+                            Err(e) => {
+                                let _ = std::fs::remove_file(&final_str);
+                                plog(&format!("receive: archive extract failed {} — {}", name, e));
+                                respond(
+                                    &mut stream,
+                                    400,
+                                    "Bad Request",
+                                    "text/plain",
+                                    &format!("bad archive: {}\n", e),
+                                );
+                                return;
+                            }
+                        }
+                    } else if dict_root
+                        && (name.to_ascii_lowercase().ends_with(".gz")
+                            || name.to_ascii_lowercase().ends_with(".xz"))
+                    {
+                        // Bare single-file compression is not a FreeDict
+                        // distribution (their src releases are .tar.xz /
+                        // .tar.gz / .zip archives) and can't be imported.
+                        // Don't leave a file that scan() lists but can
+                        // never use.
+                        let _ = std::fs::remove_file(&final_str);
+                        plog(&format!("receive: refused bare {} in dictionaries", name));
+                        respond(
+                            &mut stream,
+                            415,
+                            "Unsupported Media Type",
+                            "text/plain",
+                            "bare .gz/.xz is not supported — upload the .tei file itself, or a .tar.gz / .tar.xz / .zip archive\n",
+                        );
+                        return;
+                    }
                     *last.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
                     received.fetch_add(1, Ordering::Relaxed);
                     plog(&format!(
@@ -1943,6 +2179,25 @@ mod tests {
     /// and start real listeners, so they must not run concurrently.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[test]
+    fn archive_rel_sanitizer_rejects_traversal_and_absolute() {
+        // Defense in depth: the tar/zip crates also refuse `..`, but our
+        // own layer must reject it too if one of them ever doesn't.
+        assert!(sanitize_archive_rel("../evil.tei").is_err());
+        assert!(sanitize_archive_rel("a/../../evil.tei").is_err());
+        assert!(sanitize_archive_rel("/abs/evil.tei").is_err());
+        assert!(sanitize_archive_rel("").is_err());
+        assert!(sanitize_archive_rel("eng-ru/eng-ru.tei").is_ok());
+        assert!(sanitize_archive_rel("eng-ru\\eng-ru.tei").is_ok());
+        assert!(is_dict_file("eng-ru/eng-ru.tei"));
+        assert!(is_dict_file("eng-ru/eng-rus.ybdict"));
+        // A FreeDict src archive ships DTD/schema files; only the
+        // dictionary source is extracted.
+        assert!(!is_dict_file("eng-ru/freedict-P5.dtd"));
+        assert!(!is_dict_file("eng-ru/README"));
+        assert!(!is_dict_file("eng-ru/eng-ru.ifo"));
+    }
+
     /// Inject `t=<pin>` into a raw test request's target so it passes the
     /// session gate. Handles targets with or without an existing query;
     /// headers and body pass through untouched.
@@ -2189,6 +2444,248 @@ mod tests {
             String::from_utf8_lossy(&resp)
         );
         assert!(!ss_dir.join("book.epub").exists());
+
+        // ---- dictionaries root -----------------------------------------
+        // A dictionary part lands in the dictionaries dir; a book is
+        // refused there (the reader can't open an epub as a dictionary).
+        let dict_dir = std::env::temp_dir().join("yb-receive-dict-test");
+        let _ = std::fs::remove_dir_all(&dict_dir);
+        std::fs::create_dir_all(&dict_dir).unwrap();
+        std::env::set_var("YB_DICT_DIR", dict_dir.to_str().unwrap());
+
+        let tei = b"<TEI xmlns=\"http://www.tei-c.org/ns/1.0\"/>";
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                &format!(
+                    "POST /upload?root=dictionaries&name=en-ru.tei HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+                    tei.len()
+                ),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        c.write_all(tei).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(
+            resp.starts_with(b"HTTP/1.1 200"),
+            "dict tei upload: {}",
+            String::from_utf8_lossy(&resp)
+        );
+        assert_eq!(std::fs::read(dict_dir.join("en-ru.tei")).unwrap(), tei);
+
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(&pin, "POST /upload?root=dictionaries&name=book.epub HTTP/1.1\r\nHost: t\r\nContent-Length: 2\r\n\r\nhi")
+                .as_bytes(),
+        )
+        .unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(
+            resp.starts_with(b"HTTP/1.1 415"),
+            "epub must be refused in dictionaries: {}",
+            String::from_utf8_lossy(&resp)
+        );
+        assert!(!dict_dir.join("book.epub").exists());
+
+        // A bare single-file .gz is not a FreeDict distribution and would
+        // be unimportable — it must be refused, not stored silently.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                "POST /upload?root=dictionaries&name=en-ru.tei.gz HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\n\r\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        c.write_all(b"gz!").unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(
+            resp.starts_with(b"HTTP/1.1 415"),
+            "bare .gz must be refused in dictionaries: {}",
+            String::from_utf8_lossy(&resp)
+        );
+        assert!(!dict_dir.join("en-ru.tei.gz").exists());
+
+        // ---- dictionary archive upload --------------------------------
+        // A .tar.gz of a FreeDict src folder extracts into the
+        // dictionaries dir (folder structure kept, archive itself
+        // removed); a traversal
+        // path inside the archive is rejected.
+        use std::io::Write as _;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut b = tar::Builder::new(&mut enc);
+            for (path, data) in [
+                (
+                    "eng-ru/eng-ru.tei",
+                    "<TEI xmlns=\"http://www.tei-c.org/ns/1.0\"/>".as_bytes(),
+                ),
+                // FreeDict src archives ship DTD/schema files next to the
+                // dictionary; the extraction filter must skip them.
+                ("eng-ru/freedict-P5.dtd", b"<!ELEMENT TEI ANY>".as_slice()),
+            ] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(data.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                b.append_data(&mut h, path, data).unwrap();
+            }
+            b.finish().unwrap();
+        }
+        let gz = enc.finish().unwrap();
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                &format!(
+                    "POST /upload?root=dictionaries&name=eng-ru.tar.gz HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+                    gz.len()
+                ),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        c.write_all(&gz).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(
+            resp.starts_with(b"HTTP/1.1 200"),
+            "tar.gz upload: {}",
+            String::from_utf8_lossy(&resp)
+        );
+        assert!(dict_dir.join("eng-ru").join("eng-ru.tei").exists());
+        assert!(!dict_dir.join("eng-ru").join("freedict-P5.dtd").exists());
+        assert!(!dict_dir.join("eng-ru.tar.gz").exists());
+
+        // ---- .tar.xz archive upload --------------------------------
+        // Same flow, xz compression (exercises the budgeted temp-file
+        // decompression path).
+        let mut xz_out = Vec::new();
+        {
+            let mut b = tar::Builder::new(std::io::Cursor::new(&mut xz_out));
+            let data = b"<TEI xmlns=\"http://www.tei-c.org/ns/1.0\"/>".as_slice();
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, "xz-test/xz-test.tei", data).unwrap();
+            b.finish().unwrap();
+        }
+        let mut enc = Vec::new();
+        {
+            let mut c = std::io::Cursor::new(&mut enc);
+            lzma_rs::xz_compress(
+                &mut std::io::Cursor::new(xz_out),
+                &mut c,
+            )
+            .unwrap();
+        }
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                &format!(
+                    "POST /upload?root=dictionaries&name=xz-test.tar.xz HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+                    enc.len()
+                ),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        c.write_all(&enc).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(
+            resp.starts_with(b"HTTP/1.1 200"),
+            "tar.xz upload: {}",
+            String::from_utf8_lossy(&resp)
+        );
+        assert!(dict_dir.join("xz-test").join("xz-test.tei").exists());
+        assert!(!dict_dir.join("xz-test.tar.xz").exists());
+
+        // ---- zip bomb / traversal rollback -------------------------
+        // A good member followed by a traversal path must 400 and remove
+        // the already-extracted member — no half-installed set.
+        let mut zb = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zb.start_file("bomb/bomb.tei", opts).unwrap();
+        zb.write_all(b"<TEI/>").unwrap();
+        zb.start_file("../../evil.tei", opts).unwrap();
+        zb.write_all(b"evil").unwrap();
+        let zbytes = zb.finish().unwrap().into_inner();
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                &format!(
+                    "POST /upload?root=dictionaries&name=bomb.zip HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\n\r\n",
+                    zbytes.len()
+                ),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        c.write_all(&zbytes).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        assert!(
+            resp.starts_with(b"HTTP/1.1 400"),
+            "traversal zip must fail: {}",
+            String::from_utf8_lossy(&resp)
+        );
+        assert!(
+            !dict_dir.join("bomb").join("bomb.tei").exists(),
+            "partial extraction must roll back"
+        );
+        assert!(!dict_dir.join("bomb").exists() || dict_dir.join("bomb").read_dir().unwrap().next().is_none());
+
+        // ---- dictionaries root list & selection API -------------------
+        // The Dictionaries tab lists the extracted parts (DICT_EXTS, not
+        // OK_EXTS), and the selection API carries only per-language
+        // defaults — no primary/secondary.
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                "GET /api/list?root=dictionaries HTTP/1.1\r\nHost: t\r\n\r\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(
+            resp_str.starts_with("HTTP/1.1 200"),
+            "dict list: {}",
+            resp_str
+        );
+        assert!(resp_str.contains("en-ru.tei"), "{}", resp_str);
+        assert!(resp_str.contains("\"eng-ru\""), "{}", resp_str);
+
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(
+            with_pin(
+                &pin,
+                "GET /api/list?root=dictionaries&dir=eng-ru HTTP/1.1\r\nHost: t\r\n\r\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(
+            resp_str.contains("eng-ru.tei"),
+            "nested dict file must list: {}",
+            resp_str
+        );
 
         // Flat root: mkdir and move are refused server-side, not just
         // hidden in the UI.

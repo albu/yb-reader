@@ -73,6 +73,27 @@ ssh_deploy() {
         scp -o ConnectTimeout=10 -q "$ROOT/companion/dist/yb-mirror.zip" "$HOST:/mnt/us/documents/yb-mirror.zip" || true
     fi
 
+    # Builtin WordNet dictionary (English glosses) — built locally by
+    # tools/build_wordnet, never committed (third-party data). Copy only
+    # when present, so a fresh clone without the source still deploys.
+    # Hash-gated: the 17 MB scp is ~7 s of the loop (ssh to the device
+    # runs ~2.3 MB/s), and the blob changes only on a WordNet rebuild —
+    # a device-side sha256sum round-trip costs ~1.3 s, so routine deploys
+    # skip the copy entirely.
+    if [ -f "$ROOT/resources/wordnet.ybdict" ]; then
+        local_sha=$(shasum -a 256 "$ROOT/resources/wordnet.ybdict" | awk '{print $1}')
+        remote_sha=$($SSHC "$HOST" "sha256sum /mnt/us/extensions/reader/data/wordnet.ybdict 2>/dev/null" | awk '{print $1}' || true)
+        if [ "$local_sha" != "$remote_sha" ]; then
+            $SSHC "$HOST" "mkdir -p /mnt/us/extensions/reader/data"
+            scp -o ConnectTimeout=10 -q "$ROOT/resources/wordnet.ybdict" "$HOST:/mnt/us/extensions/reader/data/wordnet.ybdict" || true
+        else
+            echo "wordnet.ybdict unchanged — skipping scp"
+        fi
+    else
+        echo "WARNING: resources/wordnet.ybdict missing — builtin WordNet will not be deployed."
+        echo "         Build it with: python3 tools/build_wordnet/build_wordnet.py <WordNet-3.0>/dict resources/wordnet.ybdict"
+    fi
+
     scp -o ConnectTimeout=10 -q "$BIN" "$HOST:$STAGE_DST"
     s=$(shasum -a 256 "$BIN" | awk '{print $1}')
     d=$($SSHC "$HOST" "sha256sum $STAGE_DST" | awk '{print $1}')
@@ -187,6 +208,10 @@ if [ "$1" = "usb" ]; then
     chmod +x /Volumes/Kindle/documents/YBReader.sh
     if [ -f "$ROOT/companion/dist/yb-mirror.zip" ]; then
         cp "$ROOT/companion/dist/yb-mirror.zip" /Volumes/Kindle/documents/yb-mirror.zip
+    fi
+    if [ -f "$ROOT/resources/wordnet.ybdict" ]; then
+        mkdir -p /Volumes/Kindle/extensions/reader/data
+        cp "$ROOT/resources/wordnet.ybdict" /Volumes/Kindle/extensions/reader/data/wordnet.ybdict
     fi
     echo "Direct install -> extensions/reader + documents/YBReader.sh"
     ls -lh "$EXT/bin/reader"

@@ -1,27 +1,38 @@
-//! Screensaver rotation manager (System → Screensavers). Lists every
-//! image the sleep screen's picker can draw (yui::widgets owns the
-//! rotation) with a checkbox per row: deselected images leave the
-//! rotation immediately — the picker rereads the list on every sleep.
-//! Images get onto the device the boring ways: USB (the mounted drive's
-//! `screensavers/` folder — the picker's first-choice dir), the web
-//! manager, or scp.
-
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ybdev::input::{Gesture, SwipeDir};
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
 const PAD_PT: f32 = 18.0;
-const TITLE_BASE_PT: f32 = 30.0;
-const TITLE_SIZE_PT: f32 = 13.0;
-const ROWS_TOP_PT: f32 = 66.0;
-const ROW_H_PT: f32 = 26.0;
-const NAME_PT: f32 = 9.0;
-const FOOT_PT: f32 = 7.0;
 
-const DIM: u8 = 110;
+// Persistent Header
+const HDR_RULE_PT: f32 = 20.0;
+const TRIVIA_BASE_PT: f32 = 34.0;
+const TRIVIA_RULE_PT: f32 = 42.0;
+
+// Section
+const SEC_LABEL_PT: f32 = 52.0;
+const ROWS_TOP_PT: f32 = 60.0;
+const ROW_H_PT: f32 = 38.0;
+
+const THUMB_W_PT: f32 = 21.0;
+const THUMB_H_PT: f32 = 28.0;
+
+const FOOTER_BASE_PT: f32 = 372.0;
+
 const INK: u8 = 0;
+const DIM: u8 = 110;
+const MUTED: u8 = 160;
+const DIVIDER: u8 = 220;
+
+/// The thumbnail size both the boot prewarm and the screen's rows request.
+/// The disk cache encodes the exact size in the filename and header, so a
+/// mismatch between the two call sites silently wastes the entire prewarm
+/// pass — keep them on one source of truth (pinned by a test).
+fn thumb_size() -> (i32, i32) {
+    (pt(THUMB_W_PT), pt(THUMB_H_PT))
+}
 
 /// Same dirs, same order, as yui's picker — this screen manages what
 /// that code draws. Defaults to device directories, plus optional YB_SCREENSAVER_DIR for dev/tests.
@@ -42,8 +53,21 @@ pub struct ScreensaversScreen {
     /// (file name, bytes) — display order.
     files: Vec<(String, u64)>,
     disabled: HashSet<String>,
+    thumbnails: HashMap<String, ThumbState>,
+    thumb_rx: Option<std::sync::mpsc::Receiver<(String, Option<Vec<u8>>)>>,
+    thumb_tx: std::sync::mpsc::Sender<(String, Option<Vec<u8>>)>,
     offset: usize,
     per_page: usize,
+}
+
+/// Thumbnail state for one screensaver row: `Pending` while the
+/// background worker decodes, `Ready` with the bytes, or `Failed` — a
+/// terminal state, so a rejected image stops being polled and the screen
+/// settles back to its slow tick instead of spinning at 150 ms forever.
+enum ThumbState {
+    Pending,
+    Ready(Vec<u8>),
+    Failed,
 }
 
 fn is_image(p: &std::path::Path) -> bool {
@@ -63,6 +87,17 @@ fn is_image(p: &std::path::Path) -> bool {
             .as_deref(),
         Some("png") | Some("jpg") | Some("jpeg")
     )
+}
+
+/// Find the absolute path of a screensaver file by scanning known directories.
+fn find_image_path(name: &str) -> Option<std::path::PathBuf> {
+    for d in screensaver_dirs() {
+        let p = std::path::Path::new(&d).join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// The union of all rotation dirs, sorted, deduped by file name.
@@ -122,13 +157,17 @@ fn save_disabled(disabled: &HashSet<String>) {
 
 impl ScreensaversScreen {
     pub fn new() -> ScreensaversScreen {
+        let (thumb_tx, thumb_rx) = std::sync::mpsc::channel();
         ScreensaversScreen {
             w: 1236,
             h: 1648,
             files: scan(),
             disabled: load_disabled(),
+            thumbnails: HashMap::new(),
+            thumb_rx: Some(thumb_rx),
+            thumb_tx,
             offset: 0,
-            per_page: 1,
+            per_page: 7,
         }
     }
 
@@ -173,13 +212,85 @@ impl ScreensaversScreen {
         }
     }
 
-    fn draw_checkbox(p: &mut Painter, x: i32, cy: i32, on: bool) {
-        let s = pt(6.5);
-        let r = Rect::new(x, cy - s / 2, s, s);
-        p.rect_outline_t(r, 1, INK);
-        if on {
-            let i = pt(1.6);
-            p.rect(Rect::new(r.x + i, r.y + i, r.w - 2 * i, r.h - 2 * i), INK);
+    fn draw_persistent_header(p: &mut Painter, w: i32, pad: i32) {
+        let t = crate::chrome::current_time_str();
+        let (cap, plugged) = ybdev::sysinfo::battery();
+        let bat = if plugged {
+            format!("+{}%", cap)
+        } else {
+            format!("{}%", cap)
+        };
+        let fg = 120;
+
+        // Left: Time
+        p.text(pad, pt(14.0), 7.0, fg, &t);
+
+        // Center: Title
+        p.text_center(pt(14.0), 7.5, INK, "Screensavers");
+
+        // Right: Wi-Fi glyph + Battery
+        let xr = w - pad;
+        let bat_w = p.text_width(7.0, &bat) as i32;
+        p.text_right(xr, pt(14.0), 7.0, fg, &bat);
+        crate::chrome::draw_wifi_glyph(p, xr - bat_w - pt(6.0), pt(11.5), 7.0, fg);
+
+        // Top divider rule
+        p.hline_t(pt(HDR_RULE_PT), pad, w - pad, 1, 225);
+    }
+
+    fn draw_badge(p: &mut Painter, rx: i32, cy: i32, text: &str, active: bool) {
+        let text_w = p.text_width(7.0, text) as i32;
+        let bw = text_w + pt(12.0);
+        let bh = pt(14.0);
+        let r = Rect::new(rx - bw, cy - bh / 2, bw, bh);
+        if active {
+            p.rect(r, INK);
+            p.text_center_in(r.x, r.x + r.w, cy + pt(2.5), 7.0, 255, text);
+        } else {
+            p.rect_outline_t(r, 1, MUTED);
+            p.text_center_in(r.x, r.x + r.w, cy + pt(2.5), 7.0, DIM, text);
+        }
+    }
+
+    fn get_thumbnail(&mut self, name: &str, tw: u32, th: u32) -> Option<&[u8]> {
+        if !self.thumbnails.contains_key(name) {
+            // 1. Fast non-blocking disk cache check (< 0.5ms)
+            let mut found_cached = None;
+            let mut bytes = None;
+            if let Some(path) = find_image_path(name) {
+                if let Ok(b) = std::fs::read(&path) {
+                    if let Some(cached) = ybdev::img::read_thumb_disk_cached_fast(&b, tw, th) {
+                        found_cached = Some(cached);
+                    } else {
+                        bytes = Some(b);
+                    }
+                }
+            }
+
+            if let Some(cached) = found_cached {
+                self.thumbnails.insert(name.to_string(), ThumbState::Ready(cached));
+            } else {
+                // 2. Mark as in-flight and dispatch background decode worker
+                self.thumbnails.insert(name.to_string(), ThumbState::Pending);
+                let tx = self.thumb_tx.clone();
+                let name_cl = name.to_string();
+                std::thread::Builder::new()
+                    .name("ss-thumb".into())
+                    .spawn(move || {
+                        // Use the bytes already read for the cache key —
+                        // the worker must not re-read the whole file.
+                        let thumb = bytes.and_then(|b| {
+                            ybdev::img::load_image_thumb_disk_cached(&b, tw, th)
+                        });
+                        let _ = tx.send((name_cl, thumb));
+                    })
+                    .ok();
+            }
+        }
+
+        match self.thumbnails.get(name) {
+            Some(ThumbState::Ready(b)) => Some(b.as_slice()),
+            _ => None,
         }
     }
 }
@@ -193,7 +304,8 @@ impl Default for ScreensaversScreen {
 /// Prewarm the disk cache at boot: render every current image once in
 /// a background thread (serial, with a breath between files so a cold
 /// boot's first minute never competes with the UI for CPU). After this
-/// pass every sleep is a plain 2 MB read. The trailing GC drops
+/// pass every sleep is a plain 2 MB read and every screensavers screen
+/// open is an instant 0ms thumbnail read. The trailing GC drops
 /// renders of images that were replaced or deleted since the last
 /// boot — the cache is self-cleaning, nothing accumulates forever.
 pub fn prewarm() {
@@ -213,6 +325,12 @@ pub fn prewarm() {
                     if let Ok(bytes) = std::fs::read(&p) {
                         hashes.push(ybdev::img::fnv1a(&bytes));
                         let _ = ybdev::img::load_image_fitted_disk_cached(&bytes, 1236, 1648);
+                        let (tw, th) = thumb_size();
+                        let _ = ybdev::img::load_image_thumb_disk_cached(
+                            &bytes,
+                            tw as u32,
+                            th as u32,
+                        );
                         std::thread::sleep(std::time::Duration::from_millis(300));
                     }
                 }
@@ -227,7 +345,43 @@ impl Screen for ScreensaversScreen {
         // Opening the manager is also the natural GC point: replaced or
         // deleted images must not leave orphaned render files behind.
         ybdev::img::ss_cache_gc(&Self::current_hashes());
+        self.files = scan();
+        self.disabled = load_disabled();
         Action::Redraw
+    }
+
+    fn tick_interval(&self) -> std::time::Duration {
+        let visible = self.files.len().min(self.offset + self.per_page);
+        let pending = (self.offset..visible).any(|idx| {
+            let (name, _) = &self.files[idx];
+            matches!(self.thumbnails.get(name), None | Some(ThumbState::Pending))
+        });
+        if pending {
+            std::time::Duration::from_millis(150)
+        } else {
+            std::time::Duration::from_secs(10)
+        }
+    }
+
+    fn on_tick(&mut self) -> Action {
+        let mut arrived = false;
+        if let Some(ref rx) = self.thumb_rx {
+            while let Ok((name, thumb)) = rx.try_recv() {
+                self.thumbnails.insert(
+                    name,
+                    match thumb {
+                        Some(b) => ThumbState::Ready(b),
+                        None => ThumbState::Failed,
+                    },
+                );
+                arrived = true;
+            }
+        }
+        if arrived {
+            Action::Redraw
+        } else {
+            Action::Keep
+        }
     }
 
     fn draw(&mut self, p: &mut Painter) {
@@ -238,81 +392,129 @@ impl Screen for ScreensaversScreen {
 
         let pad = pt(PAD_PT);
 
-        p.text(pad, pt(TITLE_BASE_PT), TITLE_SIZE_PT, INK, "Screensavers");
+        // 1. Persistent Ambient Header
+        Self::draw_persistent_header(p, w, pad);
+
+        // 2. Summary Sub-header
         let rotating = self
             .files
             .iter()
             .filter(|(n, _)| self.in_rotation(n))
             .count();
-        p.text_right(
-            w - pad,
-            pt(TITLE_BASE_PT),
-            7.0,
-            DIM,
-            &format!("{} of {} in rotation", rotating, self.files.len()),
-        );
-        p.hline_t(pt(TITLE_BASE_PT) + pt(9.0), pad, w - pad, 2, 180);
+        let total = self.files.len();
+        let summary_str = if total == 0 {
+            "No screensaver images installed".to_string()
+        } else {
+            format!("{rotating} of {total} in rotation")
+        };
+        p.text(pad, pt(TRIVIA_BASE_PT), 6.8, DIM, &summary_str);
+        if total > 0 {
+            p.text_right(w - pad, pt(TRIVIA_BASE_PT), 6.8, MUTED, "Tap to toggle rotation");
+        }
+        p.hline_t(pt(TRIVIA_RULE_PT), pad, w - pad, 1, 235);
+
+        // 3. Section Label
+        p.text(pad, pt(SEC_LABEL_PT), 6.8, MUTED, "LOCK SCREEN IMAGES");
 
         if self.files.is_empty() {
-            p.text_center(h / 2 - pt(4.0), 10.0, INK, "No screensaver images yet");
-            p.text_center(
-                h / 2 + pt(14.0),
-                8.0,
+            let empty_top = pt(ROWS_TOP_PT) + pt(8.0);
+            p.text(pad, empty_top + pt(14.0), 9.5, INK, "No screensaver images yet");
+            p.text(
+                pad,
+                empty_top + pt(30.0),
+                7.5,
                 DIM,
-                "copy .png / .jpg into the Kindle's screensavers/ folder",
+                "Copy .png or .jpg files into the Kindle's screensavers/ folder",
             );
-            p.text_center(
-                h / 2 + pt(28.0),
-                8.0,
+            p.text(
+                pad,
+                empty_top + pt(44.0),
+                7.5,
                 DIM,
-                "(USB drive, the web manager, or scp)",
+                "via Wi-Fi (Receive page), USB storage, or scp.",
             );
             return;
         }
 
         let rows_top = pt(ROWS_TOP_PT);
-        self.per_page = (((h - rows_top - pt(24.0)) / pt(ROW_H_PT)) as usize).max(1);
+        let row_h = pt(ROW_H_PT);
+        self.per_page = 7;
         let visible = self.files.len().min(self.offset + self.per_page);
+
+        let (tw, th) = thumb_size();
+        let tx = pad + tw + pt(10.0);
+        let budget = (p.width_pt() - 2.0 * PAD_PT - THUMB_W_PT - 70.0).max(10.0);
+
         for (i, idx) in (self.offset..visible).enumerate() {
-            let top = rows_top + i as i32 * pt(ROW_H_PT);
-            let (name, sz) = &self.files[idx];
-            let cy = top + pt(ROW_H_PT) / 2;
+            let top = rows_top + i as i32 * row_h;
+            let (name, sz) = self.files[idx].clone();
+            let in_rot = self.in_rotation(&name);
 
-            Self::draw_checkbox(p, pad, cy, self.in_rotation(name));
+            // Thumbnail Preview
+            let thumb_y = top + (row_h - th) / 2;
+            let thumb_opt = self.get_thumbnail(&name, tw as u32, th as u32);
+            if let Some(thumb) = thumb_opt {
+                p.blit_gray(pad, thumb_y, tw, th, thumb, tw as usize);
+                p.rect_outline_t(Rect::new(pad, thumb_y, tw, th), 1, DIVIDER);
+            } else {
+                // Placeholder image card
+                p.rect(Rect::new(pad, thumb_y, tw, th), 248);
+                p.rect_outline_t(Rect::new(pad, thumb_y, tw, th), 1, DIVIDER);
+                p.circle_fill(pad + tw * 2 / 3, thumb_y + th / 3, pt(1.5), 180);
+                p.line_w(pad + pt(3.0), thumb_y + th - pt(4.0), pad + tw / 2, thumb_y + th / 2, 1, 180);
+                p.line_w(pad + tw / 2, thumb_y + th / 2, pad + tw - pt(3.0), thumb_y + th - pt(4.0), 1, 180);
+            }
 
-            let budget = p.width_pt() - 2.0 * PAD_PT - 14.0 - 12.0;
-            let label = p.truncate(NAME_PT, name, budget);
-            p.text(pad + pt(14.0), top + pt(17.0), NAME_PT, INK, &label);
+            // Title
+            let label = p.truncate(10.5, &name, budget);
+            p.text(tx, top + pt(15.5), 10.5, INK, &label);
 
-            let size_str = if *sz >= 1024 * 1024 {
-                format!("{:.1} MB", *sz as f64 / 1048576.0)
+            // Subtitle
+            let size_str = if sz >= 1024 * 1024 {
+                format!("{:.1} MB", sz as f64 / 1048576.0)
             } else {
                 format!("{} KB", sz / 1024)
             };
-            p.text_right(w - pad, top + pt(17.0), 7.0, DIM, &size_str);
+            let sub = if in_rot {
+                format!("{size_str} · In lock screen rotation")
+            } else {
+                format!("{size_str} · Excluded from rotation")
+            };
+            let sub_trunc = p.truncate(7.5, &sub, budget);
+            p.text(tx, top + pt(28.0), 7.5, DIM, &sub_trunc);
 
-            p.hline_t(top + pt(ROW_H_PT), pad, w - pad, 1, 225);
+            // Right Badge
+            let cy = top + row_h / 2;
+            if in_rot {
+                Self::draw_badge(p, w - pad, cy, "ACTIVE", true);
+            } else {
+                Self::draw_badge(p, w - pad, cy, "OFF", false);
+            }
+
+            p.hline_t(top + row_h, pad, w - pad, 1, DIVIDER);
         }
 
-        p.text_center(
-            h - pt(10.0),
-            FOOT_PT,
-            DIM,
-            &format!(
-                "{}-{} of {} · tap: toggle rotation{}",
-                self.offset + 1,
-                visible,
-                self.files.len(),
-                if self.files.len() > self.per_page {
-                    " · swipe: page"
-                } else {
-                    ""
-                },
-            ),
+        // Footer pagination
+        let page_info = format!(
+            "{}-{} of {}{}",
+            self.offset + 1,
+            visible,
+            self.files.len(),
+            if self.files.len() > self.per_page {
+                " · Swipe horizontally to turn pages"
+            } else {
+                " · Swipe up bottom-right to exit"
+            }
         );
+        p.text_center(pt(FOOTER_BASE_PT), 7.5, MUTED, &page_info);
     }
 
     fn on_gesture(&mut self, g: Gesture) -> Action {
+        let (w, h) = (self.w, self.h);
+        if g.corner_back() || g.corner_back_in(w as u32, h as u32) {
+            return Action::Pop;
+        }
+
         match g {
             Gesture::Tap { x: _, y } => {
                 let y = y as i32;
@@ -352,19 +554,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_thumbnail_settles_the_tick() {
+        let mut s = ScreensaversScreen::new();
+        s.files = vec![
+            ("a.png".to_string(), 1),
+            ("b.png".to_string(), 2),
+            ("c.png".to_string(), 3),
+        ];
+        // Ready and Failed are terminal: no pending row, slow tick.
+        s.thumbnails.insert("a.png".to_string(), ThumbState::Ready(vec![0u8; 4]));
+        s.thumbnails.insert("b.png".to_string(), ThumbState::Failed);
+        s.thumbnails.insert("c.png".to_string(), ThumbState::Ready(vec![0u8; 4]));
+        assert_eq!(
+            s.tick_interval(),
+            std::time::Duration::from_secs(10),
+            "a failed decode must not keep the 150 ms tick alive"
+        );
+
+        // A genuinely pending row keeps the fast tick.
+        s.thumbnails.insert("c.png".to_string(), ThumbState::Pending);
+        assert_eq!(s.tick_interval(), std::time::Duration::from_millis(150));
+    }
+
+    #[test]
+    fn thumbnail_size_is_shared_and_pinned() {
+        // prewarm() and the draw path both call thumb_size(), so they can
+        // never drift; pin the concrete value so a layout change to
+        // THUMB_*_PT that would silently orphan every prewarmed thumbnail
+        // (the disk cache encodes the exact size in filename + header)
+        // fails here instead.
+        assert_eq!(thumb_size(), (87, 116));
+    }
+
+    fn save_preview_artifact(name: &str, canvas: &[u8]) {
+        let artifact_dir = match std::env::var("YB_AI_PREVIEW_DIR")
+            .or_else(|_| std::env::var("ARTIFACT_DIR"))
+        {
+            Ok(d) if !d.is_empty() => d,
+            _ => return,
+        };
+        let path = std::path::Path::new(&artifact_dir).join(name);
+        if let Ok(file) = std::fs::File::create(&path) {
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            if let Ok(mut w) = enc.write_header() {
+                let _ = w.write_image_data(canvas);
+            }
+        }
+    }
+
+    #[test]
     fn row_mapping_covers_only_visible_rows() {
         let mut s = ScreensaversScreen::new();
         s.files = (0..30)
             .map(|i| (format!("img{:02}.png", i), 1024))
             .collect();
         s.disabled = HashSet::new();
-        s.per_page = 10;
-        s.offset = 10;
-        // First visible row maps to absolute index 10.
-        assert_eq!(s.row_at(pt(ROWS_TOP_PT) + 2), Some(10));
-        assert_eq!(s.row_at(pt(ROWS_TOP_PT) + pt(ROW_H_PT) + 2), Some(11));
+        s.per_page = 7;
+        s.offset = 7;
+        // First visible row maps to absolute index 7.
+        assert_eq!(s.row_at(pt(ROWS_TOP_PT) + 2), Some(7));
+        assert_eq!(s.row_at(pt(ROWS_TOP_PT) + pt(ROW_H_PT) + 2), Some(8));
         // Past the page → None (no phantom rows).
-        assert_eq!(s.row_at(pt(ROWS_TOP_PT) + 10 * pt(ROW_H_PT) + 2), None);
+        assert_eq!(s.row_at(pt(ROWS_TOP_PT) + 7 * pt(ROW_H_PT) + 2), None);
         // Above the list → None.
         assert_eq!(s.row_at(pt(30.0)), None);
     }
@@ -388,5 +641,60 @@ mod tests {
 
         std::env::remove_var("YB_SS_DISABLED_LIST");
         let _ = std::fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn screensavers_screen_renders_preview() {
+        let font = yui::font::Font::load().unwrap();
+        let dir = std::env::temp_dir().join(format!("yb_ss_preview_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("YB_SCREENSAVER_DIR", dir.to_str().unwrap());
+
+        // Create a real small PNG to test live thumbnail decoding
+        let img_path = dir.join("mountain_lake_sunset_highres.png");
+        if let Ok(file) = std::fs::File::create(&img_path) {
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 120, 160);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            if let Ok(mut w) = enc.write_header() {
+                let mut data = vec![240u8; 120 * 160];
+                for y in 40..120 {
+                    for x in 30..90 {
+                        data[y * 120 + x] = 60;
+                    }
+                }
+                let _ = w.write_image_data(&data);
+            }
+        }
+
+        let (mut canvas, mut panel) = (vec![255u8; 1236 * 1648], vec![255u8; 1248 * 1648]);
+        let mut p = yui::Painter::new(
+            &mut panel,
+            1236,
+            1648,
+            1248,
+            yui::Orientation::Portrait,
+            &mut canvas,
+            &font,
+        );
+
+        let mut s = ScreensaversScreen::new();
+        s.files = vec![
+            ("mountain_lake_sunset_highres.png".to_string(), 1450230),
+            ("forest_path_morning_fog.jpg".to_string(), 850120),
+            ("minimal_geometric_abstract.png".to_string(), 320400),
+            ("classic_kindle_woodcut_engraving.jpg".to_string(), 1920100),
+        ];
+        s.disabled.insert("minimal_geometric_abstract.png".to_string());
+
+        s.draw(&mut p);
+        save_preview_artifact("screensavers_preview.png", &canvas);
+
+        let lit = canvas.iter().filter(|&&b| b > 200).count();
+        assert!(lit > 1236 * 1648 * 88 / 100);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("YB_SCREENSAVER_DIR");
     }
 }

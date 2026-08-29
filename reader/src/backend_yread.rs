@@ -432,7 +432,43 @@ impl YreadBackend {
         if !disconnected {
             self.ybg_rx = Some(rx);
         }
+        if current_arrived {
+            self.resolve_current_chapter_position();
+        }
         current_arrived
+    }
+
+    fn resolve_current_chapter_position(&mut self) {
+        let Some(book) = self.ybook.as_ref().cloned() else { return };
+        if self.ychap_idx >= book.chapters.len() {
+            return;
+        }
+        let cur_chars = book.chapters[self.ychap_idx].char_count().max(100);
+        let cur_layout_len = self
+            .ychap_cache
+            .get(&self.ychap_idx)
+            .map(|(_, l)| l.len())
+            .unwrap_or(1);
+        let chars_per_page = (cur_chars as f32 / cur_layout_len.max(1) as f32).max(200.0);
+        self.compute_chapter_page_offsets(chars_per_page);
+
+        if let Some((pt, layouts)) = self.ychap_cache.get(&self.ychap_idx) {
+            if let Some(target_char) = self.landing_char.take() {
+                self.ychap_page = if target_char == usize::MAX {
+                    layouts.len().saturating_sub(1)
+                } else {
+                    pt.page_for_char(target_char)
+                        .min(layouts.len().saturating_sub(1))
+                };
+            }
+            if let Some(cur_layout) = layouts.get(self.ychap_page) {
+                self.y_char_offset = cur_layout.start_char;
+            }
+            let global_p =
+                self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
+            self.page_no = global_p;
+            self.sub_idx = pack_yread_sub(self.ychap_idx, self.y_char_offset);
+        }
     }
 }
 
@@ -464,11 +500,11 @@ impl ReaderBackend for YreadBackend {
         self.ybook.is_some()
     }
 
-    /// `total` holds the constructor's 1 until render_page computes real
-    /// offsets — which needs the landing chapter in ychap_cache. See the
-    /// trait method: saving before this flips true writes "0 of 1".
+    /// `total` holds the constructor's 1 until offsets and landing chapter
+    /// are resolved. Saving before this flips true writes "0 of 1" over
+    /// the real progress.
     fn is_paginated(&self) -> bool {
-        self.ychap_cache.contains_key(&self.ychap_idx)
+        self.ychap_cache.contains_key(&self.ychap_idx) && self.landing_char.is_none()
     }
 
     fn has_pending_work(&self) -> bool {
@@ -679,16 +715,9 @@ impl ReaderBackend for YreadBackend {
             };
         }
 
-        let cur_chars = book.chapters[self.ychap_idx].char_count().max(100);
-        let cur_layout_len = self
-            .ychap_cache
-            .get(&self.ychap_idx)
-            .map(|(_, l)| l.len())
-            .unwrap_or(1);
-        let chars_per_page = (cur_chars as f32 / cur_layout_len.max(1) as f32).max(200.0);
-        self.compute_chapter_page_offsets(chars_per_page);
+        self.resolve_current_chapter_position();
 
-        let Some((pt, layouts)) = self.ychap_cache.get(&self.ychap_idx) else {
+        let Some((_pt, layouts)) = self.ychap_cache.get(&self.ychap_idx) else {
             return RenderOutput {
                 gray: None,
                 words: Vec::new(),
@@ -696,15 +725,6 @@ impl ReaderBackend for YreadBackend {
                 is_loading: true,
             };
         };
-
-        if let Some(target_char) = self.landing_char.take() {
-            self.ychap_page = if target_char == usize::MAX {
-                layouts.len().saturating_sub(1)
-            } else {
-                pt.page_for_char(target_char)
-                    .min(layouts.len().saturating_sub(1))
-            };
-        }
 
         let Some(cur_layout) = layouts.get(self.ychap_page) else {
             return RenderOutput {
@@ -714,13 +734,6 @@ impl ReaderBackend for YreadBackend {
                 is_loading: true,
             };
         };
-
-        self.y_char_offset = cur_layout.start_char;
-
-        let global_p =
-            self.ychap_offsets.get(self.ychap_idx).copied().unwrap_or(0) + self.ychap_page;
-        self.page_no = global_p;
-        self.sub_idx = pack_yread_sub(self.ychap_idx, self.y_char_offset);
 
         let t0 = std::time::Instant::now();
         let mut gray = vec![255u8; (vw * vh) as usize];

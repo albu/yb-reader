@@ -25,7 +25,8 @@ pub struct ReaderScreen {
     page_gray: Option<Vec<u8>>,
     dims: (i32, i32),
     time_str: String,
-    vocab_db: Option<&'static crate::vocab::VocabDb>,
+    dicts: std::rc::Rc<crate::dictionary::ActiveDicts>,
+    builtin: Option<std::rc::Rc<crate::dictionary::Dictionary>>,
     vocab_prof: crate::vocab::VocabProfile,
     page_words: Vec<(String, RectF)>,
     page_links: Vec<(RectF, String)>,
@@ -68,7 +69,8 @@ impl ReaderScreen {
             plog(&format!("loaded instant page snapshot for {}", name));
         }
 
-        let vocab_db = crate::vocab::VocabDb::open();
+        let dicts = std::rc::Rc::new(crate::dictionary::open_active());
+        let builtin = crate::dictionary::open_builtin().map(std::rc::Rc::new);
         let vocab_prof = crate::vocab::VocabProfile::load();
 
         ReaderScreen {
@@ -79,7 +81,8 @@ impl ReaderScreen {
             page_gray: cached_snap,
             dims: (w as i32, h as i32),
             time_str: chrome::current_time_str(),
-            vocab_db,
+            dicts,
+            builtin,
             vocab_prof,
             page_words: Vec::new(),
             page_links: Vec::new(),
@@ -252,8 +255,18 @@ impl ReaderScreen {
         )))
     }
 
-    fn open_word_dialog(&mut self, entry: crate::vocab::WordEntry) -> Action {
-        dialogs::word_dialog(entry, self.vocab_prof.clone(), self.page_gray.clone())
+    fn open_word_dialog(&mut self, result: crate::dictionary::WordResult) -> Action {
+        let book = {
+            let b = self.backend.borrow();
+            b.book_name()
+        };
+        dialogs::word_dialog(
+            result,
+            self.vocab_prof.clone(),
+            self.page_gray.clone(),
+            std::rc::Rc::clone(&self.dicts),
+            book,
+        )
     }
 
     /// Commit the pending selection to the notes store and underline it.
@@ -363,6 +376,7 @@ impl Screen for ReaderScreen {
 
     fn on_resume(&mut self) -> Action {
         self.time_str = chrome::current_time_str();
+        self.dicts = std::rc::Rc::new(crate::dictionary::open_active());
         let pos = positions::resume_pos(&self.book_name());
         // Highlights can change underneath us (the highlights dialog),
         // and a jump leaves a pending selection pointing at a dead page.
@@ -768,9 +782,16 @@ impl Screen for ReaderScreen {
                     return self.open_footnote_or_link(&uri);
                 }
                 if let Some((word_text, _rect)) = self.find_word_at_pos(vx as f32, vy as f32) {
-                    let found = self.vocab_db.as_ref().and_then(|db| db.lookup(&word_text));
-                    if let Some(entry) = found {
-                        return self.open_word_dialog(entry);
+                    let book = {
+                        let b = self.backend.borrow();
+                        b.book_name()
+                    };
+                    let override_base = crate::dictionary::book_override(&book);
+                    let result = self
+                        .dicts
+                        .lookup_result(self.builtin.as_deref(), &word_text, override_base.as_deref());
+                    if result.definition.is_some() || result.translation.is_some() {
+                        return self.open_word_dialog(result);
                     }
                     return dialogs::dict_miss(&word_text, self.page_gray.clone());
                 }

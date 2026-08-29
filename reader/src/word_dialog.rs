@@ -1,15 +1,65 @@
-use crate::vocab::WordEntry;
+use crate::dictionary::WordResult;
 use ybdev::input::Gesture;
 use yui::painter::{pt, Painter, PX, Rect};
 use yui::screen::{Action, Screen};
 
+/// Word-card sheet geometry: the translation row keeps its space first
+/// (capped), then the WordNet definition fills the rest.
+const MAX_CARD_PT: f32 = 210.0;
+const MIN_CARD_PT: f32 = 85.0;
+const TITLE_H_PT: f32 = 45.0;
+const SEC_H_PT: f32 = 16.0;
+const LINE_H_PT: f32 = 13.0;
+const MAX_TR_LINES: usize = 3;
+
+/// How many definition/translation lines fit, and the resulting card
+/// height, given the full wrapped line counts. With the translation row
+/// off, the definition gets the whole budget.
+fn budget_lines(def_lines: usize, tr_lines: usize) -> (usize, usize, i32) {
+    let card_max_h = pt(MAX_CARD_PT);
+    let title_h = pt(TITLE_H_PT);
+    let sec_h = pt(SEC_H_PT);
+    let line_h = pt(LINE_H_PT);
+    let tr_shown = if tr_lines == 0 {
+        0
+    } else {
+        tr_lines.min(MAX_TR_LINES)
+    };
+    let tr_h = if tr_shown == 0 {
+        0
+    } else {
+        sec_h + tr_shown as i32 * line_h
+    };
+    let def_budget = (card_max_h - title_h - tr_h - sec_h).max(line_h);
+    let def_shown = def_lines.min(((def_budget / line_h) as usize).max(1));
+    let def_h = if def_shown == 0 {
+        0
+    } else {
+        sec_h + def_shown as i32 * line_h
+    };
+    let card_h = (title_h + def_h + tr_h).clamp(pt(MIN_CARD_PT), card_max_h);
+    (def_shown, tr_shown, card_h)
+}
+
+/// The dictionary card: the word, the WordNet definition row (always
+/// attempted) and the translation row (the active dictionary). Tapping
+/// the translation source cycles the book's translation dictionary and
+/// remembers the pick.
 pub struct WordDialog {
-    entry: WordEntry,
+    result: WordResult,
     is_learning: bool,
     on_action: Option<Box<dyn FnOnce(WordAction) -> Action>>,
     bg: Option<Vec<u8>>,
     dims: (i32, i32),
     chk_rect: Rect,
+    dict_rect: Rect,
+    trans_header_rect: Rect,
+    dicts: std::rc::Rc<crate::dictionary::ActiveDicts>,
+    book: String,
+    /// Wrapped definition lines, cached so a redraw (e.g. cycling the
+    /// translation dictionary) never re-wraps the unchanged definition.
+    def_lines: Vec<String>,
+    last_def_meaning: Option<String>,
 }
 
 pub enum WordAction {
@@ -18,18 +68,42 @@ pub enum WordAction {
 }
 
 impl WordDialog {
-    pub fn new<F>(entry: WordEntry, is_learning: bool, bg: Option<Vec<u8>>, on_action: F) -> Self
+    pub fn new<F>(
+        result: WordResult,
+        is_learning: bool,
+        bg: Option<Vec<u8>>,
+        dicts: std::rc::Rc<crate::dictionary::ActiveDicts>,
+        book: String,
+        on_action: F,
+    ) -> Self
     where
         F: FnOnce(WordAction) -> Action + 'static,
     {
         WordDialog {
-            entry,
+            result,
             is_learning,
             on_action: Some(Box::new(on_action)),
             bg,
             dims: (1236, 1648),
+            dicts,
+            book,
             chk_rect: Rect::new(0, 0, 0, 0),
+            dict_rect: Rect::new(0, 0, 0, 0),
+            trans_header_rect: Rect::new(0, 0, 0, 0),
+            def_lines: Vec::new(),
+            last_def_meaning: None,
         }
+    }
+
+    /// Cycle the book's translation dictionary override forward and
+    /// re-resolve the translation row. WordNet stays as the definition.
+    fn cycle_dict(&mut self) -> Action {
+        let active = self.dicts.active_bases();
+        let current = crate::dictionary::book_override(&self.book);
+        let next = crate::dictionary::next_translation_choice(current.as_deref(), &active);
+        crate::dictionary::set_book_override(&self.book, next.as_deref());
+        self.result.translation = self.dicts.translation(self.result.word(), next.as_deref());
+        Action::Redraw
     }
 
     fn dispatch(&mut self, action: WordAction) -> Action {
@@ -39,6 +113,36 @@ impl WordDialog {
             Action::Pop
         }
     }
+}
+
+/// Greedy wrap that preserves hard breaks (newlines): WordNet meanings
+/// arrive as sense blocks ("1. gloss" / example line), and flattening
+/// them back into one paragraph would wreck that structure. Shared with
+/// the flashcard trainer's card back, which renders at its own size.
+pub(crate) fn wrap_lines(p: &Painter, text: &str, max_w: f32, font_pt: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for hard in text.split('\n') {
+        let mut cur = String::new();
+        for word in hard.split_whitespace() {
+            let test = if cur.is_empty() {
+                word.to_string()
+            } else {
+                format!("{} {}", cur, word)
+            };
+            if p.text_width(font_pt, &test) > max_w {
+                if !cur.is_empty() {
+                    lines.push(cur);
+                }
+                cur = word.to_string();
+            } else {
+                cur = test;
+            }
+        }
+        if !cur.is_empty() {
+            lines.push(cur);
+        }
+    }
+    lines
 }
 
 impl Screen for WordDialog {
@@ -61,95 +165,172 @@ impl Screen for WordDialog {
             p.clear(255);
         }
 
-        // Bottom docked card
         let card_w = w - pt(16.0);
         let card_x = pt(8.0);
-
-        // Wrap text to calculate required height
         let max_text_w = (card_w - pt(28.0)) as f32;
-        let mut lines = Vec::new();
 
-        if !self.entry.gloss_en.is_empty() {
-            let words: Vec<&str> = self.entry.gloss_en.split_whitespace().collect();
-            let mut cur_line = String::new();
-            for word in words {
-                let test = if cur_line.is_empty() {
-                    word.to_string()
-                } else {
-                    format!("{} {}", cur_line, word)
-                };
-                if p.text_width(9.5, &test) > max_text_w {
-                    if !cur_line.is_empty() {
-                        lines.push(cur_line);
-                    }
-                    cur_line = word.to_string();
-                } else {
-                    cur_line = test;
-                }
-            }
-            if !cur_line.is_empty() {
-                lines.push(cur_line);
-            }
+        // Wrap the definition once and keep it across redraws: cycling the
+        // translation dictionary (the only action that repaints this card)
+        // must not re-wrap the unchanged definition.
+        let def_meaning: Option<&str> = self.result.definition.as_ref().map(|e| e.meaning.as_str());
+        if self.last_def_meaning.as_deref() != def_meaning {
+            let wrapped = self
+                .result
+                .definition
+                .as_ref()
+                .map(|e| wrap_lines(p, &e.meaning, max_text_w, 9.5))
+                .unwrap_or_default();
+            self.last_def_meaning = def_meaning.map(str::to_string);
+            self.def_lines = wrapped;
         }
+        let def_lines = &self.def_lines;
 
-        let ru_h = if !self.entry.gloss_ru.is_empty() {
-            pt(18.0)
-        } else {
-            0
-        };
-        let body_h = (lines.len().clamp(1, 3) as i32) * pt(13.0);
-        let card_h = (pt(45.0) + ru_h + body_h).clamp(pt(85.0), pt(150.0));
+        let tr_lines = self
+            .result
+            .translation
+            .as_ref()
+            .map(|e| wrap_lines(p, &e.meaning, max_text_w, 9.5))
+            .unwrap_or_default();
+
+        let (def_shown, tr_shown, card_h) = budget_lines(def_lines.len(), tr_lines.len());
         let card_y = h - card_h - pt(10.0);
         let card_rect = Rect::new(card_x, card_y, card_w, card_h);
 
-        // Backdrop Card
         p.rect(card_rect, 255);
         p.rect_outline_t(card_rect, 2, 0);
 
-        // Header Row: Word Title + CEFR badge + Learn Checkbox Pill
-        let title_y = card_y + pt(18.0);
-        let title = p.truncate(13.0, &self.entry.word, (card_w - pt(120.0)) as f32 / PX);
-        p.text(card_x + pt(12.0), title_y, 13.0, 0, &title);
+        let title_y = card_y + pt(17.0);
 
-        let badge_text = format!("{} · lvl {}", self.entry.cefr_str(), self.entry.difficulty);
-        let badge_x = card_x + pt(18.0) + p.text_width(13.0, &title).round() as i32;
-        p.text(badge_x, title_y - pt(1.0), 8.0, 100, &badge_text);
-
-        // Learn Toggle Checkbox Button on top-right
-        let chk_w = pt(72.0);
-        let chk_h = pt(22.0);
+        // Right side buttons: [ eng-rus > ] [ Learn ]
+        // 1. Learn Toggle Checkbox Button (far right)
+        let chk_w = pt(52.0);
+        let btn_h = pt(16.0);
+        let btn_y = card_y + pt(6.0);
         let chk_x = card_x + card_w - chk_w - pt(10.0);
-        let chk_y = card_y + pt(6.0);
-        let chk_rect = Rect::new(chk_x, chk_y, chk_w, chk_h);
-        self.chk_rect = chk_rect;
+        let chk_rect = Rect::new(chk_x, btn_y, chk_w, btn_h);
+        self.chk_rect = Rect::new(
+            chk_x - pt(4.0),
+            card_y,
+            chk_w + pt(14.0),
+            pt(TITLE_H_PT),
+        );
 
         if self.is_learning {
             p.rect(chk_rect, 0);
-            p.text_center_in(chk_x, chk_x + chk_w, chk_y + pt(15.0), 8.0, 255, "Learning");
+            p.text_center_in(chk_x, chk_x + chk_w, btn_y + pt(11.5), 7.5, 255, "Learning");
         } else {
-            p.rect_outline_t(chk_rect, 1, 100);
-            p.text_center_in(chk_x, chk_x + chk_w, chk_y + pt(15.0), 8.0, 50, "Learn");
+            p.rect_outline_t(chk_rect, 1, 130);
+            p.text_center_in(chk_x, chk_x + chk_w, btn_y + pt(11.5), 7.5, 60, "Learn");
         }
 
+        // 2. Translation source selector pill button (to the left of Learn)
+        let tr_source = self
+            .result
+            .translation
+            .as_ref()
+            .map(|e| e.source.as_str())
+            .unwrap_or("off");
+        let dict_label = format!("{tr_source} >");
+        let lw = p.text_width(7.5, &dict_label).round() as i32;
+        let pill_w = lw + pt(14.0);
+        let pill_gap = pt(8.0);
+        let pill_x = chk_x - pill_w - pill_gap;
+        let pill_rect = Rect::new(pill_x, btn_y, pill_w, btn_h);
+        p.rect_outline_t(pill_rect, 1, 130);
+        p.text_center_in(
+            pill_rect.x,
+            pill_rect.x + pill_rect.w,
+            btn_y + pt(11.5),
+            7.5,
+            60,
+            &dict_label,
+        );
+
+        // Generous touch hitbox for dictionary toggle button:
+        // Spans the full height of the header and has generous horizontal reach.
+        self.dict_rect = Rect::new(
+            pill_x - pt(6.0),
+            card_y,
+            pill_w + pt(10.0),
+            pt(TITLE_H_PT),
+        );
+
+        // Left side: Headword Title (truncated before buttons)
+        let title_x = card_x + pt(12.0);
+        let title_budget = (pill_x - title_x - pt(10.0)).max(pt(40.0));
+        let title = p.truncate(13.0, self.result.word(), title_budget as f32 / PX);
+        p.text(title_x, title_y, 13.0, 0, &title);
+
+        // Header divider rule (comfortably below the buttons)
         p.hline_t(
-            title_y + pt(6.0),
+            card_y + pt(26.0),
             card_x + pt(10.0),
             card_x + card_w - pt(10.0),
             1,
-            220,
+            225,
         );
 
-        // Body: Russian translation + English Definition lines
-        let mut text_y = title_y + pt(20.0);
-        if !self.entry.gloss_ru.is_empty() {
-            let ru_trunc = p.truncate(10.5, &self.entry.gloss_ru, max_text_w / PX);
-            p.text(card_x + pt(12.0), text_y, 10.5, 0, &ru_trunc);
-            text_y += pt(15.0);
+        let mut text_y = card_y + pt(38.0);
+
+        if let Some(e) = &self.result.definition {
+            p.text(
+                card_x + pt(12.0),
+                text_y,
+                7.5,
+                110,
+                &format!("DEFINITION \u{00b7} {}", e.source),
+            );
+            text_y += pt(12.0);
+            let def_truncated = def_shown < def_lines.len();
+            for (i, line) in def_lines.iter().take(def_shown).enumerate() {
+                let text = if def_truncated && i + 1 == def_shown {
+                    "..." // the e-ink font has no ellipsis glyph
+                } else {
+                    line.as_str()
+                };
+                // Example sentences start with a quote: indent and dim
+                // them so the gloss reads as the definition block.
+                let is_example = text.starts_with('"');
+                p.text(
+                    card_x + pt(12.0) + if is_example { pt(10.0) } else { 0 },
+                    text_y,
+                    9.0,
+                    if is_example { 110 } else { 30 },
+                    text,
+                );
+                text_y += pt(13.0);
+            }
+            text_y += pt(4.0);
         }
 
-        for line in &lines {
-            p.text(card_x + pt(12.0), text_y, 9.0, 50, line);
-            text_y += pt(13.0);
+        if let Some(e) = &self.result.translation {
+            p.text(
+                card_x + pt(12.0),
+                text_y,
+                7.5,
+                110,
+                &format!("TRANSLATION \u{00b7} {}", e.source),
+            );
+            // Also allow tapping on the TRANSLATION header row to cycle dictionaries
+            self.trans_header_rect = Rect::new(
+                card_x,
+                text_y - pt(10.0),
+                card_w,
+                pt(16.0),
+            );
+            text_y += pt(12.0);
+            let tr_truncated = tr_shown < tr_lines.len();
+            for (i, line) in tr_lines.iter().take(tr_shown).enumerate() {
+                let text = if tr_truncated && i + 1 == tr_shown {
+                    "..."
+                } else {
+                    line.as_str()
+                };
+                p.text(card_x + pt(12.0), text_y, 9.0, 50, text);
+                text_y += pt(13.0);
+            }
+        } else {
+            self.trans_header_rect = Rect::new(0, 0, 0, 0);
         }
     }
 
@@ -158,6 +339,11 @@ impl Screen for WordDialog {
             Gesture::Tap { x, y } => {
                 let px = x as i32;
                 let py = y as i32;
+
+                // Tapping the dictionary selector pill or the translation header row cycles dictionaries
+                if self.dict_rect.contains(px, py) || self.trans_header_rect.contains(px, py) {
+                    return self.cycle_dict();
+                }
 
                 // Tapping the Learn checkbox toggles learning
                 if self.chk_rect.contains(px, py) {
@@ -170,6 +356,136 @@ impl Screen for WordDialog {
             Gesture::Swipe { .. } => self.dispatch(WordAction::Close),
             Gesture::LongPress { .. } => self.dispatch(WordAction::Close),
             _ => Action::Keep,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn definition_budget_adapts_to_translation_row() {
+        let max_h = pt(MAX_CARD_PT);
+        let min_h = pt(MIN_CARD_PT);
+
+        // Translation off: the definition gets the whole budget.
+        let (def_only, tr_off, card_off) = budget_lines(12, 0);
+        assert_eq!(tr_off, 0);
+        assert!(def_only >= 8, "definition should get the budget: {def_only}");
+        assert!(card_off <= max_h);
+
+        // One translation line: it keeps its line, definition shrinks.
+        let (def_one, tr_one, card_one) = budget_lines(12, 1);
+        assert_eq!(tr_one, 1);
+        assert!(def_one < def_only, "def must yield space to translation");
+        assert!(card_one <= max_h);
+
+        // A long translation is capped; the definition still fits.
+        let (def_long, tr_long, card_long) = budget_lines(12, 5);
+        assert_eq!(tr_long, MAX_TR_LINES, "translation lines must cap");
+        assert!(def_long >= 1);
+        assert!(card_long <= max_h);
+
+        // Nothing at all: the sheet floors at the minimum.
+        let (_, _, card_empty) = budget_lines(0, 0);
+        assert_eq!(card_empty, min_h);
+
+        // Definition only, short: card shrinks below the max.
+        let (_, _, card_short) = budget_lines(2, 0);
+        assert!(card_short < max_h && card_short >= min_h);
+    }
+
+    #[test]
+    fn wrap_preserves_sense_blocks() {
+        let font = yui::font::Font::load().unwrap();
+        let (mut canvas, mut panel) = (vec![255u8; 1236 * 1648], vec![255u8; 1248 * 1648]);
+        let p = yui::Painter::new(
+            &mut panel,
+            1236,
+            1648,
+            1248,
+            yui::Orientation::Portrait,
+            &mut canvas,
+            &font,
+        );
+        let text = "1. move fast by using one's feet, with one foot off the ground\n\
+                    \"Don't run--you'll be out of breath\" · \"The children ran to the store\"\n\
+                    2. a score in baseball";
+        let lines = wrap_lines(&p, text, 800.0, 9.5);
+        assert!(lines.len() >= 4, "{lines:?}");
+        // The gloss, example and next sense stay on their own lines.
+        assert!(lines.iter().any(|l| l.starts_with("1. move fast")));
+        assert!(lines.iter().any(|l| l.starts_with('"')));
+        assert!(lines.iter().any(|l| l.starts_with("2. a score")));
+        // Nothing re-glued the blocks into one paragraph.
+        for l in &lines {
+            assert!(!l.contains("2. a score") || l.starts_with("2. a score"));
+        }
+    }
+
+    #[test]
+    fn hitboxes_are_generous_and_render_preview() {
+        let font = yui::font::Font::load().unwrap();
+        let (mut canvas, mut panel) = (vec![255u8; 1236 * 1648], vec![255u8; 1248 * 1648]);
+        let mut p = yui::Painter::new(
+            &mut panel,
+            1236,
+            1648,
+            1248,
+            yui::Orientation::Portrait,
+            &mut canvas,
+            &font,
+        );
+        let dicts = std::rc::Rc::new(crate::dictionary::open_active());
+        let result = WordResult {
+            definition: Some(crate::dictionary::DictEntry {
+                word: "understand".to_string(),
+                source: "WordNet".to_string(),
+                meaning: "1. (verb) understand or grasp\n2. (noun) capacity for understanding".to_string(),
+            }),
+            translation: Some(crate::dictionary::DictEntry {
+                word: "understand".to_string(),
+                source: "eng-rus".to_string(),
+                meaning: "понимание, постижение, осмысление".to_string(),
+            }),
+        };
+        let mut dialog = WordDialog::new(
+            result,
+            false,
+            None,
+            dicts,
+            "sample.epub".to_string(),
+            |_| Action::Keep,
+        );
+        dialog.draw(&mut p);
+
+        // Dictionary toggle hitbox must be tall (at least 40pt) and wide (at least 50pt)
+        assert!(dialog.dict_rect.h >= pt(40.0), "dict_rect height too small: {}", dialog.dict_rect.h);
+        assert!(dialog.dict_rect.w >= pt(50.0), "dict_rect width too small: {}", dialog.dict_rect.w);
+
+        // Translation header hitbox must span the card width
+        assert!(dialog.trans_header_rect.w >= pt(250.0), "trans_header_rect width too small: {}", dialog.trans_header_rect.w);
+
+        // Learn button hitbox must be generous
+        assert!(dialog.chk_rect.h >= pt(40.0), "chk_rect height too small: {}", dialog.chk_rect.h);
+        assert!(dialog.chk_rect.w >= pt(60.0), "chk_rect width too small: {}", dialog.chk_rect.w);
+
+        // Save preview PNG
+        let artifact_dir = match std::env::var("YB_AI_PREVIEW_DIR")
+            .or_else(|_| std::env::var("ARTIFACT_DIR"))
+        {
+            Ok(d) if !d.is_empty() => d,
+            _ => return,
+        };
+        let path = std::path::Path::new(&artifact_dir).join("word_dialog_preview.png");
+        if let Ok(file) = std::fs::File::create(&path) {
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            if let Ok(mut w) = enc.write_header() {
+                let _ = w.write_image_data(&canvas);
+            }
         }
     }
 }

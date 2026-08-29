@@ -344,14 +344,26 @@ pub fn resume_page(name: &str) -> usize {
 /// ticks) and a same-second duplicate must not become a flash write.
 fn record_at(path: &str, name: &str, pos: Pos) {
     let mut map = load_at(path);
-    // The yread backend reports total=1 until the landing chapter is
+
+    // Guard 1: Never overwrite a valid reading position (page > 0 or sub_idx > 0)
+    // with an uninitialized dummy placeholder (page 0, sub 0, total <= 1) during
+    // async book startup or quick exit.
+    if pos.page == 0 && pos.sub_idx == 0 && pos.total <= 1 {
+        if let Some(stored) = map.get(name) {
+            if stored.page > 0 || stored.sub_idx > 0 {
+                return;
+            }
+        }
+    }
+
+    // Guard 2: The yread backend reports total=1 until the landing chapter is
     // paginated, and dialogs (settings sheet, TOC, scrubber, curtain,
     // footnotes) capture that placeholder at open time — so a settings
     // change or jump inside that window would clobber the real total with
     // "page X of 1" (the hero card then shows the wrong count after a
     // restart). A real book never shrinks to 1 page, so a stored total
     // larger than 1 always wins over an incoming 1.
-    let pos = if pos.total == 1 {
+    let pos = if pos.total <= 1 {
         let stored = map.get(name).map(|p| p.total).unwrap_or(0);
         if stored > 1 {
             Pos { total: stored, ..pos }
@@ -634,6 +646,46 @@ mod tests {
         // A genuinely one-page book stays 1.
         record_at(p, "short.txt", Pos::simple(0, 1, 2000));
         assert_eq!(load_at(p)["short.txt"].total, 1);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn dummy_startup_pos_never_clobbers_real_reading_position() {
+        let path = std::env::temp_dir().join("yb-positions-startup-guard.txt");
+        let p = path.to_str().unwrap();
+        let _ = std::fs::remove_file(p);
+
+        // Book was on page 440 (with chapter/char sub_idx)
+        record_at(
+            p,
+            "dune.epub",
+            Pos {
+                page: 440,
+                total: 800,
+                ts: 1000,
+                sub_idx: 15_000_250,
+                settings: None,
+            },
+        );
+
+        // An async startup poll or early save with dummy (0, 0, 1) fires
+        record_at(
+            p,
+            "dune.epub",
+            Pos {
+                page: 0,
+                total: 1,
+                ts: 1001,
+                sub_idx: 0,
+                settings: None,
+            },
+        );
+
+        let saved = load_at(p)["dune.epub"];
+        assert_eq!(saved.page, 440, "dummy startup position must not clobber real page");
+        assert_eq!(saved.sub_idx, 15_000_250, "dummy sub_idx must not clobber real sub_idx");
+        assert_eq!(saved.total, 800, "dummy total must not clobber real total");
+
         let _ = std::fs::remove_file(p);
     }
 }

@@ -16,19 +16,19 @@ const HDR_RULE_PT: f32 = 20.0;
 const TRIVIA_BASE_PT: f32 = 34.0;
 const TRIVIA_RULE_PT: f32 = 42.0;
 
-// Section 1: Display & Guides
-const SEC1_LABEL_PT: f32 = 54.0;
-const SEC1_TOP_PT: f32 = 62.0;
+// Section 1: Settings
+const SEC1_LABEL_PT: f32 = 52.0;
+const SEC1_TOP_PT: f32 = 60.0;
 
 // Section 2: Device & Lifecycle
-const SEC2_LABEL_PT: f32 = 216.0;
-const SEC2_TOP_PT: f32 = 224.0;
+const SEC2_LABEL_PT: f32 = 188.0;
+const SEC2_TOP_PT: f32 = 196.0;
 
-const ROW_H_PT: f32 = 36.0;
-const ICON_BOX_PT: f32 = 14.0;
+const ROW_H_PT: f32 = 38.0;
+const ICON_BOX_PT: f32 = 16.0;
 const ICON_GAP_PT: f32 = 10.0;
 
-const FOOTER_BASE_PT: f32 = 370.0;
+const FOOTER_BASE_PT: f32 = 372.0;
 
 const INK: u8 = 0;
 const DIM: u8 = 110;
@@ -40,6 +40,8 @@ pub struct SystemScreen {
     h: i32,
     ss_count: usize,
     dev_count: usize,
+    dict_installed: usize,
+    dict_active: usize,
 }
 
 impl SystemScreen {
@@ -49,6 +51,8 @@ impl SystemScreen {
             h: 1648,
             ss_count: 0,
             dev_count: 0,
+            dict_installed: 0,
+            dict_active: 0,
         }
     }
 
@@ -93,14 +97,22 @@ impl SystemScreen {
         let tx = pad + pt(ICON_BOX_PT) + pt(ICON_GAP_PT);
         let budget = (p.width_pt() - 2.0 * PAD_PT - ICON_BOX_PT - ICON_GAP_PT - 24.0).max(10.0);
 
-        let title_trunc = p.truncate(9.5, title, budget);
-        p.text(tx, top + pt(15.0), 9.5, INK, &title_trunc);
+        let title_trunc = p.truncate(10.5, title, budget);
+        p.text(tx, top + pt(15.5), 10.5, INK, &title_trunc);
 
-        let sub_trunc = p.truncate(7.0, sub, budget);
-        p.text(tx, top + pt(27.0), 7.0, DIM, &sub_trunc);
+        let sub_trunc = p.truncate(7.5, sub, budget);
+        p.text(tx, top + pt(28.0), 7.5, DIM, &sub_trunc);
 
-        p.text_right(w - pad, top + pt(21.0), 12.0, MUTED, ">");
+        p.text_right(w - pad, top + pt(22.0), 12.0, MUTED, ">");
         p.hline_t(top + pt(ROW_H_PT), pad, w - pad, 1, DIVIDER);
+    }
+
+    /// `dictionary::scan()` walks the whole dictionaries tree and reads an
+    /// 8 KiB header per `.tei`, so it must run on enter/resume only —
+    /// never on every repaint.
+    fn refresh_dict_counts(&mut self) {
+        self.dict_installed = crate::dictionary::scan().len();
+        self.dict_active = crate::dictionary::load_selection().active.len();
     }
 }
 
@@ -115,6 +127,7 @@ impl Screen for SystemScreen {
         self.ss_count = crate::screensavers::scan().len();
         let devices_path = ybdev::devices::devices_path();
         self.dev_count = ybdev::devices::DeviceStore::load(&devices_path).devices.len();
+        self.refresh_dict_counts();
         Action::Redraw
     }
 
@@ -122,6 +135,7 @@ impl Screen for SystemScreen {
         self.ss_count = crate::screensavers::scan().len();
         let devices_path = ybdev::devices::devices_path();
         self.dev_count = ybdev::devices::DeviceStore::load(&devices_path).devices.len();
+        self.refresh_dict_counts();
         Action::Redraw
     }
 
@@ -159,24 +173,13 @@ impl Screen for SystemScreen {
         );
         p.hline_t(pt(TRIVIA_RULE_PT), pad, w - pad, 1, 235);
 
-        // --- SECTION 1: DISPLAY & GUIDES ---
-        p.text(pad, pt(SEC1_LABEL_PT), 6.8, MUTED, "DISPLAY & GUIDES");
+        // --- SECTION 1: SETTINGS ---
+        p.text(pad, pt(SEC1_LABEL_PT), 6.8, MUTED, "SETTINGS");
 
         let top1 = pt(SEC1_TOP_PT);
         let row_h = pt(ROW_H_PT);
 
-        // Row 0: How to Use
-        Self::draw_system_row(
-            p,
-            pad,
-            w,
-            top1,
-            0,
-            "How to Use",
-            "Gestures & Navigation Guide (Page turns, curtain, dictionary)",
-        );
-
-        // Row 1: Screensavers
+        // Row 0: Screensavers
         let ss_label = match self.ss_count {
             0 => "No custom screensavers yet".to_string(),
             1 => "1 image in lock screen rotation".to_string(),
@@ -186,13 +189,13 @@ impl Screen for SystemScreen {
             p,
             pad,
             w,
-            top1 + row_h,
+            top1,
             1,
             "Screensavers",
             &ss_label,
         );
 
-        // Row 2: Trusted Devices
+        // Row 1: Trusted Devices
         let dev_label = match self.dev_count {
             0 => "No paired computers or phones".to_string(),
             1 => "1 trusted device paired · Tap to manage or revoke".to_string(),
@@ -202,27 +205,30 @@ impl Screen for SystemScreen {
             p,
             pad,
             w,
-            top1 + 2 * row_h,
+            top1 + row_h,
             2,
             "Trusted Devices",
             &dev_label,
         );
 
-        // Row 3: E-Ink Full Refresh
-        let refresh_cur = crate::positions::global_refresh_interval();
-        let refresh_val = match refresh_cur {
-            0 => "Off (never flash)".to_string(),
-            1 => "Every 1 page".to_string(),
-            n => format!("Every {n} pages"),
+        // Row 2: Dictionaries
+        let installed = self.dict_installed;
+        let active = self.dict_active;
+        let dict_label = if installed == 0 {
+            "No dictionaries — add over Wi-Fi or USB".to_string()
+        } else if active == 0 {
+            format!("{installed} installed · none active — tap to manage")
+        } else {
+            format!("{installed} installed · {active} active")
         };
         Self::draw_system_row(
             p,
             pad,
             w,
-            top1 + 3 * row_h,
-            3,
-            "E-Ink Full Refresh",
-            &format!("Current: {refresh_val} · Tap to cycle presets"),
+            top1 + 2 * row_h,
+            7,
+            "Dictionaries",
+            &dict_label,
         );
 
         // --- SECTION 2: DEVICE & LIFECYCLE ---
@@ -232,7 +238,18 @@ impl Screen for SystemScreen {
         let upstart_installed = std::path::Path::new("/etc/upstart/yb-reader.conf").exists();
         let os_boot = std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists() && upstart_installed;
 
-        // Row 4: Boot Mode
+        // Row 0: How to Use
+        Self::draw_system_row(
+            p,
+            pad,
+            w,
+            top2,
+            0,
+            "How to Use",
+            "Gestures & Navigation Guide (Page turns, curtain, dictionary)",
+        );
+
+        // Row 1: Boot Mode
         let (bv, bs) = if os_boot {
             ("Boot Mode: yb OS (Direct Boot)", "Tap to switch to Stock Kindle mode")
         } else if !upstart_installed {
@@ -240,27 +257,27 @@ impl Screen for SystemScreen {
         } else {
             ("Boot Mode: Stock Kindle", "Tap to switch to yb OS mode")
         };
-        Self::draw_system_row(p, pad, w, top2, 4, bv, bs);
+        Self::draw_system_row(p, pad, w, top2 + row_h, 4, bv, bs);
 
-        // Row 5: Reboot
+        // Row 2: Reboot
         let next = if os_boot { "yb OS" } else { "Stock Kindle" };
         Self::draw_system_row(
             p,
             pad,
             w,
-            top2 + row_h,
+            top2 + 2 * row_h,
             5,
             "Reboot Device",
             &format!("Restart Kindle hardware · Next boot: {next}"),
         );
 
-        // Row 6: Exit
+        // Row 3: Exit
         let (ev, es) = if os_boot {
             ("Exit to Kindle", "Return to stock UI · Next reboot starts yb OS")
         } else {
             ("Quit yb-reader", "Return to the stock launcher")
         };
-        Self::draw_system_row(p, pad, w, top2 + 2 * row_h, 6, ev, es);
+        Self::draw_system_row(p, pad, w, top2 + 3 * row_h, 6, ev, es);
 
         // 4. Subtle Minimalist Footer
         p.text_center(
@@ -288,76 +305,36 @@ impl Screen for SystemScreen {
                 let top1 = pt(SEC1_TOP_PT);
                 let top2 = pt(SEC2_TOP_PT);
 
-                // Section 1 Hit Testing
-                if x >= pad && x <= w - pad && y >= top1 && y < top1 + 4 * row_h {
+                // Section 1 Hit Testing (3 rows)
+                if x >= pad && x <= w - pad && y >= top1 && y < top1 + 3 * row_h {
                     let idx = ((y - top1) / row_h) as usize;
                     match idx {
-                        // 0. Gesture Guide
-                        0 => return Action::Push(Box::new(crate::guide::GuideScreen::new())),
-                        // 1. Screensavers
-                        1 => return Action::Push(Box::new(crate::screensavers::ScreensaversScreen::new())),
-                        // 2. Trusted Devices
-                        2 => {
-                            let devices_path = ybdev::devices::devices_path();
-                            let store = ybdev::devices::DeviceStore::load(&devices_path);
-                            if store.devices.is_empty() {
-                                return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
-                                    "No Paired Devices",
-                                    "Pair your phone or PC by scanning the QR code in 'Receive over Wi-Fi' or connecting with yb-mirror.",
-                                    "OK",
-                                    None,
-                                    |_| Action::Pop,
-                                )));
-                            } else {
-                                let mut msg = String::new();
-                                for (i, d) in store.devices.iter().enumerate() {
-                                    if i > 0 {
-                                        msg.push('\n');
-                                    }
-                                    let ip_str = d.last_ip.as_deref().unwrap_or("Never connected");
-                                    msg.push_str(&format!("{}. {} ({})", i + 1, d.name, ip_str));
-                                }
-                                return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
-                                    &format!("Trusted Devices ({})", store.devices.len()),
-                                    &format!("{}\n\nTap 'Revoke All' to forget all paired devices.", msg),
-                                    "Revoke All",
-                                    None,
-                                    move |act| {
-                                        if matches!(act, crate::confirm_dialog::ConfirmAction::Yes) {
-                                            match ybdev::devices::with_store_mut(|s| {
-                                                s.devices.clear();
-                                            }) {
-                                                Ok(_) => plog("system: all trusted devices revoked"),
-                                                Err(e) => plog(&format!("system: revoke all FAILED: {}", e)),
-                                            }
-                                        }
-                                        Action::Pop
-                                    },
-                                )));
-                            }
+                        // 0. Screensavers
+                        0 => return Action::Push(Box::new(crate::screensavers::ScreensaversScreen::new())),
+                        // 1. Trusted Devices
+                        1 => {
+                            return Action::Push(Box::new(
+                                crate::devices_screen::DevicesScreen::new(),
+                            ));
                         }
-                        // 3. E-Ink Refresh interval cycle
-                        3 => {
-                            let cur = crate::positions::global_refresh_interval();
-                            let next = match cur {
-                                0 => 5,
-                                5 => 10,
-                                10 => 20,
-                                _ => 0,
-                            };
-                            crate::positions::set_global_refresh_interval(next);
-                            return Action::Redraw;
+                        // 2. Dictionaries
+                        2 => {
+                            return Action::Push(Box::new(
+                                crate::dictionaries_screen::DictionariesScreen::new(),
+                            ));
                         }
                         _ => {}
                     }
                 }
 
-                // Section 2 Hit Testing
-                if x >= pad && x <= w - pad && y >= top2 && y < top2 + 3 * row_h {
+                // Section 2 Hit Testing (4 rows)
+                if x >= pad && x <= w - pad && y >= top2 && y < top2 + 4 * row_h {
                     let idx = ((y - top2) / row_h) as usize;
                     match idx {
-                        // 4. Boot mode toggle
-                        0 => {
+                        // 0. Gesture Guide
+                        0 => return Action::Push(Box::new(crate::guide::GuideScreen::new())),
+                        // 1. Boot mode toggle
+                        1 => {
                             let upstart_installed = std::path::Path::new("/etc/upstart/yb-reader.conf").exists();
                             if !upstart_installed {
                                 return Action::Push(Box::new(crate::confirm_dialog::ConfirmDialog::new(
@@ -376,8 +353,8 @@ impl Screen for SystemScreen {
                             }
                             return Action::Redraw;
                         }
-                        // 5. Reboot
-                        1 => {
+                        // 2. Reboot
+                        2 => {
                             let next = if std::path::Path::new("/mnt/us/DONT_START_FRAMEWORK").exists()
                                 && std::path::Path::new("/etc/upstart/yb-reader.conf").exists()
                             {
@@ -405,8 +382,8 @@ impl Screen for SystemScreen {
                                 },
                             )));
                         }
-                        // 6. Exit
-                        2 => {
+                        // 3. Exit
+                        3 => {
                             let (title, body, yes) = if crate::home::takeover() {
                                 (
                                     "Exit to Kindle?",
@@ -518,7 +495,7 @@ fn draw_system_icon(p: &mut Painter, icon: usize, x: i32, y: i32) {
             p.line_w(cx, cy - rad - pt(1.0), cx, cy, 1, INK);
         }
         // 6: Exit (Door / Exit arrow)
-        _ => {
+        6 => {
             let dx = x + pt(2.0);
             let dy = y + pt(1.5);
             let dw = s - pt(5.0);
@@ -529,6 +506,15 @@ fn draw_system_icon(p: &mut Painter, icon: usize, x: i32, y: i32) {
             p.line_w(dx + dw + pt(1.0), dy + dh / 2 - pt(2.5), dx + dw + pt(3.0), dy + dh / 2, 1, INK);
             p.line_w(dx + dw + pt(1.0), dy + dh / 2 + pt(2.5), dx + dw + pt(3.0), dy + dh / 2, 1, INK);
         }
+        // 7: Dictionaries (book with text lines)
+        7 => {
+            let r = Rect::new(x + pt(1.0), y + pt(1.5), s - pt(2.0), s - pt(3.0));
+            p.rect_outline_t(r, 1, INK);
+            p.hline_t(r.y + pt(3.0), r.x + pt(2.0), r.x + r.w - pt(2.0), 1, INK);
+            p.hline_t(r.y + pt(6.0), r.x + pt(2.0), r.x + r.w - pt(2.0), 1, INK);
+            p.hline_t(r.y + pt(9.0), r.x + pt(2.0), r.x + pt(5.0), 1, INK);
+        }
+        _ => {}
     }
 }
 

@@ -284,6 +284,56 @@ pub fn load_image_fitted_disk_cached(data: &[u8], dst_w: u32, dst_h: u32) -> Opt
     Some(out)
 }
 
+/// Fast non-blocking read of a cached thumbnail from disk.
+pub fn read_thumb_disk_cached_fast(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
+    let dir = ss_cache_dir();
+    let key = fnv1a(data);
+    let path = format!("{dir}/{key:016x}_thumb_{dst_w}x{dst_h}.gray");
+
+    let mut f = std::fs::File::open(&path).ok()?;
+    use std::io::Read as _;
+    let mut head = [0u8; 16];
+    f.read_exact(&mut head).ok()?;
+    if head[..8] != *b"YBGRAY01" {
+        return None;
+    }
+    let (w, h) = (
+        u32::from_le_bytes(head[8..12].try_into().unwrap()),
+        u32::from_le_bytes(head[12..16].try_into().unwrap()),
+    );
+    if w != dst_w || h != dst_h {
+        return None;
+    }
+    let mut buf = Vec::with_capacity((dst_w as usize) * (dst_h as usize));
+    f.read_to_end(&mut buf).ok()?;
+    if buf.len() == (dst_w as usize) * (dst_h as usize) {
+        Some(buf)
+    } else {
+        None
+    }
+}
+
+/// Disk-backed decode cache for small screensaver thumbnails.
+pub fn load_image_thumb_disk_cached(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
+    if let Some(cached) = read_thumb_disk_cached_fast(data, dst_w, dst_h) {
+        return Some(cached);
+    }
+    let out = load_image_fitted(data, dst_w, dst_h)?;
+    let dir = ss_cache_dir();
+    let key = fnv1a(data);
+    let path = format!("{dir}/{key:016x}_thumb_{dst_w}x{dst_h}.gray");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut head = Vec::with_capacity(16 + out.len());
+    head.extend_from_slice(b"YBGRAY01");
+    head.extend_from_slice(&dst_w.to_le_bytes());
+    head.extend_from_slice(&dst_h.to_le_bytes());
+    head.extend_from_slice(&out);
+    let part = format!("{dir}/{key:016x}_thumb_{dst_w}x{dst_h}.part");
+    let _ = std::fs::write(&part, &head);
+    let _ = std::fs::rename(&part, &path);
+    Some(out)
+}
+
 /// The cache dir, overridable for host tests.
 pub fn ss_cache_dir() -> String {
     std::env::var("YB_SS_CACHE_DIR")
@@ -301,9 +351,10 @@ pub fn ss_cache_gc(keep: &[u64]) {
     let mut freed = 0u64;
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        let Some(hex) = name.strip_suffix(".gray") else {
+        let Some(stem) = name.strip_suffix(".gray") else {
             continue;
         };
+        let hex = stem.split('_').next().unwrap_or(stem);
         let Ok(h) = u64::from_str_radix(hex, 16) else {
             continue;
         };
@@ -552,8 +603,11 @@ mod disk_cache_tests {
         d.to_str().unwrap().to_string()
     }
 
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn disk_cache_round_trip_and_gc() {
+        let _guard = TEST_LOCK.lock().unwrap();
         std::env::set_var("YB_SS_CACHE_DIR", fresh_dir("rt"));
         let jpeg = tiny_jpeg();
 
@@ -584,6 +638,34 @@ mod disk_cache_tests {
         ss_cache_gc(&[h]);
         assert!(!std::path::Path::new(&foreign).exists(), "orphan removed");
         assert!(std::path::Path::new(&entry).exists(), "live entry kept");
+
+        std::env::remove_var("YB_SS_CACHE_DIR");
+    }
+
+    #[test]
+    fn thumbnail_disk_cache_roundtrip_and_fast_read() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        std::env::set_var("YB_SS_CACHE_DIR", fresh_dir("thumb_rt"));
+        let jpeg = tiny_jpeg();
+        // Fast read before render returns None
+        assert!(read_thumb_disk_cached_fast(&jpeg, 8, 8).is_none());
+
+        // Decode & cache thumbnail
+        let rendered = load_image_thumb_disk_cached(&jpeg, 8, 8).expect("thumb render");
+        assert_eq!(rendered.len(), 64);
+
+        // Fast read after render succeeds and matches rendered bytes
+        let fast = read_thumb_disk_cached_fast(&jpeg, 8, 8).expect("fast read hit");
+        assert_eq!(fast, rendered);
+
+        // GC keeps thumbnail when hash in keep list
+        let h = fnv1a(&jpeg);
+        ss_cache_gc(&[h]);
+        assert!(read_thumb_disk_cached_fast(&jpeg, 8, 8).is_some());
+
+        // GC removes thumbnail when hash is not in keep list
+        ss_cache_gc(&[]);
+        assert!(read_thumb_disk_cached_fast(&jpeg, 8, 8).is_none());
 
         std::env::remove_var("YB_SS_CACHE_DIR");
     }
