@@ -39,6 +39,8 @@ mod scrubber_dialog;
 mod selection;
 mod split;
 mod system;
+#[cfg(test)]
+pub mod testutil;
 mod toc_dialog;
 mod usb_screen;
 mod vocab;

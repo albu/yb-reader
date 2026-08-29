@@ -1,5 +1,7 @@
 //! Image decoding for the mirror frames.
 
+use std::path::Path;
+
 /// ~40 MP: far above any sane photo, far below memory trouble. Applied to
 /// both decode paths — a "decode bomb" PNG header must fail the ceiling
 /// check instead of OOMing the RAM-scarce device.
@@ -241,40 +243,15 @@ pub fn load_image_fitted(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>>
 pub fn load_image_fitted_disk_cached(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
     let dir = ss_cache_dir();
     let key = fnv1a(data);
-    let path = format!("{dir}/{key:016x}.gray");
-
-    // Hit: header check guards against torn/foreign files.
-    if let Ok(mut f) = std::fs::File::open(&path) {
-        use std::io::Read as _;
-        let mut head = [0u8; 16];
-        if f.read_exact(&mut head).is_ok() && head[..8] == *b"YBGRAY01" {
-            let (w, h) = (
-                u32::from_le_bytes(head[8..12].try_into().unwrap()),
-                u32::from_le_bytes(head[12..16].try_into().unwrap()),
-            );
-            if w == dst_w && h == dst_h {
-                let mut buf = Vec::with_capacity((dst_w as usize) * (dst_h as usize));
-                if f.read_to_end(&mut buf).is_ok()
-                    && buf.len() == (dst_w as usize) * (dst_h as usize)
-                {
-                    return Some(buf);
-                }
-            }
-        }
+    let name = format!("{key:016x}.gray");
+    if let Some(buf) = read_gray_cache(&format!("{dir}/{name}"), dst_w, dst_h) {
+        return Some(buf);
     }
 
     // Miss: render, persist, return.
     let t0 = std::time::Instant::now();
     let out = load_image_fitted(data, dst_w, dst_h)?;
-    let _ = std::fs::create_dir_all(&dir);
-    let mut head = Vec::with_capacity(16 + out.len());
-    head.extend_from_slice(b"YBGRAY01");
-    head.extend_from_slice(&dst_w.to_le_bytes());
-    head.extend_from_slice(&dst_h.to_le_bytes());
-    head.extend_from_slice(&out);
-    let part = format!("{dir}/{key:016x}.part");
-    let _ = std::fs::write(&part, &head);
-    let _ = std::fs::rename(&part, &path);
+    write_gray_cache(&dir, &name, dst_w, dst_h, &out);
     crate::log::plog(&format!(
         "screensaver: rendered {key:016x} {}x{} in {}ms",
         dst_w,
@@ -284,13 +261,62 @@ pub fn load_image_fitted_disk_cached(data: &[u8], dst_w: u32, dst_h: u32) -> Opt
     Some(out)
 }
 
-/// Fast non-blocking read of a cached thumbnail from disk.
-pub fn read_thumb_disk_cached_fast(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
-    let dir = ss_cache_dir();
-    let key = fnv1a(data);
-    let path = format!("{dir}/{key:016x}_thumb_{dst_w}x{dst_h}.gray");
+/// Stable identity for a source file: name + length + mtime, hashed.
+/// Thumbnails used to be content-addressed, which forced the draw path
+/// to read whole multi-MB sources just to look up a ~10 KB thumbnail;
+/// identity keying costs one stat. A replaced file gets a new
+/// (len, mtime) and never hits a stale entry.
+pub fn source_key(src: &Path) -> Option<u64> {
+    let md = std::fs::metadata(src).ok()?;
+    let name = src.file_name()?.to_string_lossy();
+    let mtime = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let mut id = Vec::with_capacity(name.len() + 16);
+    id.extend_from_slice(name.as_bytes());
+    id.extend_from_slice(&md.len().to_le_bytes());
+    id.extend_from_slice(&mtime.to_le_bytes());
+    Some(fnv1a(&id))
+}
 
-    let mut f = std::fs::File::open(&path).ok()?;
+/// Fast stat-only read of a cached thumbnail: no source bytes needed.
+pub fn read_thumb_disk_cached_fast(src: &Path, dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
+    let key = source_key(src)?;
+    let dir = ss_cache_dir();
+    read_gray_cache(
+        &format!("{dir}/{key:016x}_thumb_{dst_w}x{dst_h}.gray"),
+        dst_w,
+        dst_h,
+    )
+}
+
+/// Disk-backed decode cache for small screensaver thumbnails. `src` is
+/// stat'ed for the cache key; `data` (the same file's bytes) is decoded
+/// on a miss.
+pub fn load_image_thumb_disk_cached(
+    src: &Path,
+    data: &[u8],
+    dst_w: u32,
+    dst_h: u32,
+) -> Option<Vec<u8>> {
+    let key = source_key(src)?;
+    let dir = ss_cache_dir();
+    let name = format!("{key:016x}_thumb_{dst_w}x{dst_h}.gray");
+    if let Some(buf) = read_gray_cache(&format!("{dir}/{name}"), dst_w, dst_h) {
+        return Some(buf);
+    }
+    let out = load_image_fitted(data, dst_w, dst_h)?;
+    write_gray_cache(&dir, &name, dst_w, dst_h, &out);
+    Some(out)
+}
+
+/// Read one YBGRAY01 cache file, validating magic, size header, and
+/// exact payload length — a torn or foreign file degrades to a miss.
+fn read_gray_cache(path: &str, dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
+    let mut f = std::fs::File::open(path).ok()?;
     use std::io::Read as _;
     let mut head = [0u8; 16];
     f.read_exact(&mut head).ok()?;
@@ -306,32 +332,20 @@ pub fn read_thumb_disk_cached_fast(data: &[u8], dst_w: u32, dst_h: u32) -> Optio
     }
     let mut buf = Vec::with_capacity((dst_w as usize) * (dst_h as usize));
     f.read_to_end(&mut buf).ok()?;
-    if buf.len() == (dst_w as usize) * (dst_h as usize) {
-        Some(buf)
-    } else {
-        None
-    }
+    (buf.len() == (dst_w as usize) * (dst_h as usize)).then_some(buf)
 }
 
-/// Disk-backed decode cache for small screensaver thumbnails.
-pub fn load_image_thumb_disk_cached(data: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
-    if let Some(cached) = read_thumb_disk_cached_fast(data, dst_w, dst_h) {
-        return Some(cached);
-    }
-    let out = load_image_fitted(data, dst_w, dst_h)?;
-    let dir = ss_cache_dir();
-    let key = fnv1a(data);
-    let path = format!("{dir}/{key:016x}_thumb_{dst_w}x{dst_h}.gray");
-    let _ = std::fs::create_dir_all(&dir);
-    let mut head = Vec::with_capacity(16 + out.len());
-    head.extend_from_slice(b"YBGRAY01");
-    head.extend_from_slice(&dst_w.to_le_bytes());
-    head.extend_from_slice(&dst_h.to_le_bytes());
-    head.extend_from_slice(&out);
-    let part = format!("{dir}/{key:016x}_thumb_{dst_w}x{dst_h}.part");
-    let _ = std::fs::write(&part, &head);
-    let _ = std::fs::rename(&part, &path);
-    Some(out)
+/// Atomically persist one YBGRAY01 cache file (write .part, rename).
+fn write_gray_cache(dir: &str, name: &str, dst_w: u32, dst_h: u32, out: &[u8]) {
+    let _ = std::fs::create_dir_all(dir);
+    let mut buf = Vec::with_capacity(16 + out.len());
+    buf.extend_from_slice(b"YBGRAY01");
+    buf.extend_from_slice(&dst_w.to_le_bytes());
+    buf.extend_from_slice(&dst_h.to_le_bytes());
+    buf.extend_from_slice(out);
+    let part = format!("{dir}/{name}.part");
+    let _ = std::fs::write(&part, &buf);
+    let _ = std::fs::rename(&part, &format!("{dir}/{name}"));
 }
 
 /// The cache dir, overridable for host tests.
@@ -340,9 +354,11 @@ pub fn ss_cache_dir() -> String {
         .unwrap_or_else(|_| "/mnt/us/extensions/reader/cache/screensavers".to_string())
 }
 
-/// Drop cache entries whose hashes are not in `keep` (the reader's
-/// screensaver screen calls this on open — replaced/deleted images
-/// must not leave orphans on the flash).
+/// Drop full-size renders whose content hashes are not in `keep`.
+/// Content keying needs the source bytes, so this runs from prewarm,
+/// which has every file's bytes in hand anyway. Full-size entries are a
+/// bare 16-hex stem; thumbnails carry the `_thumb_` tag and belong to
+/// [`ss_thumb_cache_gc`].
 pub fn ss_cache_gc(keep: &[u64]) {
     let dir = ss_cache_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -354,8 +370,10 @@ pub fn ss_cache_gc(keep: &[u64]) {
         let Some(stem) = name.strip_suffix(".gray") else {
             continue;
         };
-        let hex = stem.split('_').next().unwrap_or(stem);
-        let Ok(h) = u64::from_str_radix(hex, 16) else {
+        if stem.len() != 16 || stem.contains('_') {
+            continue;
+        }
+        let Ok(h) = u64::from_str_radix(stem, 16) else {
             continue;
         };
         if !keep.contains(&h) {
@@ -367,6 +385,42 @@ pub fn ss_cache_gc(keep: &[u64]) {
     }
     if freed > 0 {
         crate::log::plog(&format!("screensaver: gc freed {} KB", freed / 1024));
+    }
+}
+
+/// Drop thumbnails whose source identity is not in `keep` — the
+/// `*_thumb_WxH.gray` siblings of [`ss_cache_gc`]'s full-size renders.
+/// Stat-only (keys come from [`source_key`]), so the Screensavers
+/// screen can call it on open without reading any source file.
+pub fn ss_thumb_cache_gc(keep: &[u64]) {
+    let dir = ss_cache_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut freed = 0u64;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".gray") else {
+            continue;
+        };
+        let Some(hex) = stem.split("_thumb_").next() else {
+            continue;
+        };
+        if stem == hex {
+            continue;
+        }
+        let Ok(k) = u64::from_str_radix(hex, 16) else {
+            continue;
+        };
+        if !keep.contains(&k) {
+            if let Ok(md) = e.metadata() {
+                freed += md.len();
+            }
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    if freed > 0 {
+        crate::log::plog(&format!("screensaver: thumb gc freed {} KB", freed / 1024));
     }
 }
 
@@ -646,27 +700,37 @@ mod disk_cache_tests {
     fn thumbnail_disk_cache_roundtrip_and_fast_read() {
         let _guard = TEST_LOCK.lock().unwrap();
         std::env::set_var("YB_SS_CACHE_DIR", fresh_dir("thumb_rt"));
+        let dir = fresh_dir("thumb_src");
         let jpeg = tiny_jpeg();
-        // Fast read before render returns None
-        assert!(read_thumb_disk_cached_fast(&jpeg, 8, 8).is_none());
+        let src = std::path::Path::new(&dir).join("a.jpg");
+        std::fs::write(&src, &jpeg).unwrap();
+
+        // Stat-only fast read before render returns None (no bytes read).
+        assert!(read_thumb_disk_cached_fast(&src, 8, 8).is_none());
 
         // Decode & cache thumbnail
-        let rendered = load_image_thumb_disk_cached(&jpeg, 8, 8).expect("thumb render");
+        let rendered = load_image_thumb_disk_cached(&src, &jpeg, 8, 8).expect("thumb render");
         assert_eq!(rendered.len(), 64);
 
         // Fast read after render succeeds and matches rendered bytes
-        let fast = read_thumb_disk_cached_fast(&jpeg, 8, 8).expect("fast read hit");
+        let fast = read_thumb_disk_cached_fast(&src, 8, 8).expect("fast read hit");
         assert_eq!(fast, rendered);
 
-        // GC keeps thumbnail when hash in keep list
-        let h = fnv1a(&jpeg);
-        ss_cache_gc(&[h]);
-        assert!(read_thumb_disk_cached_fast(&jpeg, 8, 8).is_some());
-
-        // GC removes thumbnail when hash is not in keep list
+        // The full-size GC must not touch thumbnails (separate GCs).
         ss_cache_gc(&[]);
-        assert!(read_thumb_disk_cached_fast(&jpeg, 8, 8).is_none());
+        assert!(read_thumb_disk_cached_fast(&src, 8, 8).is_some());
 
+        // Thumb GC keeps the entry while the source identity is live…
+        let key = source_key(&src).expect("key");
+        ss_thumb_cache_gc(&[key]);
+        assert!(read_thumb_disk_cached_fast(&src, 8, 8).is_some());
+
+        // …and removes it once the source is gone (or replaced: a new
+        // len/mtime means a new key).
+        ss_thumb_cache_gc(&[]);
+        assert!(read_thumb_disk_cached_fast(&src, 8, 8).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
         std::env::remove_var("YB_SS_CACHE_DIR");
     }
 }

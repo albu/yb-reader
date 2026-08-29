@@ -2,16 +2,13 @@
 //! Lists all paired client devices (phones, laptops, tablets) authorized
 //! to connect over Wi-Fi or yb-mirror, with individual revocation.
 
+use crate::chrome::{
+    DIM, DIVIDER, FOOTER_BASE_PT, ICON_BOX_PT, ICON_GAP_PT, INK, MUTED, PAD_PT, ROW_H_PT,
+    TRIVIA_BASE_PT, TRIVIA_RULE_PT,
+};
 use ybdev::input::Gesture;
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
-
-const PAD_PT: f32 = 18.0;
-
-// Persistent Header
-const HDR_RULE_PT: f32 = 20.0;
-const TRIVIA_BASE_PT: f32 = 34.0;
-const TRIVIA_RULE_PT: f32 = 42.0;
 
 // Section
 const SEC_LABEL_PT: f32 = 52.0;
@@ -22,16 +19,6 @@ const SEC_TOP_PT: f32 = 60.0;
 /// visible, or taps in the blank band (and on the button) would hit
 /// invisible rows.
 const LIST_BOTTOM_PT: f32 = 330.0;
-const ROW_H_PT: f32 = 38.0;
-const ICON_BOX_PT: f32 = 16.0;
-const ICON_GAP_PT: f32 = 10.0;
-
-const FOOTER_BASE_PT: f32 = 372.0;
-
-const INK: u8 = 0;
-const DIM: u8 = 110;
-const MUTED: u8 = 160;
-const DIVIDER: u8 = 220;
 
 /// Rows that fit between the section header and the bottom of the list
 /// area — shared by draw() and the tap hit test.
@@ -58,41 +45,6 @@ impl DevicesScreen {
     fn reload(&mut self) {
         let store = ybdev::devices::DeviceStore::load(&ybdev::devices::devices_path());
         self.devices = store.devices;
-    }
-
-    fn draw_persistent_header(p: &mut Painter, w: i32, pad: i32) {
-        let t = crate::chrome::current_time_str();
-        let (cap, plugged) = ybdev::sysinfo::battery();
-        let bat = if plugged {
-            format!("+{}%", cap)
-        } else {
-            format!("{}%", cap)
-        };
-        let fg = 120;
-
-        // Left: Time
-        p.text(pad, pt(14.0), 7.0, fg, &t);
-
-        // Center: Title
-        p.text_center(pt(14.0), 7.5, INK, "Trusted Devices");
-
-        // Right: Wi-Fi glyph + Battery
-        let xr = w - pad;
-        let bat_w = p.text_width(7.0, &bat) as i32;
-        p.text_right(xr, pt(14.0), 7.0, fg, &bat);
-        crate::chrome::draw_wifi_glyph(p, xr - bat_w - pt(6.0), pt(11.5), 7.0, fg);
-
-        // Top divider rule
-        p.hline_t(pt(HDR_RULE_PT), pad, w - pad, 1, 225);
-    }
-
-    fn draw_badge(p: &mut Painter, rx: i32, cy: i32, text: &str) {
-        let text_w = p.text_width(7.0, text) as i32;
-        let bw = text_w + pt(12.0);
-        let bh = pt(14.0);
-        let r = Rect::new(rx - bw, cy - bh / 2, bw, bh);
-        p.rect_outline_t(r, 1, MUTED);
-        p.text_center_in(r.x, r.x + r.w, cy + pt(2.5), 7.0, DIM, text);
     }
 }
 
@@ -125,7 +77,7 @@ impl Screen for DevicesScreen {
         let pad = pt(PAD_PT);
 
         // 1. Header
-        Self::draw_persistent_header(p, w, pad);
+        crate::chrome::draw_settings_header(p, w, pad, "Trusted Devices");
 
         // 2. Summary
         let count = self.devices.len();
@@ -185,7 +137,7 @@ impl Screen for DevicesScreen {
                 p.text(tx, ry + pt(28.0), 7.5, DIM, &sub_trunc);
 
                 let cy = ry + pt(ROW_H_PT) / 2;
-                Self::draw_badge(p, w - pad, cy, "REVOKE");
+                crate::chrome::draw_badge(p, w - pad, cy, "REVOKE", false);
 
                 p.hline_t(ry + pt(ROW_H_PT), pad, w - pad, 1, DIVIDER);
             }
@@ -293,6 +245,7 @@ fn draw_device_icon(p: &mut Painter, x: i32, y: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::save_preview_artifact;
 
     #[test]
     fn visible_rows_match_the_painted_list() {
@@ -300,24 +253,6 @@ mod tests {
         // visible_rows(), so the "Revoke All" button below the list can
         // never be swallowed by an invisible row's tap band.
         assert_eq!(visible_rows(), 7);
-    }
-
-    fn save_preview_artifact(name: &str, canvas: &[u8]) {
-        let artifact_dir = match std::env::var("YB_AI_PREVIEW_DIR")
-            .or_else(|_| std::env::var("ARTIFACT_DIR"))
-        {
-            Ok(d) if !d.is_empty() => d,
-            _ => return,
-        };
-        let path = std::path::Path::new(&artifact_dir).join(name);
-        if let Ok(file) = std::fs::File::create(&path) {
-            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
-            enc.set_color(png::ColorType::Grayscale);
-            enc.set_depth(png::BitDepth::Eight);
-            if let Ok(mut w) = enc.write_header() {
-                let _ = w.write_image_data(canvas);
-            }
-        }
     }
 
     #[test]
@@ -353,7 +288,7 @@ mod tests {
         });
 
         s.draw(&mut p);
-        save_preview_artifact("devices_preview.png", &canvas);
+        crate::testutil::save_preview_artifact("devices_preview.png", &canvas);
 
         // Boundary state: one more device than fits. Rows past
         // visible_rows() must not paint (the hit test shares the cap), and
@@ -381,7 +316,7 @@ mod tests {
             });
         }
         s2.draw(&mut p2);
-        save_preview_artifact("devices_boundary_preview.png", &canvas2);
+        crate::testutil::save_preview_artifact("devices_boundary_preview.png", &canvas2);
 
         let lit = canvas.iter().filter(|&&b| b > 200).count();
         assert!(lit > 1236 * 1648 * 88 / 100);

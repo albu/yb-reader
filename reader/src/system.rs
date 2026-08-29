@@ -3,18 +3,15 @@
 //! boot mode, reboot, and exit.
 //! Styled with the same zero-blink list row architecture as the Home screen.
 
+use crate::chrome::{
+    DIM, DIVIDER, FOOTER_BASE_PT, ICON_BOX_PT, ICON_GAP_PT, INK, MUTED, PAD_PT, ROW_H_PT,
+    TRIVIA_BASE_PT, TRIVIA_RULE_PT,
+};
 use ybdev::input::{Gesture, SwipeDir};
 use ybdev::log::plog;
 use ybdev::sysinfo;
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
-
-const PAD_PT: f32 = 18.0;
-
-// Persistent Header
-const HDR_RULE_PT: f32 = 20.0;
-const TRIVIA_BASE_PT: f32 = 34.0;
-const TRIVIA_RULE_PT: f32 = 42.0;
 
 // Section 1: Settings
 const SEC1_LABEL_PT: f32 = 52.0;
@@ -23,17 +20,6 @@ const SEC1_TOP_PT: f32 = 60.0;
 // Section 2: Device & Lifecycle
 const SEC2_LABEL_PT: f32 = 188.0;
 const SEC2_TOP_PT: f32 = 196.0;
-
-const ROW_H_PT: f32 = 38.0;
-const ICON_BOX_PT: f32 = 16.0;
-const ICON_GAP_PT: f32 = 10.0;
-
-const FOOTER_BASE_PT: f32 = 372.0;
-
-const INK: u8 = 0;
-const DIM: u8 = 110;
-const MUTED: u8 = 160;
-const DIVIDER: u8 = 220;
 
 pub struct SystemScreen {
     w: i32,
@@ -54,32 +40,6 @@ impl SystemScreen {
             dict_installed: 0,
             dict_active: 0,
         }
-    }
-
-    fn draw_persistent_header(p: &mut Painter, w: i32, pad: i32) {
-        let t = crate::chrome::current_time_str();
-        let (cap, plugged) = sysinfo::battery();
-        let bat = if plugged {
-            format!("+{}%", cap)
-        } else {
-            format!("{}%", cap)
-        };
-        let fg = 120;
-
-        // Left: Time
-        p.text(pad, pt(14.0), 7.0, fg, &t);
-
-        // Center: Title
-        p.text_center(pt(14.0), 7.5, INK, "System");
-
-        // Right: Wi-Fi glyph + Battery + Build
-        let xr = w - pad;
-        let bat_w = p.text_width(7.0, &bat) as i32;
-        p.text_right(xr, pt(14.0), 7.0, fg, &bat);
-        crate::chrome::draw_wifi_glyph(p, xr - bat_w - pt(6.0), pt(11.5), 7.0, fg);
-
-        // Top divider rule
-        p.hline_t(pt(HDR_RULE_PT), pad, w - pad, 1, 225);
     }
 
     fn draw_system_row(
@@ -148,7 +108,7 @@ impl Screen for SystemScreen {
         let pad = pt(PAD_PT);
 
         // 1. Persistent Ambient Header
-        Self::draw_persistent_header(p, w, pad);
+        crate::chrome::draw_settings_header(p, w, pad, "System");
 
         // 2. System Status Trivia Sub-header
         let mut bits: Vec<String> = Vec::new();
@@ -521,25 +481,8 @@ fn draw_system_icon(p: &mut Painter, icon: usize, x: i32, y: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::save_preview_artifact;
     use yui::Font;
-
-    fn save_preview_artifact(name: &str, canvas: &[u8]) {
-        let artifact_dir = match std::env::var("YB_AI_PREVIEW_DIR")
-            .or_else(|_| std::env::var("ARTIFACT_DIR"))
-        {
-            Ok(d) if !d.is_empty() => d,
-            _ => return,
-        };
-        let path = std::path::Path::new(&artifact_dir).join(name);
-        if let Ok(file) = std::fs::File::create(&path) {
-            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
-            enc.set_color(png::ColorType::Grayscale);
-            enc.set_depth(png::BitDepth::Eight);
-            if let Ok(mut w) = enc.write_header() {
-                let _ = w.write_image_data(canvas);
-            }
-        }
-    }
 
     #[test]
     fn system_screen_renders_content() {
@@ -560,7 +503,7 @@ mod tests {
             s.draw(&mut p);
             p.flush();
         }
-        save_preview_artifact("system_preview.png", &canvas);
+        crate::testutil::save_preview_artifact("system_preview.png", &canvas);
 
         let ink = |name: &str, y0: usize, y1: usize, min: usize| {
             let n = buf[y0 * 1248..y1 * 1248]

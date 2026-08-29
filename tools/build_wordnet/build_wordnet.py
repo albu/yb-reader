@@ -35,8 +35,9 @@ def clean_word(w):
 def parse_index(path, max_senses=6):
     """index.<pos> -> {lemma: [(synset offset, tagsense_cnt), ...]}.
 
-    The offsets in an index file are listed in frequency order (sense 1
-    first); keep the first `max_senses` senses of that POS.
+    Only the first offset (sense 1) of each line is kept; the per-lemma
+    sense list is capped at `max_senses`. Ranking and merging of senses
+    happens across POS in main(), not within a single POS.
     """
     out = {}
     with open(path, encoding="utf-8", errors="replace") as f:

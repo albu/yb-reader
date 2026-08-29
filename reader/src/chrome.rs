@@ -62,13 +62,85 @@ pub fn draw_header(p: &mut Painter, time_str: &str, book: &str, is_night: bool, 
     );
 }
 
+// ---- Settings screens (System and everything it pushes) ----
+//
+// The settings-style screens share one persistent header, one status
+// badge, and one row grid; this is the single source of truth and
+// screens contribute only their title and rows. Five hand-copied
+// versions had already drifted (footer baseline, gray level, badge
+// styles), which is why the copies are gone.
+
+pub const PAD_PT: f32 = 18.0;
+
+// Persistent header / summary band
+pub const HDR_RULE_PT: f32 = 20.0;
+pub const TRIVIA_BASE_PT: f32 = 34.0;
+pub const TRIVIA_RULE_PT: f32 = 42.0;
+
+// Shared row grid
+pub const ROW_H_PT: f32 = 38.0;
+pub const ICON_BOX_PT: f32 = 16.0;
+pub const ICON_GAP_PT: f32 = 10.0;
+
+pub const FOOTER_BASE_PT: f32 = 372.0;
+
+pub const INK: u8 = 0;
+pub const DIM: u8 = 110;
+pub const MUTED: u8 = 160;
+pub const DIVIDER: u8 = 220;
+
+/// The persistent ambient header on the settings screens: time · title ·
+/// (wifi · battery) over a rule. `title` may carry a page tracker — the
+/// guide passes "How to Use · 1/2 Reading".
+pub fn draw_settings_header(p: &mut Painter, w: i32, pad: i32, title: &str) {
+    let t = current_time_str();
+    let (cap, plugged) = sysinfo::battery();
+    let bat = if plugged {
+        format!("+{}%", cap)
+    } else {
+        format!("{}%", cap)
+    };
+    let fg = 120;
+
+    // Left: Time
+    p.text(pad, pt(14.0), 7.0, fg, &t);
+
+    // Center: Title
+    p.text_center(pt(14.0), 7.5, INK, title);
+
+    // Right: Wi-Fi glyph + Battery
+    let xr = w - pad;
+    let bat_w = p.text_width(7.0, &bat) as i32;
+    p.text_right(xr, pt(14.0), 7.0, fg, &bat);
+    draw_wifi_glyph(p, xr - bat_w - pt(6.0), pt(11.5), 7.0, fg);
+
+    // Top divider rule
+    p.hline_t(pt(HDR_RULE_PT), pad, w - pad, 1, 225);
+}
+
+/// Status pill on a settings row, right-aligned ending at `rx` and
+/// centered on `cy`: filled ink with white text when active, outline
+/// with dim text otherwise.
+pub fn draw_badge(p: &mut Painter, rx: i32, cy: i32, text: &str, active: bool) {
+    let text_w = p.text_width(7.0, text) as i32;
+    let bw = text_w + pt(12.0);
+    let bh = pt(14.0);
+    let r = Rect::new(rx - bw, cy - bh / 2, bw, bh);
+    if active {
+        p.rect(r, INK);
+        p.text_center_in(r.x, r.x + r.w, cy + pt(2.5), 7.0, 255, text);
+    } else {
+        p.rect_outline_t(r, 1, MUTED);
+        p.text_center_in(r.x, r.x + r.w, cy + pt(2.5), 7.0, DIM, text);
+    }
+}
+
 /// Radio status glyph for the ambient top rows, right-aligned ending at
 /// `x_right`, vertically centered on `cy`: filled bars when associated,
 /// hollow bars while the radio powers up without a link yet, and an
 /// airplane when it is down (sysfs only — safe on busy ticks). Returns
 /// its rendered width for cluster layout.
-pub fn draw_wifi_glyph(p: &mut Painter, x_right: i32, cy: i32, size_pt: f32, color: u8) -> i32 {
-    wifi_glyph(p, x_right, cy, size_pt, color, sysinfo::wifi_radio())
+pub fn draw_wifi_glyph(p: &mut Painter, x_right: i32, cy: i32, size_pt: f32, color: u8) -> i32 {    wifi_glyph(p, x_right, cy, size_pt, color, sysinfo::wifi_radio())
 }
 
 /// The drawing, parameterized over the state so host tests can render

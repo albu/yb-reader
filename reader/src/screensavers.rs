@@ -1,30 +1,18 @@
+use crate::chrome::{
+    DIM, DIVIDER, FOOTER_BASE_PT, INK, MUTED, PAD_PT, ROW_H_PT, TRIVIA_BASE_PT, TRIVIA_RULE_PT,
+};
 use std::collections::{HashMap, HashSet};
 
 use ybdev::input::{Gesture, SwipeDir};
 use yui::painter::{pt, Painter, Rect};
 use yui::screen::{Action, Screen};
 
-const PAD_PT: f32 = 18.0;
-
-// Persistent Header
-const HDR_RULE_PT: f32 = 20.0;
-const TRIVIA_BASE_PT: f32 = 34.0;
-const TRIVIA_RULE_PT: f32 = 42.0;
-
 // Section
 const SEC_LABEL_PT: f32 = 52.0;
 const ROWS_TOP_PT: f32 = 60.0;
-const ROW_H_PT: f32 = 38.0;
 
 const THUMB_W_PT: f32 = 21.0;
 const THUMB_H_PT: f32 = 28.0;
-
-const FOOTER_BASE_PT: f32 = 372.0;
-
-const INK: u8 = 0;
-const DIM: u8 = 110;
-const MUTED: u8 = 160;
-const DIVIDER: u8 = 220;
 
 /// The thumbnail size both the boot prewarm and the screen's rows request.
 /// The disk cache encodes the exact size in the filename and header, so a
@@ -171,9 +159,10 @@ impl ScreensaversScreen {
         }
     }
 
-    /// Content hashes of every current image (enabled or not) — the
-    /// disk cache GC keep-set.
-    fn current_hashes() -> Vec<u64> {
+    /// Identity keys of every current image (enabled or not) — the
+    /// thumbnail GC keep-set. Stat-only: opening the screen no longer
+    /// reads every multi-MB source just to hash it.
+    fn current_keys() -> Vec<u64> {
         let mut out = Vec::new();
         for d in screensaver_dirs() {
             let Ok(entries) = std::fs::read_dir(d) else {
@@ -182,8 +171,8 @@ impl ScreensaversScreen {
             for e in entries.flatten() {
                 let p = e.path();
                 if is_image(&p) && p.is_file() {
-                    if let Ok(bytes) = std::fs::read(&p) {
-                        out.push(ybdev::img::fnv1a(&bytes));
+                    if let Some(k) = ybdev::img::source_key(&p) {
+                        out.push(k);
                     }
                 }
             }
@@ -213,74 +202,37 @@ impl ScreensaversScreen {
     }
 
     fn draw_persistent_header(p: &mut Painter, w: i32, pad: i32) {
-        let t = crate::chrome::current_time_str();
-        let (cap, plugged) = ybdev::sysinfo::battery();
-        let bat = if plugged {
-            format!("+{}%", cap)
-        } else {
-            format!("{}%", cap)
-        };
-        let fg = 120;
-
-        // Left: Time
-        p.text(pad, pt(14.0), 7.0, fg, &t);
-
-        // Center: Title
-        p.text_center(pt(14.0), 7.5, INK, "Screensavers");
-
-        // Right: Wi-Fi glyph + Battery
-        let xr = w - pad;
-        let bat_w = p.text_width(7.0, &bat) as i32;
-        p.text_right(xr, pt(14.0), 7.0, fg, &bat);
-        crate::chrome::draw_wifi_glyph(p, xr - bat_w - pt(6.0), pt(11.5), 7.0, fg);
-
-        // Top divider rule
-        p.hline_t(pt(HDR_RULE_PT), pad, w - pad, 1, 225);
-    }
-
-    fn draw_badge(p: &mut Painter, rx: i32, cy: i32, text: &str, active: bool) {
-        let text_w = p.text_width(7.0, text) as i32;
-        let bw = text_w + pt(12.0);
-        let bh = pt(14.0);
-        let r = Rect::new(rx - bw, cy - bh / 2, bw, bh);
-        if active {
-            p.rect(r, INK);
-            p.text_center_in(r.x, r.x + r.w, cy + pt(2.5), 7.0, 255, text);
-        } else {
-            p.rect_outline_t(r, 1, MUTED);
-            p.text_center_in(r.x, r.x + r.w, cy + pt(2.5), 7.0, DIM, text);
-        }
+        crate::chrome::draw_settings_header(p, w, pad, "Screensavers");
     }
 
     fn get_thumbnail(&mut self, name: &str, tw: u32, th: u32) -> Option<&[u8]> {
         if !self.thumbnails.contains_key(name) {
-            // 1. Fast non-blocking disk cache check (< 0.5ms)
+            // 1. Fast non-blocking disk cache check: one stat + a ~10 KB
+            // read — the source image itself is never read here.
             let mut found_cached = None;
-            let mut bytes = None;
+            let mut src = None;
             if let Some(path) = find_image_path(name) {
-                if let Ok(b) = std::fs::read(&path) {
-                    if let Some(cached) = ybdev::img::read_thumb_disk_cached_fast(&b, tw, th) {
-                        found_cached = Some(cached);
-                    } else {
-                        bytes = Some(b);
-                    }
+                match ybdev::img::read_thumb_disk_cached_fast(&path, tw, th) {
+                    Some(cached) => found_cached = Some(cached),
+                    None => src = Some(path),
                 }
             }
 
             if let Some(cached) = found_cached {
                 self.thumbnails.insert(name.to_string(), ThumbState::Ready(cached));
             } else {
-                // 2. Mark as in-flight and dispatch background decode worker
+                // 2. Mark as in-flight and dispatch background decode
+                // worker: it reads the source once, decodes, and writes
+                // the identity-keyed cache entry.
                 self.thumbnails.insert(name.to_string(), ThumbState::Pending);
                 let tx = self.thumb_tx.clone();
                 let name_cl = name.to_string();
                 std::thread::Builder::new()
                     .name("ss-thumb".into())
                     .spawn(move || {
-                        // Use the bytes already read for the cache key —
-                        // the worker must not re-read the whole file.
-                        let thumb = bytes.and_then(|b| {
-                            ybdev::img::load_image_thumb_disk_cached(&b, tw, th)
+                        let thumb = src.and_then(|p| {
+                            let bytes = std::fs::read(&p).ok()?;
+                            ybdev::img::load_image_thumb_disk_cached(&p, &bytes, tw, th)
                         });
                         let _ = tx.send((name_cl, thumb));
                     })
@@ -313,6 +265,7 @@ pub fn prewarm() {
         .name("ss-prewarm".to_string())
         .spawn(|| {
             let mut hashes = Vec::new();
+            let mut keys = Vec::new();
             for d in screensaver_dirs() {
                 let Ok(entries) = std::fs::read_dir(&d) else {
                     continue;
@@ -322,11 +275,15 @@ pub fn prewarm() {
                     if !is_image(&p) || !p.is_file() {
                         continue;
                     }
+                    if let Some(k) = ybdev::img::source_key(&p) {
+                        keys.push(k);
+                    }
                     if let Ok(bytes) = std::fs::read(&p) {
                         hashes.push(ybdev::img::fnv1a(&bytes));
                         let _ = ybdev::img::load_image_fitted_disk_cached(&bytes, 1236, 1648);
                         let (tw, th) = thumb_size();
                         let _ = ybdev::img::load_image_thumb_disk_cached(
+                            &p,
                             &bytes,
                             tw as u32,
                             th as u32,
@@ -336,15 +293,18 @@ pub fn prewarm() {
                 }
             }
             ybdev::img::ss_cache_gc(&hashes);
+            ybdev::img::ss_thumb_cache_gc(&keys);
         })
         .ok();
 }
 
 impl Screen for ScreensaversScreen {
     fn on_enter(&mut self) -> Action {
-        // Opening the manager is also the natural GC point: replaced or
-        // deleted images must not leave orphaned render files behind.
-        ybdev::img::ss_cache_gc(&Self::current_hashes());
+        // Opening the manager is the natural GC point for thumbnails:
+        // replaced or deleted images must not leave orphaned render
+        // files on the flash. Stat-only — full-size renders are
+        // content-keyed and GC'd by prewarm, which has the bytes anyway.
+        ybdev::img::ss_thumb_cache_gc(&Self::current_keys());
         self.files = scan();
         self.disabled = load_disabled();
         Action::Redraw
@@ -486,9 +446,9 @@ impl Screen for ScreensaversScreen {
             // Right Badge
             let cy = top + row_h / 2;
             if in_rot {
-                Self::draw_badge(p, w - pad, cy, "ACTIVE", true);
+                crate::chrome::draw_badge(p, w - pad, cy, "ACTIVE", true);
             } else {
-                Self::draw_badge(p, w - pad, cy, "OFF", false);
+                crate::chrome::draw_badge(p, w - pad, cy, "OFF", false);
             }
 
             p.hline_t(top + row_h, pad, w - pad, 1, DIVIDER);
@@ -552,6 +512,7 @@ impl Screen for ScreensaversScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::save_preview_artifact;
 
     #[test]
     fn failed_thumbnail_settles_the_tick() {
@@ -584,24 +545,6 @@ mod tests {
         // (the disk cache encodes the exact size in filename + header)
         // fails here instead.
         assert_eq!(thumb_size(), (87, 116));
-    }
-
-    fn save_preview_artifact(name: &str, canvas: &[u8]) {
-        let artifact_dir = match std::env::var("YB_AI_PREVIEW_DIR")
-            .or_else(|_| std::env::var("ARTIFACT_DIR"))
-        {
-            Ok(d) if !d.is_empty() => d,
-            _ => return,
-        };
-        let path = std::path::Path::new(&artifact_dir).join(name);
-        if let Ok(file) = std::fs::File::create(&path) {
-            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1236, 1648);
-            enc.set_color(png::ColorType::Grayscale);
-            enc.set_depth(png::BitDepth::Eight);
-            if let Ok(mut w) = enc.write_header() {
-                let _ = w.write_image_data(canvas);
-            }
-        }
     }
 
     #[test]
@@ -689,7 +632,7 @@ mod tests {
         s.disabled.insert("minimal_geometric_abstract.png".to_string());
 
         s.draw(&mut p);
-        save_preview_artifact("screensavers_preview.png", &canvas);
+        crate::testutil::save_preview_artifact("screensavers_preview.png", &canvas);
 
         let lit = canvas.iter().filter(|&&b| b > 200).count();
         assert!(lit > 1236 * 1648 * 88 / 100);
