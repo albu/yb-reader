@@ -58,7 +58,7 @@ pub struct WordDialog {
     book: String,
     /// Wrapped definition lines, cached so a redraw (e.g. cycling the
     /// translation dictionary) never re-wraps the unchanged definition.
-    def_lines: Vec<String>,
+    def_lines: Vec<WrapLine>,
     last_def_meaning: Option<String>,
 }
 
@@ -115,13 +115,25 @@ impl WordDialog {
     }
 }
 
+/// One wrapped physical line plus the paragraph kind it belongs to.
+/// WordNet marks example sentences with a leading quote, and the card
+/// dims/indents them — a flag, not a fresh decision per physical line,
+/// so a wrapped example's continuation stays ghosted instead of
+/// turning into definition ink (the "replication" bug).
+#[derive(Debug)]
+pub(crate) struct WrapLine {
+    pub text: String,
+    pub example: bool,
+}
+
 /// Greedy wrap that preserves hard breaks (newlines): WordNet meanings
 /// arrive as sense blocks ("1. gloss" / example line), and flattening
 /// them back into one paragraph would wreck that structure. Shared with
 /// the flashcard trainer's card back, which renders at its own size.
-pub(crate) fn wrap_lines(p: &Painter, text: &str, max_w: f32, font_pt: f32) -> Vec<String> {
+pub(crate) fn wrap_lines(p: &Painter, text: &str, max_w: f32, font_pt: f32) -> Vec<WrapLine> {
     let mut lines = Vec::new();
     for hard in text.split('\n') {
+        let example = hard.trim_start().starts_with('"');
         let mut cur = String::new();
         for word in hard.split_whitespace() {
             let test = if cur.is_empty() {
@@ -131,7 +143,7 @@ pub(crate) fn wrap_lines(p: &Painter, text: &str, max_w: f32, font_pt: f32) -> V
             };
             if p.text_width(font_pt, &test) > max_w {
                 if !cur.is_empty() {
-                    lines.push(cur);
+                    lines.push(WrapLine { text: cur, example });
                 }
                 cur = word.to_string();
             } else {
@@ -139,7 +151,7 @@ pub(crate) fn wrap_lines(p: &Painter, text: &str, max_w: f32, font_pt: f32) -> V
             }
         }
         if !cur.is_empty() {
-            lines.push(cur);
+            lines.push(WrapLine { text: cur, example });
         }
     }
     lines
@@ -286,16 +298,16 @@ impl Screen for WordDialog {
                 let text = if def_truncated && i + 1 == def_shown {
                     "..." // the e-ink font has no ellipsis glyph
                 } else {
-                    line.as_str()
+                    line.text.as_str()
                 };
-                // Example sentences start with a quote: indent and dim
-                // them so the gloss reads as the definition block.
-                let is_example = text.starts_with('"');
+                // Example sentences (and their wrapped continuations —
+                // the flag rides through wrap_lines) indent and dim so
+                // the gloss reads as the definition block.
                 p.text(
-                    card_x + pt(12.0) + if is_example { pt(10.0) } else { 0 },
+                    card_x + pt(12.0) + if line.example { pt(10.0) } else { 0 },
                     text_y,
                     9.0,
-                    if is_example { 110 } else { 30 },
+                    if line.example { 110 } else { 30 },
                     text,
                 );
                 text_y += pt(13.0);
@@ -324,7 +336,7 @@ impl Screen for WordDialog {
                 let text = if tr_truncated && i + 1 == tr_shown {
                     "..."
                 } else {
-                    line.as_str()
+                    line.text.as_str()
                 };
                 p.text(card_x + pt(12.0), text_y, 9.0, 50, text);
                 text_y += pt(13.0);
@@ -415,13 +427,53 @@ mod tests {
         let lines = wrap_lines(&p, text, 800.0, 9.5);
         assert!(lines.len() >= 4, "{lines:?}");
         // The gloss, example and next sense stay on their own lines.
-        assert!(lines.iter().any(|l| l.starts_with("1. move fast")));
-        assert!(lines.iter().any(|l| l.starts_with('"')));
-        assert!(lines.iter().any(|l| l.starts_with("2. a score")));
+        assert!(lines.iter().any(|l| l.text.starts_with("1. move fast")));
+        assert!(lines.iter().any(|l| l.text.starts_with('"')));
+        assert!(lines.iter().any(|l| l.text.starts_with("2. a score")));
         // Nothing re-glued the blocks into one paragraph.
         for l in &lines {
-            assert!(!l.contains("2. a score") || l.starts_with("2. a score"));
+            assert!(!l.text.contains("2. a score") || l.text.starts_with("2. a score"));
         }
+    }
+
+    // The "replication" regression: an example sentence too long for one
+    // card line must keep its ghosted style on the continuation line —
+    // the example flag rides through wrap_lines instead of being
+    // re-derived from each physical line's leading quote.
+    #[test]
+    fn wrapped_example_continuation_keeps_the_example_style() {
+        let font = yui::font::Font::load().unwrap();
+        let (mut canvas, mut panel) = (vec![255u8; 1236 * 1648], vec![255u8; 1248 * 1648]);
+        let mut p = yui::Painter::new(
+            &mut panel,
+            1236,
+            1648,
+            1248,
+            yui::Orientation::Portrait,
+            &mut canvas,
+            &font,
+        );
+
+        let meaning = "the act of making copies\n\
+                       \"Gutenberg's reproduction of holy texts was far more efficient\"\n\
+                       2. (genetics) the activity of reproducing nucleic acids";
+        let lines = wrap_lines(&p, meaning, 400.0, 9.0);
+
+        // The Gutenberg example is long enough to wrap at this width.
+        let example_lines: Vec<&WrapLine> = lines
+            .iter()
+            .filter(|l| l.text.contains("Gutenberg") || l.text.contains("efficient"))
+            .collect();
+        assert!(example_lines.len() >= 2, "{lines:?}");
+        assert!(
+            example_lines.iter().all(|l| l.example),
+            "every line of the wrapped example is an example: {example_lines:?}"
+        );
+        // The definition and the second sense stay full-contrast.
+        assert!(lines
+            .iter()
+            .filter(|l| l.text.starts_with("the act of") || l.text.starts_with("2. "))
+            .all(|l| !l.example));
     }
 
     #[test]
@@ -440,14 +492,21 @@ mod tests {
         let dicts = std::rc::Rc::new(crate::dictionary::open_active());
         let result = WordResult {
             definition: Some(crate::dictionary::DictEntry {
-                word: "understand".to_string(),
+                // Real "replication" entry (definition + long example that
+                // wraps) plus a fabricated second sense line, so the
+                // artifact exercises both the continuation style and
+                // multi-sense rendering.
+                word: "replication".to_string(),
                 source: "WordNet".to_string(),
-                meaning: "1. (verb) understand or grasp\n2. (noun) capacity for understanding".to_string(),
+                meaning: "the act of making copies\n\
+                          \"Gutenberg's reproduction of holy texts was far more efficient\"\n\
+                          2. (genetics) the activity of reproducing nucleic acids"
+                    .to_string(),
             }),
             translation: Some(crate::dictionary::DictEntry {
-                word: "understand".to_string(),
+                word: "replication".to_string(),
                 source: "eng-rus".to_string(),
-                meaning: "понимание, постижение, осмысление".to_string(),
+                meaning: "репликация, копирование, повторение".to_string(),
             }),
         };
         let mut dialog = WordDialog::new(

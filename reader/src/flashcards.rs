@@ -404,7 +404,7 @@ impl Screen for FlashcardsScreen {
                     // uses, so "1. gloss" / example lines stay apart.
                     let max_w = (card_w - pt(40.0)) as f32;
                     for line in crate::word_dialog::wrap_lines(p, &e.meaning, max_w, 10.0) {
-                        p.text(card_x + pt(20.0), top_y, 10.0, 30, &line);
+                        p.text(card_x + pt(20.0), top_y, 10.0, 30, &line.text);
                         top_y += pt(15.0);
                     }
                 }
