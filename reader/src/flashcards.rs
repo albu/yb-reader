@@ -550,8 +550,9 @@ mod tests {
     // The default-deployment card back: builtin WordNet only (no user
     // translation dictionaries), so the back must render the definition —
     // never a blank card. FlashcardDeck::load() has no test path override,
-    // so the deck/entry fields are set directly; the meaning is the exact
-    // two-sense markup the build_wordnet fixture pins in dictionary.rs.
+    // so the deck/entry fields are set directly; the meaning uses the same
+    // numbered-sense + quoted-example markup the build_wordnet fixture
+    // pins in dictionary.rs.
     #[test]
     fn flashcard_back_renders_preview() {
         let font = yui::font::Font::load().unwrap();

@@ -35,9 +35,10 @@ def clean_word(w):
 def parse_index(path, max_senses=6):
     """index.<pos> -> {lemma: [(synset offset, tagsense_cnt), ...]}.
 
-    Only the first offset (sense 1) of each line is kept; the per-lemma
-    sense list is capped at `max_senses`. Ranking and merging of senses
-    happens across POS in main(), not within a single POS.
+    The offsets on a line are listed in frequency order (sense 1 first);
+    keep the first `max_senses` of them, all sharing the lemma's
+    tagsense_cnt. Ranking across POS and the final per-lemma sense cap
+    happen in main().
     """
     out = {}
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -60,14 +61,14 @@ def parse_index(path, max_senses=6):
             first_offset = 6 + p_cnt
             if synset_cnt <= 0 or len(fields) < first_offset + synset_cnt:
                 continue
-            offset = fields[first_offset]
             try:
                 tagsense = int(fields[first_offset - 1])
             except (IndexError, ValueError):
                 tagsense = 0
             senses = out.setdefault(lemma, [])
-            if len(senses) < max_senses:
-                senses.append((offset, tagsense))
+            for offset in fields[first_offset:first_offset + synset_cnt]:
+                if len(senses) < max_senses:
+                    senses.append((offset, tagsense))
     return out
 
 

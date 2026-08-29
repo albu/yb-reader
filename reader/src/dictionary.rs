@@ -1636,17 +1636,20 @@ mod tests {
     // intentional two-sided format change.
     const PY_FIXTURE_HEX: &str = concat!(
         "5942444943543032000000020000004000000053000000650000000000080000",
-        "00000008000000000000004700000008000b00000008000a00000047000000c0",
+        "00000008000000000000004700000008000b00000008000a000000470000011e",
         "6275696c742d696e706f77657220706c616e746275696c742d696e706f776572",
         "706c616e746578697374696e6720617320616e20657373656e7469616c20636f",
         "6e7374697475656e740a2261206275696c742d696e207175616c697479206f66",
         "207468652073797374656d22312e206275696c64696e677320666f7220636172",
         "7279696e67206f6e20696e647573747269616c206c61626f720a227468657920",
         "6275696c742061206c6172676520666163746f72792220c2b720227468652070",
-        "6c616e7420656d706c6f79732035303020776f726b657273220a322e20707574",
-        "206f722073657420287365656473206f7220736565646c696e67732920696e74",
-        "6f207468652067726f756e640a22706c616e742074686520736565646c696e67",
-        "7320696e20737072696e6722",
+        "6c616e7420656d706c6f79732035303020776f726b657273220a322e2028626f",
+        "74616e792920616e206f7267616e69736d2062656c6f6e67696e6720746f2074",
+        "6865206b696e67646f6d20506c616e7461650a226865207468696e6b73207468",
+        "6520706c616e7420697320612073756363756c656e74220a332e20707574206f",
+        "722073657420287365656473206f7220736565646c696e67732920696e746f20",
+        "7468652067726f756e640a22706c616e742074686520736565646c696e677320",
+        "696e20737072696e6722",
     );
 
     fn py_fixture() -> Vec<u8> {
@@ -1658,7 +1661,7 @@ mod tests {
     #[test]
     fn python_builtin_fixture_round_trips() {
         let bytes = py_fixture();
-        assert_eq!(bytes.len(), 364);
+        assert_eq!(bytes.len(), 458);
         let dict = Dictionary::from_bytes(bytes, "WordNet").expect("fixture parses");
         assert_eq!(dict.word_count(), 2);
         assert_eq!(dict.words_off, 64);
@@ -1668,14 +1671,17 @@ mod tests {
         // Multi-word lemma: the key is clean_word'd ("power_plant" →
         // "powerplant" style), the display word keeps its spaces, and the
         // meaning carries the numbered-sense + quoted-example markup the
-        // word card renders.
+        // word card renders. The noun index line carries two offsets, so
+        // this also pins parse_index keeping more than one sense per POS.
         let e = dict.lookup("Power Plant").expect("multi-word lookup");
         assert_eq!(e.word, "power plant");
         assert_eq!(
             e.meaning,
             "1. buildings for carrying on industrial labor\n\
              \"they built a large factory\" · \"the plant employs 500 workers\"\n\
-             2. put or set (seeds or seedlings) into the ground\n\
+             2. (botany) an organism belonging to the kingdom Plantae\n\
+             \"he thinks the plant is a succulent\"\n\
+             3. put or set (seeds or seedlings) into the ground\n\
              \"plant the seedlings in spring\""
         );
 
