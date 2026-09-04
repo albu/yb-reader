@@ -249,7 +249,7 @@ button:hover { background:#2563eb; }
           <span class="row-sub">Instant book uploads without entering PIN</span>
         </div>
       </label>
-      <input type="text" id="devName" class="dev-input" placeholder="Device Name (e.g. MacBook Pro)">
+      <input type="text" id="devName" class="dev-input" placeholder="Device Name (e.g. My Laptop)">
       <div class="mirror-opt">
         <label class="row">
           <input type="checkbox" id="linkMirror">
@@ -3172,7 +3172,7 @@ mod tests {
         s.phase = Phase::Ready {
             url,
             pin: "482913".to_string(),
-            ssid: Some("HomeStudio_5G".to_string()),
+            ssid: Some("TestNetwork_5G".to_string()),
         };
         let mut canvas = vec![0u8; 1236 * 1648];
         let mut panel = vec![255u8; 1248 * 1648];

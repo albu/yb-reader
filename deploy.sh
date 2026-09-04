@@ -199,7 +199,9 @@ if [ "$1" = "usb" ]; then
     # root; authorized_keys ships, the host key does NOT (device-private;
     # dropbear -R generates one on first connect if absent).
     mkdir -p "$EXT/settings/SSH"
-    cp "$PKG/settings/SSH/authorized_keys" "$EXT/settings/SSH/"
+    if [ -f "$PKG/settings/SSH/authorized_keys" ]; then
+        cp "$PKG/settings/SSH/authorized_keys" "$EXT/settings/SSH/"
+    fi
     cp "$BIN" "$EXT/bin/reader"
     chmod +x "$EXT/bin/reader" "$EXT/bin/start.sh" "$EXT/bin/boot.sh"
     verify_bin "$BIN" "$EXT/bin/reader"

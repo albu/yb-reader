@@ -933,12 +933,12 @@ mod tests {
         // the LAN and flips this assertion to flaky on any machine that
         // happens to run a yb-mirror responder. Trust routing is covered by
         // trust_reply_requires_a_provable_mac below.
-        let raw1 = "ybmirror 8765 id=mac_m3 name=\"MacBook\" mac=0123456789abcdef";
+        let raw1 = "ybmirror 8765 id=mac_m3 name=\"Work Laptop\" mac=0123456789abcdef";
         let parsed1 = parse_discovery_response("192.168.1.10", raw1).unwrap();
         assert_eq!(parsed1.ip, "192.168.1.10");
         assert_eq!(parsed1.port, 8765);
         assert_eq!(parsed1.device_id.as_deref(), Some("mac_m3"));
-        assert_eq!(parsed1.device_name.as_deref(), Some("MacBook"));
+        assert_eq!(parsed1.device_name.as_deref(), Some("Work Laptop"));
         assert_eq!(parsed1.mac.as_deref(), Some("0123456789abcdef"));
 
         let raw2 = "ybmirror 9000";

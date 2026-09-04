@@ -15,6 +15,7 @@ packages/yb-reader/settings/SSH/authorized_keys
 /companion/.venv/
 /companion/**/__pycache__/
 /companion/dist/
+/companion/mirror.conf
 
 # Generated from third-party WordNet data by tools/build_wordnet — built
 # locally, deployed by deploy.sh, never committed.

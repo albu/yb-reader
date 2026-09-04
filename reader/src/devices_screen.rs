@@ -272,7 +272,7 @@ mod tests {
         let mut s = DevicesScreen::new();
         s.devices.push(ybdev::devices::TrustedDevice {
             id: "mac1".to_string(),
-            name: "MacBook Pro".to_string(),
+            name: "Laptop (Work)".to_string(),
             token: "tok1".to_string(),
             last_ip: Some("192.168.1.105".to_string()),
             last_seen: 123456,
@@ -280,7 +280,7 @@ mod tests {
         });
         s.devices.push(ybdev::devices::TrustedDevice {
             id: "phone1".to_string(),
-            name: "iPhone 15 Pro".to_string(),
+            name: "Mobile Device".to_string(),
             token: "tok2".to_string(),
             last_ip: Some("192.168.1.142".to_string()),
             last_seen: 123456,

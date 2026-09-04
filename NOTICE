@@ -32,3 +32,8 @@ Third-party components
   SIL Open Font License 1.1.
 
   (Font license texts: resources/fonts/OFL-*.txt)
+
+* Dropbear SSH — Copyright Matt Johnston, Mihnea Stoenescu.
+  Licensed under a MIT-style license (with portions GPLv2+ / Public Domain).
+  The bundled binary in packages/yb-reader/bin/dropbear is built for
+  armhf Linux. Upstream source: https://matt.ucc.asn.au/dropbear/dropbear.html

@@ -664,15 +664,15 @@ mod tests {
     fn device_store_add_find_and_remove() {
         let mut store = DeviceStore::default();
         let dev1 = TrustedDevice::new(
-            "mbp_1",
-            "MacBook Pro",
+            "laptop_work",
+            "Work Laptop",
             "tok_sec_1234567890abcdef",
             Some("192.168.1.10"),
             "all",
         );
         let dev2 = TrustedDevice::new(
-            "thinkpad_work",
-            "Work ThinkPad",
+            "tablet_home",
+            "Home Tablet",
             "tok_sec_0987654321fedcba",
             Some("192.168.1.20"),
             "inbound",
@@ -683,19 +683,19 @@ mod tests {
 
         assert_eq!(store.devices.len(), 2);
         assert_eq!(store.find_by_token("tok_sec_1234567890abcdef"), Some(&dev1));
-        assert_eq!(store.find_by_id("thinkpad_work"), Some(&dev2));
+        assert_eq!(store.find_by_id("tablet_home"), Some(&dev2));
 
         // Scope checks: dev1 has "all", dev2 has "inbound"
         assert_eq!(store.find_by_token_for_inbound("tok_sec_1234567890abcdef"), Some(&dev1));
         assert_eq!(store.find_by_token_for_inbound("tok_sec_0987654321fedcba"), Some(&dev2));
-        assert_eq!(store.find_by_id_for_control("mbp_1"), Some(&dev1));
-        assert_eq!(store.find_by_id_for_control("thinkpad_work"), None); // "inbound" scope is not allowed for control
+        assert_eq!(store.find_by_id_for_control("laptop_work"), Some(&dev1));
+        assert_eq!(store.find_by_id_for_control("tablet_home"), None); // "inbound" scope is not allowed for control
         assert_eq!(store.find_by_ip_for_control("192.168.1.10"), Some(&dev1));
         assert_eq!(store.find_by_ip_for_control("192.168.1.20"), None);
 
         // IP refresh via token
         assert!(store.update_ip_and_seen_by_token("tok_sec_1234567890abcdef", "192.168.1.42", 1000));
-        assert_eq!(store.find_by_id("mbp_1").unwrap().last_ip.as_deref(), Some("192.168.1.42"));
+        assert_eq!(store.find_by_id("laptop_work").unwrap().last_ip.as_deref(), Some("192.168.1.42"));
         assert!(!store.update_ip_and_seen_by_token("tok_sec_1234567890abcdef", "192.168.1.42", 1001)); // unchanged
 
         let json = store.to_json();
@@ -713,9 +713,9 @@ mod tests {
         }
         let _ = std::fs::remove_file(test_path);
 
-        assert!(store.remove("mbp_1"));
+        assert!(store.remove("laptop_work"));
         assert_eq!(store.devices.len(), 1);
-        assert_eq!(store.find_by_id("mbp_1"), None);
+        assert_eq!(store.find_by_id("laptop_work"), None);
     }
 
     #[test]

@@ -10,6 +10,9 @@ if [ -z "$IP" ]; then
 fi
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 CONF="$ROOT/mirror.conf"
+if [ ! -f "$CONF" ] && [ -f "$ROOT/mirror.conf.example" ]; then
+    cp "$ROOT/mirror.conf.example" "$CONF"
+fi
 if grep -q '^SERVER=' "$CONF" 2>/dev/null; then
     sed -i '' "s#^SERVER=.*#SERVER=http://$IP:8765#" "$CONF"
 else
