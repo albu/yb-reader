@@ -34,20 +34,20 @@ use crate::wifi;
 /// One heal at a time: a wedged wifid must not stack heal threads.
 static HEAL_BUSY: AtomicBool = AtomicBool::new(false);
 
-/// USB power observed since this session's start (edge-latched by the
-/// policy thread; initialized to the state at spawn so a boot-time plug
-/// counts too). The app's quit path reads this: a plug means the stock
-/// drive-mode dance wants the disk, and the reader bows out gracefully
-/// — screen painted, positions flushed — instead of being evicted by
-/// the forced unmount minutes later.
-static USB_PLUGGED: AtomicBool = AtomicBool::new(false);
+/// USB drive mode (host mass storage) observed since this session's start
+/// (edge-latched by the policy thread; initialized to the state at spawn so
+/// a boot-time host connection counts too). The app's quit path reads this:
+/// host configuration means the stock drive-mode dance wants the disk, and
+/// the reader bows out gracefully — screen painted, positions flushed —
+/// instead of being evicted by the forced unmount minutes later.
+static USB_DRIVE_MODE: AtomicBool = AtomicBool::new(false);
 
-pub fn usb_plugged() -> bool {
-    if USB_PLUGGED.load(Ordering::Relaxed) {
+pub fn usb_drive_mode() -> bool {
+    if USB_DRIVE_MODE.load(Ordering::Relaxed) {
         return true;
     }
-    if sysinfo::vbus() {
-        USB_PLUGGED.store(true, Ordering::Relaxed);
+    if sysinfo::drive_mode() {
+        USB_DRIVE_MODE.store(true, Ordering::Relaxed);
         return true;
     }
     false
@@ -111,11 +111,10 @@ pub fn on_resume(gap: Duration) {
 }
 
 /// Our remembered frontlight levels over powerd's idea of them. Used
-/// after suspend (powerd restores its own levels over ours) and on USB
-/// plug (powerd's charge policy kills the light — stock shows a USB
-/// drive-mode screen instead; our charge-and-read keeps the light
-/// where the user left it). No-op unless the user has set a level this
-/// session (-1/-1 = never touched ⇒ powerd's call stands).
+/// after suspend (powerd restores its own levels over ours) and at
+/// boot / unplug-respawn (fresh process → persisted custom point).
+/// No-op unless the user has set a level this session (-1/-1 = never
+/// touched ⇒ powerd's call stands).
 pub fn reassert_frontlight() {
     let (b, t) = (
         ybdev::frontlight::last_bright(),
@@ -167,11 +166,28 @@ pub fn boot_restore() {
     // Reload the persisted manual-off latch before any policy reads it:
     // the atomic starts false in a fresh process.
     ybdev::wifi::hydrate_user_off();
-    if !ybdev::sysinfo::takeover()
-        || ybdev::wifi::user_off()
-        || !ybdev::wifi::wifi_wanted_on_wake()
-        || wifi::wifi_state() == Some(true)
-    {
+    if !ybdev::sysinfo::takeover() {
+        // Stock mode: the framework owns the radio; our policy must not
+        // fight it (the turn-off half included).
+        return;
+    }
+    if ybdev::wifi::user_off() {
+        // Explicit user off must survive a reboot: wifid brings the
+        // radio back up at boot on its own, and the old boot_restore
+        // just returned, leaving the icon "on" after every power cycle.
+        if wifi::wifi_state() != Some(false) {
+            plog("awake: boot — user's wifi is off, powering radio down");
+            let _ = std::thread::Builder::new()
+                .name("wifi-boot-off".to_string())
+                .spawn(ybdev::wifi::turn_off);
+        }
+        return;
+    }
+    // Not off by hand: restore only when a persisted intent wants the
+    // radio up (live sessions re-assert on entry). Otherwise leave the
+    // stock bring-up alone — an untouched device keeps its ssh/wifi
+    // lifeline.
+    if !ybdev::wifi::wifi_wanted_on_wake() || wifi::wifi_state() == Some(true) {
         return;
     }
     let _ = std::thread::Builder::new()
@@ -189,21 +205,21 @@ fn vbus_plugged(prev: bool, cur: bool) -> bool {
 }
 
 fn loop_fn() {
-    // 5 s tick: fast enough that the charge-and-read light re-assert
-    // lands within one blink of powerd's plug-time light-off, while the
-    // hold/heal policy work keeps its 30 s cadence (every 6th tick).
+    // 5 s tick: fast enough that drive mode / plug edges land quickly,
+    // while the hold/heal policy work keeps its 30 s cadence (every 6th tick).
     let mut prev_vbus = sysinfo::vbus();
-    USB_PLUGGED.store(prev_vbus, Ordering::Relaxed);
+    if sysinfo::drive_mode() {
+        USB_DRIVE_MODE.store(true, Ordering::Relaxed);
+    }
     let mut tick: u32 = 0;
     loop {
         std::thread::sleep(Duration::from_secs(5));
         let vbus = sysinfo::vbus();
         if vbus_plugged(prev_vbus, vbus) {
-            plog("awake: usb power — re-asserting frontlight (charge-and-read)");
-            reassert_frontlight();
+            plog("awake: usb power plugged");
         }
-        if vbus {
-            USB_PLUGGED.store(true, Ordering::Relaxed);
+        if sysinfo::drive_mode() {
+            USB_DRIVE_MODE.store(true, Ordering::Relaxed);
         }
         prev_vbus = vbus;
         tick = tick.wrapping_add(1);

@@ -20,6 +20,13 @@ use crate::log::plog;
 
 const WIFI_WANTED_PATH: &str = "/var/local/yb-reader/wifi";
 const SSH_WANTED_PATH: &str = "/var/local/yb-reader/ssh";
+/// Explicit "SSH off" marker, written by the curtain toggle. boot.sh
+/// consults it at boot so a user who turned SSH off does not get the
+/// dropbear lifeline back on the next power cycle (the old
+/// unconditional start made the SSH icon "lie" after every reboot).
+/// Absent marker = default: boot.sh starts dropbear, preserving the
+/// recovery rung on a device that never toggled it.
+const SSH_OFF_PATH: &str = "/var/local/yb-reader/ssh_off";
 /// The manual-off latch, persisted: an in-memory atomic alone forgot the
 /// choice on every reboot (field case 2026-08-23 — user turned the radio
 /// off, one power press later it was back).
@@ -65,6 +72,10 @@ fn set_intent(path: &str, on: bool) {
 
 pub fn set_ssh_wanted(on: bool) {
     set_intent(SSH_WANTED_PATH, on);
+    // Complementary off marker for boot.sh: off removes the wanted file
+    // AND records the explicit off; on clears the marker (default-on for
+    // devices that never touched the toggle keeps the ssh lifeline).
+    set_intent(SSH_OFF_PATH, !on);
 }
 
 /// Manual Wi-Fi off (curtain / System card): remember the user's choice

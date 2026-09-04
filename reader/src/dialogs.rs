@@ -59,9 +59,10 @@ pub fn yread_toc_dialog(
     cur_chapter: usize,
     cur_char: usize,
     offsets: &[usize],
+    chars: &[usize],
+    total_pages: usize,
     back: Option<(usize, usize)>,
     path_name: String,
-    total_pages: usize,
     settings: ReaderSettings,
 ) -> Action {
     let mut dlg = crate::toc_dialog::TocDialog::from_yread_toc(
@@ -69,6 +70,8 @@ pub fn yread_toc_dialog(
         cur_chapter,
         cur_char,
         offsets,
+        chars,
+        total_pages,
         move |act| match act {
             crate::toc_dialog::TocAction::JumpToYRead {
                 chapter_idx,

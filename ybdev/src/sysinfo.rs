@@ -171,6 +171,23 @@ pub fn vbus() -> bool {
     battery().1
 }
 
+/// Stock drive mode actually engaged: a USB host has the gadget configured
+/// (e.g. PC connected for file transfer / mass storage).
+/// NOT bare VBUS power (a wall charger or power bank does not configure UDC).
+pub fn drive_mode() -> bool {
+    if let Ok(entries) = fs::read_dir("/sys/class/udc") {
+        for entry in entries.flatten() {
+            let state_file = entry.path().join("state");
+            if let Ok(content) = fs::read_to_string(state_file) {
+                if content.trim() == "configured" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Takeover mode: the framework boot flag is present, so this app owns
 /// power and Wi-Fi policy. In stock mode the framework owns the radio,
 /// and the app must never fight it (e.g. restore or power down a radio

@@ -137,7 +137,7 @@ fn main() {
     .with_heartbeat(Box::new(watchdog::heartbeat_touch))
     .with_usb_exit(
         Box::new(|| Box::new(usb_screen::UsbScreen::new())),
-        Box::new(awake::usb_plugged),
+        Box::new(awake::usb_drive_mode),
     )
     .with_sleep_state(Box::new(|asleep| {
         // Persistent sleep-state marker: lets the boot audit tell an
@@ -167,13 +167,12 @@ fn main() {
     if guard::pending() {
         guard::graceful_exit(0);
     }
-    // USB bow-out: the cable wants the disk. Exit 43 — boot.sh's plug
-    // branch parks at its unplug wait (never respawning against an
-    // exported disk) and upstart restarts exactly one fresh instance
-    // after the cable is out. Not in the upstart "normal exit" list on
-    // purpose: a fast plug-pull with no park still deserves a respawn.
-    if awake::usb_plugged() {
-        log::plog("usb: cable owns the disk — bowing out (43)");
+    // USB bow-out: a host has drive mode configured (/mnt/us exported).
+    // Exit 43 — boot.sh's plug branch parks at its unplug wait (never
+    // respawning against an exported disk) and upstart restarts exactly
+    // one fresh instance after the cable is out.
+    if awake::usb_drive_mode() {
+        log::plog("usb: host drive mode configured — bowing out (43)");
         // Docked drive mode: e-ink holds the farewell frame for free,
         // so the backlight is pure waste — off it goes for the plug.
         if let Ok(fl) = ybdev::frontlight::Frontlight::open() {

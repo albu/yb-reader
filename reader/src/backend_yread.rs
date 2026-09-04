@@ -924,9 +924,10 @@ impl ReaderBackend for YreadBackend {
                 self.ychap_idx,
                 cur_char,
                 &self.ychap_offsets,
+                &self.ychap_chars,
+                self.total,
                 back,
                 path_name,
-                self.total,
                 settings,
             );
         }

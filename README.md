@@ -61,8 +61,8 @@ The Mac half — mirror server, menu-bar app, AI stream — lives in
   RAM-buffered. The firewall opens for the listener and closes when it
   exits.
 - **Frontlight.** White + amber warmth, with brightness/warmth sliders
-  and Day/Cozy/Warm/Night presets in the curtain (the top-edge control
-  sheet) from anywhere in the reader.
+  and OFF/DAY/NIGHT presets in the curtain (the top-edge control sheet)
+  from anywhere in the reader.
 - **Sleep & screensavers.** The power button parks the reader on a sleep
   frame — frontlight off, touch locked, your own images rotating from
   `screensavers/`.

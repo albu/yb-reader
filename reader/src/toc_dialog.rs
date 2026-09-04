@@ -78,16 +78,35 @@ impl<F: FnMut(TocAction) -> Action> TocDialog<F> {
         cur_chapter: usize,
         cur_char: usize,
         offsets: &[usize],
+        chars: &[usize],
+        total_pages: usize,
         on_action: F,
     ) -> Self {
         let mut items = Vec::new();
         for entry in toc {
-            let base_page = offsets.get(entry.chapter_idx).copied().unwrap_or(0);
+            let ch = entry.chapter_idx;
+            let base_page = offsets.get(ch).copied().unwrap_or(0);
+            // How many pages this chapter spans (offsets hold each
+            // chapter's start page; the last one ends at the book's
+            // total). Sub-headers share the chapter start unless we
+            // place them by their char offset.
+            let span = offsets
+                .get(ch + 1)
+                .copied()
+                .unwrap_or(total_pages)
+                .saturating_sub(base_page)
+                .max(1);
+            // Per-chapter density, so a dense chapter does not inflate
+            // its sub-header pages (and vice versa). The floor mirrors
+            // the footnote dialog's estimate.
+            let chapter_chars = chars.get(ch).copied().unwrap_or(0);
+            let cpp = (chapter_chars as f32 / span as f32).max(100.0);
+            let sec_page = (entry.char_offset as f32 / cpp).floor() as usize;
             items.push(TocItem {
                 title: entry.title.clone(),
-                chapter_idx: entry.chapter_idx,
+                chapter_idx: ch,
                 char_offset: entry.char_offset,
-                page: base_page,
+                page: base_page + sec_page.min(span.saturating_sub(1)),
                 level: entry.level,
             });
         }
@@ -598,7 +617,9 @@ mod tests {
     }
 
     fn dialog(current_char: usize) -> TocDialog<impl FnMut(TocAction) -> Action> {
-        TocDialog::from_yread_toc(&book_toc(), 0, current_char, &[0], |_| Action::Keep)
+        TocDialog::from_yread_toc(&book_toc(), 0, current_char, &[0], &[30000], 10, |_| {
+            Action::Keep
+        })
     }
 
     fn titles(d: &TocDialog<impl FnMut(TocAction) -> Action>) -> Vec<&str> {
@@ -661,8 +682,17 @@ mod tests {
         let flat: Vec<yread::model::TocEntry> = (0..5)
             .map(|i| entry(&format!("Ch {i}"), i * 10, 0))
             .collect();
-        let d = TocDialog::from_yread_toc(&flat, 0, 30, &[0], |_| Action::Keep);
+        let d = TocDialog::from_yread_toc(&flat, 0, 30, &[0], &[100], 2, |_| Action::Keep);
         assert_eq!(d.visible_indices().len(), 5);
+    }
+
+    #[test]
+    fn sub_headers_get_distinct_pages_within_their_chapter() {
+        // 30k chars over 10 pages = 3000 chars/page. Sub-headers land on
+        // their own page; chapter starts stay on the chapter's start.
+        let d = dialog(10000);
+        let pages: Vec<usize> = d.items.iter().map(|it| it.page).collect();
+        assert_eq!(pages, vec![0, 1, 3, 6, 8]);
     }
 
     #[test]
@@ -687,7 +717,7 @@ mod tests {
         let flat: Vec<yread::model::TocEntry> = (0..5)
             .map(|i| entry(&format!("Ch {i}"), i * 10, 0))
             .collect();
-        let mut d = TocDialog::from_yread_toc(&flat, 0, 30, &[0], |_| Action::Keep);
+        let mut d = TocDialog::from_yread_toc(&flat, 0, 30, &[0], &[100], 2, |_| Action::Keep);
         assert!(d.mode_row_rect().is_none());
         // Stamping is still a no-op-safe call on flat lists.
         d.apply_mode();

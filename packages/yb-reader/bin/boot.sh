@@ -113,8 +113,13 @@ fallback_to_stock() {
 #    from its own tree. Our tree mirrors the layout. NO -r pinning: a
 #    single RSA -r path kills the ed25519 handshake (banner, then death
 #    at first KEX — found on device 2026-08-19; koreader never ships an
-#    RSA host key at all).
-if ! grep -qx dropbear /proc/[0-9]*/comm 2>/dev/null; then
+#    RSA host key at all. Unless the user turned SSH off: the curtain
+#    toggle persists an explicit off marker (default = on, so a fresh
+#    device keeps its recovery rung) — the old unconditional start made
+#    the SSH icon lie after every power cycle.
+if [ -e "$STATE/ssh_off" ]; then
+    echo "$(date) ssh: user disabled — not starting dropbear" >> "$LOG"
+elif ! grep -qx dropbear /proc/[0-9]*/comm 2>/dev/null; then
     if [ -x "$DIR/dropbear" ]; then
         (cd "$ROOT" && "$DIR/dropbear" -E -R -s -p 2222 \
             -P /tmp/dropbear_koreader.pid >> "$LOG" 2>&1 &)
@@ -135,13 +140,13 @@ IPT=/usr/sbin/iptables
 "$IPT" -C OUTPUT -p tcp --sport 2222 -m conntrack --ctstate ESTABLISHED -j ACCEPT 2>/dev/null || \
     "$IPT" -A OUTPUT -p tcp --sport 2222 -m conntrack --ctstate ESTABLISHED -j ACCEPT
 
-# 1c. Booting while plugged (reboot on the cable, wake-from-dead-battery
-#     on the cable): the reader cannot run against an exported /mnt/us,
+# 1c. Booting while connected in drive mode (reboot on the cable with host
+#     configured): the reader cannot run against an exported /mnt/us,
 #     so wait for the cable before anything else touches the disk. Stock
 #     parks on a drive screen in the same situation; the ssh lifeline
 #     above is already up either way.
-if vbus; then
-    wait_unplug "boot with usb power"
+if drive_mode; then
+    wait_unplug "boot with usb drive mode"
     wait_us_mounted || { fallback_to_stock; exit 1; }
 fi
 
@@ -208,19 +213,15 @@ echo "$(date) boot.sh [step 1]: reader exited rc=$rc" >> "$LOG"
 # find no marker and classify as clean, not strike an already-accounted
 # death a second time.
 rm -f "$STATE/running"
-echo "$(date) boot.sh [step 2]: removed running marker; vbus=$(cat /sys/class/power_supply/bd71827_ac/online 2>/dev/null) udc=$(cat /sys/class/udc/*/state 2>/dev/null)" >> "$LOG"
-# Export death (the common one: plug pulled the disk from under the
-# reader) OR the graceful bow-out (rc 43 — the reader saw USB power,
-# painted its farewell screen and exited so the stock drive-mode dance
-# gets a free disk; same park applies). Expected by design — don't let
-# either near the failure ledgers. Park until the cable is out and the
-# disk is back, then exit 1 (NOT 0: 0 is in the job's "normal exit"
-# list and would not respawn) so upstart starts exactly one fresh
-# instance, post-unplug. The vbus||drive_mode test is deliberately
-# coarse: a GENUINE crash while on a wall charger parks until unplug
-# too — conservative, self-correcting, and the price of never
-# respawning against a possibly-exported disk.
-if [ "$rc" -ne 0 ] && [ "$rc" -ne 42 ] && { vbus || drive_mode; }; then
+# Export death (the common one: host configured drive mode and pulled the
+# disk from under the reader) OR the graceful bow-out (rc 43 — the reader
+# saw host drive mode configured, painted its farewell screen and exited
+# so the stock drive-mode dance gets a free disk; same park applies).
+# Expected by design — don't let either near the failure ledgers. Park
+# until the cable is out and the disk is back, then exit 1 (NOT 0: 0 is
+# in the job's "normal exit" list and would not respawn) so upstart
+# starts exactly one fresh instance, post-unplug.
+if [ "$rc" -eq 43 ] || { [ "$rc" -ne 0 ] && [ "$rc" -ne 42 ] && drive_mode; }; then
     echo "$(date) boot.sh [step 3]: usb export/bow-out branch taken (rc=$rc)" >> "$LOG"
     wait_unplug "export death"
     echo "$(date) boot.sh [step 4]: wait_unplug finished, checking if /mnt/us is mounted" >> "$LOG"

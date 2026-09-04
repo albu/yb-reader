@@ -173,13 +173,11 @@ const LIGHT_GAMMA: f32 = 4.0;
 
 /// One-tap composite light points, (label, brightness, warmth) in slider
 /// space — register-linear brightness, gamma-crossfaded warmth, the same
-/// space every control speaks. Values stay above the ~30%-register
-/// "feels off" floor.
-pub const PRESETS: [(&str, f32, f32); 4] = [
-    ("Day", 0.68, 0.0),
-    ("Cozy", 0.60, 0.50),
-    ("Warm", 0.60, 0.80),
-    ("Night", 0.48, 1.0),
+/// space every control speaks.
+pub const PRESETS: [(&str, f32, f32); 3] = [
+    ("OFF", 0.0, 0.0),
+    ("DAY", 0.75, 0.50),
+    ("NIGHT", 0.65, 0.60),
 ];
 
 /// The preset matching the given levels, if any (for highlighting the
@@ -268,19 +266,16 @@ mod tests {
     #[test]
     fn preset_tiles_are_composite_points_in_range() {
         // Each preset is one (brightness, warmth) pair, both axes in
-        // range, brightness above the register floor where light "feels
-        // off" on this panel.
+        // range.
         for (name, b, w) in PRESETS {
             assert!(
                 (0.0..=1.0).contains(&b) && (0.0..=1.0).contains(&w),
                 "{name}"
             );
-            assert!(b >= 0.3, "{name} too dim for a tile");
         }
-        assert_eq!(nearest_preset(0.68, 0.0), Some(0));
-        assert_eq!(nearest_preset(0.60, 0.50), Some(1));
-        assert_eq!(nearest_preset(0.60, 0.80), Some(2));
-        assert_eq!(nearest_preset(0.48, 1.0), Some(3));
+        assert_eq!(nearest_preset(0.0, 0.0), Some(0));
+        assert_eq!(nearest_preset(0.75, 0.50), Some(1));
+        assert_eq!(nearest_preset(0.65, 0.60), Some(2));
         assert_eq!(nearest_preset(0.5, 0.4), None);
     }
 

@@ -40,7 +40,7 @@ const TONE_ROW_PT: f32 = 192.0;
 const ROW_CY_OFF_PT: f32 = 10.0;
 const SLIDER_X_OFF_PT: f32 = 44.0;
 
-/// Composite light presets as one segmented track: Day | Warm | Night,
+/// Composite light presets as one segmented track: OFF | DAY | NIGHT,
 /// the active segment filled. One (brightness, warmth) pair per tap.
 const SEG_TOP_PT: f32 = 220.0;
 const SEG_H_PT: f32 = 22.0;
@@ -811,7 +811,7 @@ mod tests {
     fn preset_segments_hit_cleanly() {
         let w = 1236;
         let n = ybdev::frontlight::PRESETS.len() + 1;
-        assert_eq!(n, 5);
+        assert_eq!(n, 4);
         let pad = pt(PAD_PT);
         let sw = (w - 2 * pad) / n as i32;
         for i in 0..n {

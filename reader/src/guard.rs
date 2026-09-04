@@ -57,7 +57,13 @@ pub fn pending() -> bool {
 /// (boot.sh parks at its unplug wait; see usb_screen.rs).
 pub fn graceful_exit(code: i32) -> ! {
     ybdev::log::plog(&format!("graceful exit ({code})"));
-    restore();
+    if code != 43 {
+        restore();
+    } else {
+        // Docked USB drive mode: clean up receive/firewall, but keep
+        // frontlight off and do not turn on Wi-Fi.
+        crate::receive::emergency_cleanup();
+    }
     std::process::exit(code);
 }
 
