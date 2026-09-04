@@ -6,14 +6,14 @@
 [![Architecture: armhf](https://img.shields.io/badge/arch-arm--linux--musleabihf-blueviolet.svg)](#cross-compiling--the-scars-documented)
 
 Reading on a stock Kindle is fine. This makes it faster and a lot more
-pleasant: yb-reader is a Rust reader for a jailbroken Paperwhite 5 that
-replaces KOReader — boot it and you're in your library, send books over
-Wi-Fi from any browser, or turn the Kindle into a second screen for your
-Mac (mirroring remote books, a PDF, or a live AI coding session). EPUB
-rendering goes through **yread**, a typesetting engine written from
-scratch for this project — no HTML/CSS stack, no web heritage; just a
-block tree, shaped glyphs, and an e-ink framebuffer. One static binary,
-no JVM, no plugins.
+pleasant: **yb-reader** (*Your Book Reader*) is a Rust reader for a
+jailbroken Paperwhite 5 that replaces KOReader — boot it and you're in
+your library, send books over Wi-Fi from any browser, or turn the Kindle
+into a second screen for your Mac (mirroring a browser window, a PDF, or
+a live AI coding session). EPUB rendering goes through **yread**, a
+typesetting engine written from scratch for this project — no HTML/CSS
+stack, no web heritage; just a block tree, shaped glyphs, and an e-ink
+framebuffer. One static binary, no JVM, no plugins.
 
 The Mac half — mirror server, menu-bar app, AI stream — lives in
 [`companion/`](companion/README.md).
@@ -52,7 +52,7 @@ The Mac half — mirror server, menu-bar app, AI stream — lives in
 - **Reading tools.** TOC, a live-preview page scrubber (±1/±10 steps,
   TOC and highlights tabs), footnotes in a bottom sheet, contrast curves,
   night mode, highlights with a persistent underline that survives
-  re-layout, a status header (clock, battery, Wi-Fi) and a footer that
+  re-layout, a status header (in-process timezone clock, battery, Wi-Fi) and a footer that
   estimates time left in the chapter and the book.
 - **Typography.** Four embedded OFL faces with native Cyrillic —
   Literata, PT Serif, Bitter, PT Sans — a Typography page for family,
@@ -72,9 +72,10 @@ The Mac half — mirror server, menu-bar app, AI stream — lives in
   TEI source once into a compact format; a dictionary that needs
   building is converted on its first activate tap (~2 s), and a stale
   active dictionary re-imports the next time it's opened. A rule-based
-  lemmatizer catches inflected forms. Star a word and it lands in an
-  SM-2 flashcard deck (Again / Hard / Good / Easy) with its own
-  home-screen trainer.
+  lemmatizer with native English contraction and hyphen handling
+  (`didn't`, `couldn't`, `reader's`, `--word`) catches inflected forms.
+  Star a word and it lands in an SM-2 flashcard deck (Again / Hard /
+  Good / Easy) with its own home-screen trainer.
 - **Screen mirror.** The Kindle shows a live grayscale copy of one Mac
   window. Taps become real ←/→ key presses (page-turn presets: arrows,
   space, pages); a Control mode turns the Kindle into a touchpad — taps
@@ -83,11 +84,12 @@ The Mac half — mirror server, menu-bar app, AI stream — lives in
 - **AI stream.** Your live coding session (Antigravity, Claude Code, or
   a terminal pipe) rendered as paginated e-ink pages — headings, nested
   lists, code blocks, tables, alerts.
-- **Receive over Wi-Fi.** The Kindle is the server: a QR code on screen
-  points any phone or laptop at a drag-drop page; books land in
-  `documents/` atomically, streamed to disk in 64 KB chunks and never
-  RAM-buffered. The firewall opens for the listener and closes when it
-  exits.
+- **Receive & manage over Wi-Fi.** The Kindle is the server: a QR code on screen
+  points any phone or laptop at a local web manager; upload books to
+  `documents/` atomically (streamed to disk in 64 KB chunks, never
+  RAM-buffered), manage screensavers and dictionaries, or browse and export
+  your reading highlights across all books with 1-click plain Markdown download.
+  The firewall opens for the listener and closes when it exits.
 - **Frontlight.** White + amber warmth, with brightness/warmth sliders
   and OFF/DAY/NIGHT presets in the curtain (the top-edge control sheet)
   from anywhere in the reader.
@@ -343,7 +345,7 @@ One file, the same one the mirror protocol has always used:
   (read-mode page turns), `SECRET=` (optional static shared secret, sent
   as `X-YB-Secret`):
   - `arrows` (default) — ←/→, for readers whose JS pages on arrow keys
-    (the classic behavior, verified on books.example.com);
+    (the standard behavior for web readers);
   - `space` — Space / Shift+Space, only where the site binds Space
     itself;
   - `pages` — PageDown / PageUp, native full-page keys delivered even to

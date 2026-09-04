@@ -70,7 +70,7 @@ background contexts get demoted by macOS after a while and then accept
 connections without ever answering them.
 
 First-ever run (or when you want a *new* reader window): add
-`--url https://books.example.com`. It opens a *new* frontmost window, which
+`--url <reading-url>`. It opens a *new* frontmost window, which
 the server then mirrors. Without `--url`, an already-open reader window is
 mirrored as-is, and a cold start resumes the last book.
 
@@ -111,9 +111,8 @@ your last book. The AI stream always starts explicitly.
 remembers its URL in `~/.yb-mirror-last-url` (refreshed every minute; it
 follows book switches, since the window title *is* the book name). On a
 cold start — no window open, no `--url` given — the server reopens the
-last page automatically: The server encodes the book in the URL
-(`/reader/<id>`) and syncs your position to your account, so the book
-comes back exactly where you left it. `--no-resume` disables this.
+last page automatically: modern web readers encode the book in the URL
+and sync your position, so the book comes back where you left it. `--no-resume` disables this.
 
 - `--autosize` resizes Safari so its content is exactly the Kindle's 0.75
   aspect (1236×1648) — no text is cropped and nothing is stretched. It first
@@ -470,8 +469,8 @@ secret). Same UDP discovery on 8766 when the port is free.
 
 ## Why this shape
 
-The remote books reader is a client-only JS app (see project notes); the
-Kindle's browser renders it blank. Mirroring sidesteps all of it: no
+Modern web readers are typically client-only JS web apps; the
+Kindle's built-in browser renders them blank or struggles to run them. Mirroring sidesteps all of it: no
 automation, no undocumented APIs — the Mac side is just you, in a normal
 browser, with a very patient external monitor attached. The AI stream fills
 the same screen with the one other thing that's long-form and worth reading

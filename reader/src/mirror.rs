@@ -39,7 +39,7 @@ const PING_EVERY_MS: u128 = 2_500;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TurnPreset {
     /// ←/→ — readers whose own JS flips pages on arrows (the classic
-    /// yb-mirror behavior, verified against books.example.com).
+    /// yb-mirror behavior for web readers).
     Arrows,
     /// Space / Shift+Space — readers that page on scroll keys. Only
     /// works where the site binds Space itself: a pid-posted Space (or

@@ -1310,7 +1310,7 @@ class Handler(BaseHTTPRequestHandler):
                         trust=True)
                 else:
                     # Not first-change speculation: measured 2026-08-22
-                    # on books.example.com, the first capture that differs
+                    # on web reader pages with turn animations, the first capture that differs
                     # after a key is the OLD page plus the opening sliver
                     # of the turn animation (early payloads matched the
                     # previous settled frame's size, turn after turn), so
@@ -1466,8 +1466,7 @@ def main():
                          "(largest 0.75-aspect content that fits the screen) "
                          "at startup")
     ap.add_argument("--url", default="",
-                    help="open this URL in the app at startup (e.g. "
-                    "https://books.example.com) before autosizing and serving")
+                    help="open this URL in the app at startup before autosizing and serving")
     ap.add_argument("--no-resume", action="store_true",
                     help="don't auto-open the last remembered page when the "
                     "app has no window at startup (resuming is the default; "
