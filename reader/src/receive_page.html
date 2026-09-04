@@ -216,6 +216,84 @@ body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webki
   white-space: nowrap;
 }
 
+/* Highlights & Notes */
+.notes-container { display: flex; flex-direction: column; gap: 16px; }
+.notes-header-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.notes-stats-title { font-size: 1.05rem; font-weight: 700; color: var(--text-main); }
+.notes-stats-sub { font-size: 0.82rem; color: var(--text-dim); margin-top: 3px; }
+.notes-book-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.notes-book-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  background: var(--surface-hover);
+  border-bottom: 1px solid var(--border-subtle);
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.notes-book-title {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.notes-badge {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--accent-glow);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.notes-item {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background 0.1s;
+}
+.notes-item:last-child { border-bottom: none; }
+.notes-quote {
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--text-main);
+  border-left: 3px solid var(--accent);
+  padding-left: 12px;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+}
+.notes-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  gap: 8px;
+}
+.notes-meta-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* Breadcrumbs bar */
 .breadcrumbs-bar {
   display: flex;
@@ -619,6 +697,10 @@ body { background: var(--bg); color: var(--text-main); min-height: 100vh; -webki
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M9 7h6"/><path d="M9 11h6"/></svg>
         Dictionaries
       </button>
+      <button class="nav-tab" id="tab-notes" onclick="setRoot('notes')">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>
+        Highlights
+      </button>
     </nav>
 
     <div class="nav-stats">
@@ -782,7 +864,20 @@ function setRoot(r) {
   document.getElementById('tab-books').classList.toggle('active', r === 'documents');
   document.getElementById('tab-screensavers').classList.toggle('active', r === 'screensavers');
   document.getElementById('tab-dictionaries').classList.toggle('active', r === 'dictionaries');
+  document.getElementById('tab-notes').classList.toggle('active', r === 'notes');
   
+  if (r === 'notes') {
+    dropzone.style.display = 'none';
+    newFolderBtn.style.display = 'none';
+    breadcrumbs.style.display = 'none';
+    searchInput.placeholder = 'Filter highlights or books...';
+    dictInstructions.style.display = 'none';
+    searchInput.value = '';
+    loadNotes();
+    return;
+  }
+  dropzone.style.display = 'block';
+
   if (r === 'screensavers') {
     newFolderBtn.style.display = 'none';
     breadcrumbs.style.display = 'none';
@@ -980,11 +1075,193 @@ function renderContent(data) {
 
 function filterCards() {
   const query = searchInput.value.trim().toLowerCase();
+  if (root === 'notes') {
+    if (allNotesData) renderNotes(allNotesData, query);
+    return;
+  }
   const items = document.querySelectorAll('.item-card');
   items.forEach(el => {
     const name = el.getAttribute('data-name') || '';
     el.style.display = name.includes(query) ? '' : 'none';
   });
+}
+
+let allNotesData = null;
+
+async function loadNotes() {
+  contentCont.innerHTML = '<div class="empty-box">Loading highlights...</div>';
+  try {
+    const res = await fetch(withToken('/api/notes'));
+    if (!res.ok) throw new Error('Status ' + res.status);
+    const data = await res.json();
+    allNotesData = data;
+    renderNotes(data);
+  } catch (e) {
+    contentCont.innerHTML = `<div class="empty-box">Failed to load highlights: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderNotes(data, filter = '') {
+  const books = data.books || [];
+  const q = filter.trim().toLowerCase();
+  
+  if (books.length === 0) {
+    contentCont.innerHTML = `
+      <div class="empty-box">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom:8px;color:var(--text-dim)"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>
+        <div>No highlights saved yet.</div>
+        <div style="font-size:0.8rem;color:var(--text-dim);margin-top:4px">Drag across text in any book to save reading quotes.</div>
+      </div>`;
+    return;
+  }
+
+  let totalHighlights = 0;
+  for (const b of books) {
+    totalHighlights += b.count;
+  }
+
+  let filteredBooks = books;
+  if (q) {
+    filteredBooks = books.map(b => {
+      const titleMatch = b.book.toLowerCase().includes(q);
+      const matchedHighlights = b.highlights.filter(h => h.text.toLowerCase().includes(q));
+      if (titleMatch) return b;
+      if (matchedHighlights.length > 0) {
+        return { ...b, highlights: matchedHighlights, count: matchedHighlights.length };
+      }
+      return null;
+    }).filter(Boolean);
+  }
+
+  let html = `
+    <div class="notes-header-card">
+      <div>
+        <div class="notes-stats-title">${totalHighlights} Highlights across ${books.length} Books</div>
+        <div class="notes-stats-sub">Export or copy quotes directly to markdown notes</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <a class="btn btn-primary" href="${withToken('/api/notes?format=md')}" download="kindle-notes.md">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+          Download All (.md)
+        </a>
+        <button class="btn" onclick="copyAllNotes()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+          Copy All
+        </button>
+      </div>
+    </div>
+    <div class="notes-container">
+  `;
+
+  if (filteredBooks.length === 0) {
+    html += `<div class="empty-box">No highlights match "${escapeHtml(filter)}"</div></div>`;
+    contentCont.innerHTML = html;
+    return;
+  }
+
+  for (const b of filteredBooks) {
+    const bookEnc = encodeURIComponent(b.book);
+    html += `
+      <div class="notes-book-card" data-book="${escapeHtml(b.book.toLowerCase())}">
+        <div class="notes-book-header">
+          <div class="notes-book-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10"/><path d="M6 10h10"/></svg>
+            <span>${escapeHtml(b.book)}</span>
+            <span class="notes-badge">${b.count}</span>
+          </div>
+          <div style="display:flex;gap:6px">
+            <a class="btn" href="${withToken('/api/notes?format=md&book=' + bookEnc)}" download="${escapeHtml(b.book)}-notes.md" title="Download book notes as Markdown">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+              .md
+            </a>
+            <button class="btn" onclick="copyBookNotes('${escapeHtml(b.book.replace(/'/g, "\\'"))}')" title="Copy book quotes">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+              Copy
+            </button>
+            <button class="btn" onclick="deleteBookNotes('${escapeHtml(b.book.replace(/'/g, "\\'"))}')" title="Delete highlights for this book" style="color:var(--danger)">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
+        </div>
+        <div>
+    `;
+    for (const h of b.highlights) {
+      html += `
+        <div class="notes-item">
+          <div class="notes-quote">${escapeHtml(h.text)}</div>
+          <div class="notes-meta">
+            <span class="notes-meta-info">
+              <span>Page ${h.page_num || (h.page + 1)}</span>
+              ${h.date ? `<span>·</span><span>${escapeHtml(h.date)}</span>` : ''}
+            </span>
+            <button class="btn" style="padding:2px 8px;font-size:0.75rem" onclick="deleteHighlight('${escapeHtml(b.book.replace(/'/g, "\\'"))}', '${escapeHtml(h.text.replace(/'/g, "\\'"))}')">Delete</button>
+          </div>
+        </div>
+      `;
+    }
+    html += `</div></div>`;
+  }
+  html += `</div>`;
+  contentCont.innerHTML = html;
+}
+
+async function copyAllNotes() {
+  try {
+    const res = await fetch(withToken('/api/notes?format=md'));
+    const md = await res.text();
+    await navigator.clipboard.writeText(md);
+    showToast('Copied all highlights to clipboard!', 'success');
+  } catch (e) {
+    showToast('Failed to copy: ' + e.message, 'error');
+  }
+}
+
+async function copyBookNotes(book) {
+  try {
+    const res = await fetch(withToken('/api/notes?format=md&book=' + encodeURIComponent(book)));
+    const md = await res.text();
+    await navigator.clipboard.writeText(md);
+    showToast('Copied book highlights to clipboard!', 'success');
+  } catch (e) {
+    showToast('Failed to copy: ' + e.message, 'error');
+  }
+}
+
+async function deleteBookNotes(book) {
+  if (!confirm(`Delete all highlights for "${book}"?`)) return;
+  try {
+    const res = await fetch(withToken('/api/notes/delete'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'book=' + encodeURIComponent(book)
+    });
+    if (res.ok) {
+      showToast('Deleted highlights for ' + book, 'success');
+      loadNotes();
+    } else {
+      showToast('Failed to delete', 'error');
+    }
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+async function deleteHighlight(book, text) {
+  try {
+    const res = await fetch(withToken('/api/notes/delete'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'book=' + encodeURIComponent(book) + '&text=' + encodeURIComponent(text)
+    });
+    if (res.ok) {
+      showToast('Deleted highlight', 'success');
+      loadNotes();
+    } else {
+      showToast('Failed to delete', 'error');
+    }
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
 }
 
 function escapeHtml(s) {

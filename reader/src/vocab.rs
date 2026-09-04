@@ -3,13 +3,19 @@ use std::fs;
 use std::path::Path;
 const PROFILE_PATH: &str = "/mnt/us/extensions/reader/vocab_profile.json";
 
-/// Strip punctuation and lowercase.
+/// Strip punctuation and lowercase. Preserves internal hyphens (for compound
+/// words like "built-in"), but trims leading and trailing hyphens/dashes,
+/// and strips English possessive suffixes ('s, ’s).
 pub fn clean_word(w: &str) -> String {
-    w.chars()
+    let base = w.strip_suffix("'s").or_else(|| w.strip_suffix("’s")).unwrap_or(w);
+    let s: String = base
+        .chars()
         .filter(|c| c.is_alphabetic() || *c == '-')
         .collect::<String>()
-        .to_lowercase()
+        .to_lowercase();
+    s.trim_matches('-').to_string()
 }
+
 
 /// Rule-based English lemmatization for dictionary fallback lookups.
 /// Handles regular inflectional suffixes (-s, -es, -ies, -ves, -ed, -ied, -ing, -ying, -ly, -ily, -ally)
@@ -107,6 +113,39 @@ pub fn generate_lemmas(w: &str) -> Vec<String> {
         } else if w.ends_with("ly") && len > 4 {
             lemmas.push(w[..len - 2].to_string()); // quickly -> quick
         }
+    }
+
+    // 5. Common English contractions & negative auxiliary verbs
+    // (Apostrophes were stripped by clean_word: "didn't" -> "didnt", "couldn't" -> "couldnt")
+    match w {
+        "didnt" => {
+            lemmas.push("did".to_string());
+            lemmas.push("do".to_string());
+        }
+        "doesnt" | "dont" => lemmas.push("do".to_string()),
+        "couldnt" => lemmas.push("could".to_string()),
+        "wouldnt" => lemmas.push("would".to_string()),
+        "shouldnt" => lemmas.push("should".to_string()),
+        "havent" | "hasnt" | "hadnt" => lemmas.push("have".to_string()),
+        "cant" => lemmas.push("can".to_string()),
+        "wont" => lemmas.push("will".to_string()),
+        "wasnt" | "werent" | "isnt" | "arent" => lemmas.push("be".to_string()),
+        "theyll" | "youll" | "hell" | "shell" | "itll" => {
+            if let Some(base) = w.strip_suffix("ll") {
+                lemmas.push(base.to_string());
+            }
+        }
+        "theyve" | "youve" | "weve" | "couldve" | "wouldve" | "shouldve" => {
+            if let Some(base) = w.strip_suffix("ve") {
+                lemmas.push(base.to_string());
+            }
+        }
+        "theyd" | "youd" | "hed" | "shed" => {
+            if let Some(base) = w.strip_suffix('d') {
+                lemmas.push(base.to_string());
+            }
+        }
+        _ => {}
     }
 
     // Retain only unique, non-empty lemmas that differ from the input
@@ -285,6 +324,21 @@ mod tests {
         assert!(generate_lemmas("tenaciously").contains(&"tenacious".to_string()));
         assert!(generate_lemmas("happily").contains(&"happy".to_string()));
         assert!(generate_lemmas("basically").contains(&"basic".to_string()));
-    }
 
+        // Hyphen / dash trimming & possessive stripping
+        assert_eq!(clean_word("--interrupted"), "interrupted");
+        assert_eq!(clean_word("said--"), "said");
+        assert_eq!(clean_word("--built-in--"), "built-in");
+        assert_eq!(clean_word("reader's"), "reader");
+        assert_eq!(clean_word("reader’s"), "reader");
+        assert_eq!(clean_word("James's"), "james");
+
+        // Contractions & auxiliary negative verbs
+        assert!(generate_lemmas(&clean_word("didn't")).contains(&"did".to_string()));
+        assert!(generate_lemmas(&clean_word("couldn't")).contains(&"could".to_string()));
+        assert!(generate_lemmas(&clean_word("haven't")).contains(&"have".to_string()));
+        assert!(generate_lemmas(&clean_word("they'll")).contains(&"they".to_string()));
+        assert!(generate_lemmas(&clean_word("we've")).contains(&"we".to_string()));
+        assert!(generate_lemmas(&clean_word("won't")).contains(&"will".to_string()));
+    }
 }

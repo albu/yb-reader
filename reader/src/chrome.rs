@@ -2,35 +2,25 @@
 //! header (clock · title · battery), the progress footer with
 //! chapter-aware time-left, and the selection-mode bookmark ribbon.
 
-use std::process::Command;
-use std::sync::{Mutex, OnceLock};
-
 use ybdev::sysinfo;
 use yui::painter::{pt, Painter, Rect};
 
-/// Cached (epoch-minute, rendered "HH:MM"). The reader screen re-renders
-/// its header on busy ticks; forking /bin/date each time cost ~10 execs/sec
-/// while a chapter laid out. The shell-out stays — it is what makes the
-/// clock respect the device timezone — but runs at most once per minute.
-fn clock_cache() -> &'static Mutex<(u128, String)> {
-    static CACHE: OnceLock<Mutex<(u128, String)>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new((u128::MAX, "--:--".to_string())))
-}
-
+/// Formats the current time as "HH:MM" in the device's local timezone.
+///
+/// Uses `libc::time` and `libc::localtime_r` in-process so it respects
+/// `/etc/localtime` with zero subprocess forks and sub-microsecond overhead.
 pub fn current_time_str() -> String {
-    let now_minute = ybdev::log::now_ms() / 60_000;
-    let mut cache = clock_cache().lock().unwrap_or_else(|e| e.into_inner());
-    if cache.0 != now_minute {
-        let fresh = Command::new("date")
-            .arg("+%H:%M")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|| "--:--".to_string());
-        *cache = (now_minute, fresh);
+    #[allow(deprecated)]
+    let mut now: libc::time_t = 0;
+    unsafe {
+        libc::time(&mut now);
+        let mut tm: libc::tm = std::mem::zeroed();
+        if !libc::localtime_r(&now, &mut tm).is_null() {
+            format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+        } else {
+            "--:--".to_string()
+        }
     }
-    cache.1.clone()
 }
 
 /// Status header: clock + truncated title + the right status cluster
@@ -346,4 +336,16 @@ mod tests {
             assert!(ink > 10, "ribbon drew no ink");
         }
     }
+
+    #[test]
+    fn current_time_str_formats_valid_time() {
+        let s = current_time_str();
+        assert_eq!(s.len(), 5);
+        assert_eq!(&s[2..3], ":");
+        let h: u32 = s[0..2].parse().expect("hours are digits");
+        let m: u32 = s[3..5].parse().expect("minutes are digits");
+        assert!(h < 24);
+        assert!(m < 60);
+    }
 }
+

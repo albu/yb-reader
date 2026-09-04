@@ -12,10 +12,17 @@
 
 use crate::split::RectF;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Highlight {
     pub page: usize,
     pub ts: u64,
     pub text: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BookNotes {
+    pub book: String,
+    pub highlights: Vec<Highlight>,
 }
 
 /// Overridable so host-side tests can aim the store at a temp dir.
@@ -134,6 +141,120 @@ pub fn matched_spans(
     out
 }
 
+/// List all books that have saved highlights (.hl files in notes_dir).
+pub fn list_books() -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(notes_dir()) else {
+        return Vec::new();
+    };
+    let mut books: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("hl") {
+                p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    books.sort();
+    books
+}
+
+/// Load all highlights grouped by book.
+pub fn load_all() -> Vec<BookNotes> {
+    let mut all = Vec::new();
+    for book in list_books() {
+        let highlights = load(&book);
+        if !highlights.is_empty() {
+            all.push(BookNotes { book, highlights });
+        }
+    }
+    all
+}
+
+/// Delete all highlights for a given book.
+pub fn delete_book_notes(book: &str) -> bool {
+    let p = path_for(book);
+    let path = std::path::Path::new(&p);
+    if path.exists() {
+        std::fs::remove_file(path).is_ok()
+    } else {
+        false
+    }
+}
+
+/// Format a unix timestamp (seconds) as YYYY-MM-DD HH:MM in local time.
+pub fn format_ts(ts: u64) -> String {
+    if ts == 0 {
+        return String::new();
+    }
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    #[allow(deprecated)]
+    let t = ts as libc::time_t;
+    unsafe {
+        if !libc::localtime_r(&t, &mut tm).is_null() {
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}",
+                tm.tm_year + 1900,
+                tm.tm_mon + 1,
+                tm.tm_mday,
+                tm.tm_hour,
+                tm.tm_min
+            )
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// Export highlights for a single book as formatted Markdown.
+pub fn export_book_markdown(book: &str) -> String {
+    let notes = load(book);
+    let mut md = String::new();
+    md.push_str(&format!("# {}\n\n", book));
+    if notes.is_empty() {
+        md.push_str("*No highlights.*\n");
+        return md;
+    }
+    for h in &notes {
+        md.push_str(&format!("> {}\n\n", h.text.replace('\n', "\n> ")));
+        let dt = format_ts(h.ts);
+        if !dt.is_empty() {
+            md.push_str(&format!("— *Page {}, {}*\n\n", h.page + 1, dt));
+        } else {
+            md.push_str(&format!("— *Page {}*\n\n", h.page + 1));
+        }
+    }
+    md
+}
+
+/// Export highlights for all books as a single consolidated Markdown document.
+pub fn export_all_markdown() -> String {
+    let books = load_all();
+    if books.is_empty() {
+        return "# Kindle Highlights\n\n*No highlights saved yet.*\n".to_string();
+    }
+    let mut md = String::new();
+    md.push_str("# Kindle Highlights\n\n");
+    for (i, b) in books.iter().enumerate() {
+        if i > 0 {
+            md.push_str("\n---\n\n");
+        }
+        md.push_str(&format!("## {}\n\n", b.book));
+        for h in &b.highlights {
+            md.push_str(&format!("> {}\n\n", h.text.replace('\n', "\n> ")));
+            let dt = format_ts(h.ts);
+            if !dt.is_empty() {
+                md.push_str(&format!("— *Page {}, {}*\n\n", h.page + 1, dt));
+            } else {
+                md.push_str(&format!("— *Page {}*\n\n", h.page + 1));
+            }
+        }
+    }
+    md
+}
+
 /// Tests that repoint YB_NOTES_DIR must not run concurrently — env vars
 /// are process-global, so parallel tests would clobber each other's store.
 #[cfg(test)]
@@ -226,4 +347,47 @@ mod tests {
         let spans = matched_spans(&hl, 0, &words);
         assert_eq!(spans, vec![(1, 2), (3, 3), (0, 1)]);
     }
+
+    #[test]
+    fn markdown_export_and_book_listing() {
+        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join("yb-notes-export-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("YB_NOTES_DIR", dir.to_str().unwrap());
+
+        assert!(list_books().is_empty());
+        assert!(load_all().is_empty());
+        assert_eq!(export_all_markdown(), "# Kindle Highlights\n\n*No highlights saved yet.*\n");
+
+        assert!(add("War and Peace", 5, "It was in July, 1805..."));
+        assert!(add("War and Peace", 10, "Well, Prince, so Genoa and Lucca..."));
+        assert!(add("The Hobbit", 0, "In a hole in the ground there lived a hobbit."));
+
+        let books = list_books();
+        assert_eq!(books.len(), 2);
+        assert!(books.contains(&"The Hobbit".to_string()));
+        assert!(books.contains(&"War and Peace".to_string()));
+
+        let all = load_all();
+        assert_eq!(all.len(), 2);
+
+        let hobbit_md = export_book_markdown("The Hobbit");
+        assert!(hobbit_md.contains("# The Hobbit"));
+        assert!(hobbit_md.contains("> In a hole in the ground there lived a hobbit."));
+        assert!(hobbit_md.contains("Page 1"));
+
+        let all_md = export_all_markdown();
+        assert!(all_md.contains("# Kindle Highlights"));
+        assert!(all_md.contains("## War and Peace"));
+        assert!(all_md.contains("## The Hobbit"));
+        assert!(all_md.contains("It was in July, 1805..."));
+
+        assert!(delete_book_notes("The Hobbit"));
+        assert!(!delete_book_notes("The Hobbit"));
+        assert_eq!(list_books(), vec!["War and Peace".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
+

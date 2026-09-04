@@ -1306,6 +1306,102 @@ fn handle_conn(
             return;
         }
 
+        if raw_path == "/api/notes" {
+            let fmt = query_param(query_str, "format").unwrap_or_default();
+            let book = query_param(query_str, "book");
+
+            if fmt == "md" {
+                let (md, fname) = if let Some(ref b) = book {
+                    (
+                        crate::notes::export_book_markdown(b),
+                        format!("{}-notes.md", b.replace(' ', "_").replace('/', "_")),
+                    )
+                } else {
+                    (crate::notes::export_all_markdown(), "kindle-notes.md".to_string())
+                };
+                let cd_hdr = format!("Content-Disposition: attachment; filename=\"{}\"", fname);
+                respond_with_headers(
+                    &mut stream,
+                    200,
+                    "OK",
+                    "text/markdown; charset=utf-8",
+                    &md,
+                    &[&cd_hdr],
+                );
+                return;
+            }
+
+            let json = if let Some(ref b) = book {
+                let notes = crate::notes::load(b);
+                let mut s = String::new();
+                s.push_str("{\"book\":\"");
+                s.push_str(&escape_json(b));
+                s.push_str("\",\"count\":");
+                s.push_str(&notes.len().to_string());
+                s.push_str(",\"highlights\":[");
+                for (i, h) in notes.iter().enumerate() {
+                    if i > 0 {
+                        s.push(',');
+                    }
+                    s.push_str("{\"page\":");
+                    s.push_str(&h.page.to_string());
+                    s.push_str(",\"page_num\":");
+                    s.push_str(&(h.page + 1).to_string());
+                    s.push_str(",\"ts\":");
+                    s.push_str(&h.ts.to_string());
+                    s.push_str(",\"date\":\"");
+                    s.push_str(&escape_json(&crate::notes::format_ts(h.ts)));
+                    s.push_str("\",\"text\":\"");
+                    s.push_str(&escape_json(&h.text));
+                    s.push_str("\"}");
+                }
+                s.push_str("]}");
+                s
+            } else {
+                let books = crate::notes::load_all();
+                let mut s = String::new();
+                s.push_str("{\"books\":[");
+                for (i, b) in books.iter().enumerate() {
+                    if i > 0 {
+                        s.push(',');
+                    }
+                    s.push_str("{\"book\":\"");
+                    s.push_str(&escape_json(&b.book));
+                    s.push_str("\",\"count\":");
+                    s.push_str(&b.highlights.len().to_string());
+                    s.push_str(",\"highlights\":[");
+                    for (j, h) in b.highlights.iter().enumerate() {
+                        if j > 0 {
+                            s.push(',');
+                        }
+                        s.push_str("{\"page\":");
+                        s.push_str(&h.page.to_string());
+                        s.push_str(",\"page_num\":");
+                        s.push_str(&(h.page + 1).to_string());
+                        s.push_str(",\"ts\":");
+                        s.push_str(&h.ts.to_string());
+                        s.push_str(",\"date\":\"");
+                        s.push_str(&escape_json(&crate::notes::format_ts(h.ts)));
+                        s.push_str("\",\"text\":\"");
+                        s.push_str(&escape_json(&h.text));
+                        s.push_str("\"}");
+                    }
+                    s.push_str("]}");
+                }
+                s.push_str("]}");
+                s
+            };
+
+            respond(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                &json,
+            );
+            return;
+        }
+
         respond(&mut stream, 200, "OK", "text/html; charset=utf-8", PAGE);
         return;
     }
@@ -1553,6 +1649,31 @@ fn handle_conn(
                     "application/json",
                     &format!("{{\"error\":\"{}\"}}", escape_json(&e.to_string())),
                 ),
+            }
+            return;
+        }
+
+        if raw_path == "/api/notes/delete" {
+            let body_bytes = read_small_body(&mut stream, &buf[hdr_end + 4..], content_length, 16384).unwrap_or_default();
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            let book = extract_param_str(&body_str, "book").unwrap_or_default();
+            let text = extract_param_str(&body_str, "text").unwrap_or_default();
+
+            if book.is_empty() {
+                respond(&mut stream, 400, "Bad Request", "application/json", "{\"error\":\"missing book parameter\"}");
+                return;
+            }
+
+            let ok = if !text.is_empty() {
+                crate::notes::remove(&book, &text)
+            } else {
+                crate::notes::delete_book_notes(&book)
+            };
+
+            if ok {
+                respond(&mut stream, 200, "OK", "application/json; charset=utf-8", "{\"ok\":true}");
+            } else {
+                respond(&mut stream, 404, "Not Found", "application/json", "{\"error\":\"highlight or book not found\"}");
             }
             return;
         }
@@ -3197,4 +3318,86 @@ mod tests {
             .write_image_data(&canvas)
             .unwrap();
     }
+
+    #[test]
+    fn test_notes_api_endpoints() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _notes_guard = crate::notes::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = std::env::temp_dir().join("yb-receive-notes-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("YB_SAVE_DIR", dir.to_str().unwrap());
+
+        let notes_dir = std::env::temp_dir().join("yb-receive-notes-dir");
+        let _ = std::fs::remove_dir_all(&notes_dir);
+        std::fs::create_dir_all(&notes_dir).unwrap();
+        std::env::set_var("YB_NOTES_DIR", notes_dir.to_str().unwrap());
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let srv = ReceiveServer::start(Arc::clone(&stop)).expect("server");
+        let port = srv.port();
+        let pin = srv.token().to_string();
+
+        // 1. Initial GET /api/notes with no notes
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(with_pin(&pin, "GET /api/notes HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_str.contains("{\"books\":[]}"));
+
+        // 2. Add some notes directly via crate::notes
+        assert!(crate::notes::add("Moby Dick", 42, "Call me Ishmael."));
+        assert!(crate::notes::add("Moby Dick", 100, "Towards thee I roll..."));
+
+        // 3. GET /api/notes JSON
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(with_pin(&pin, "GET /api/notes HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_str.contains("Moby Dick"));
+        assert!(resp_str.contains("Call me Ishmael."));
+
+        // 4. GET /api/notes?format=md
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(with_pin(&pin, "GET /api/notes?format=md HTTP/1.1\r\nHost: t\r\n\r\n").as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp_str.contains("Content-Type: text/markdown"));
+        assert!(resp_str.contains("kindle-notes.md"));
+        assert!(resp_str.contains("## Moby Dick"));
+        assert!(resp_str.contains("> Call me Ishmael."));
+
+        // 5. POST /api/notes/delete for single quote
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let body = "book=Moby%20Dick&text=Call%20me%20Ishmael.";
+        let req = format!("POST /api/notes/delete HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+        c.write_all(with_pin(&pin, &req).as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(crate::notes::load("Moby Dick").len(), 1);
+
+        // 6. POST /api/notes/delete for entire book
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let body = "book=Moby%20Dick";
+        let req = format!("POST /api/notes/delete HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}", body.len(), body);
+        c.write_all(with_pin(&pin, &req).as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        c.read_to_end(&mut resp).unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200 OK"));
+        assert!(crate::notes::load("Moby Dick").is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&notes_dir);
+    }
 }
+
