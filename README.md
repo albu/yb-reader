@@ -1,5 +1,10 @@
 # yb-reader
 
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Target: Kindle PW5](https://img.shields.io/badge/hardware-Kindle%20PW5%20(MT8183)-orange.svg)](#hardware--device-support)
+[![Rust: 2021](https://img.shields.io/badge/rust-2021%20edition-lightgrey.svg)](Cargo.toml)
+[![Architecture: armhf](https://img.shields.io/badge/arch-arm--linux--musleabihf-blueviolet.svg)](#cross-compiling--the-scars-documented)
+
 Reading on a stock Kindle is fine. This makes it faster and a lot more
 pleasant: yb-reader is a Rust reader for a jailbroken Paperwhite 5 that
 replaces KOReader — boot it and you're in your library, send books over
@@ -12,6 +17,29 @@ no JVM, no plugins.
 
 The Mac half — mirror server, menu-bar app, AI stream — lives in
 [`companion/`](companion/README.md).
+
+## Table of Contents
+
+- [What it does](#what-it-does)
+- [Hardware & Device Support](#hardware--device-support)
+- [The reading engine (yread)](#the-reading-engine-yread)
+- [PDFs: crop & split](#pdfs-crop--split)
+- [Quick start (build & deploy)](#quick-start-build--deploy)
+- [Takeover mode — the reader as the OS](#takeover-mode--the-reader-as-the-os)
+- [Mirror & companion](#mirror--companion)
+- [Configuration](#configuration)
+- [Controls](#controls)
+- [Layout](#layout)
+- [Cross-compiling — the scars, documented](#cross-compiling--the-scars-documented)
+- [Known limitations](#known-limitations)
+- [License](#license)
+
+## Hardware & Device Support
+
+* **Target Device**: Kindle Paperwhite 5 (11th Generation, 2021, code name `bellatrix`).
+* **Platform**: MediaTek MT8183 (armhf / 32-bit userspace on 64-bit kernel), 1236×1648 300 ppi E-Ink panel.
+* **Prerequisites**: Jailbroken device (e.g. via LanguageBreak or WinterBreak on FW 5.16.x–5.19.x).
+* *Other Kindles*: Untested. Older Freescale/NXP i.MX models (PW4 and earlier) use different framebuffer ioctls and input drivers, requiring adaptation in `ybdev`.
 
 ## What it does
 
@@ -469,15 +497,14 @@ with versions; the Makefile takes `make LLD=... LLVM_AR=...`, and
   timer (the Kindle behavior); live sessions (mirror streaming, receive
   server) and USB power hold it awake. On wake, one resume hook
   repaints, re-applies our frontlight levels (powerd restores its own
-  over ours), and heals Wi-Fi for screens that want it. The one hardware
-  unknown left is whether a wall charger trips volumd's drive-mode path
-  on VBUS alone.
+  over ours), and heals Wi-Fi for screens that want it.
 - **USB cable in takeover mode**: **file access, always** — USB is fully
-  stock, so the userstore is editable from any computer. The cost is
-  deliberate: the export unmounts `/mnt/us` under the running reader, so
-  the reader bows out gracefully on plug (positions flushed) and boot.sh
-  waits out the cable; upstart respawns on unplug. A wall charger may or
-  may not trip the same path (untested on hardware).
+  stock, so the userstore is editable from any computer. The reader
+  inspects `/sys/class/udc/*/state` to cleanly distinguish a configured PC host
+  from a wall charger: wall chargers keep charge-and-read active, while a PC
+  drive-mode configuration unmounts `/mnt/us`, prompting the reader to bow
+  out gracefully (positions flushed) while `boot.sh` parks until unplug;
+  upstart respawns the reader as soon as the cable is disconnected.
 - The binary statically links **MuPDF** (AGPL-3.0, © Artifex Software).
   Personal use on your own device is unrestricted, but *distributing*
   the built binary carries AGPL obligations (license alongside the
@@ -488,6 +515,7 @@ with versions; the Makefile takes `make LLD=... LLVM_AR=...`, and
 
 AGPL-3.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The fonts are
 SIL Open Font License 1.1 (license texts in `resources/fonts/OFL-*.txt`);
-the statically-linked MuPDF is AGPL-3.0 (© Artifex Software, source at
-[mupdf.com](https://mupdf.com)). Security posture, threat model and the
-honest list of accepted residuals: [SECURITY.md](SECURITY.md).
+Dropbear SSH is under a MIT/BSD-style license; the statically-linked MuPDF
+is AGPL-3.0 (© Artifex Software, source at [mupdf.com](https://mupdf.com)).
+Security posture, threat model and the honest list of accepted residuals:
+[SECURITY.md](SECURITY.md).
