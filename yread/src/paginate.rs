@@ -3,7 +3,7 @@
 use crate::font::FontSystem;
 use crate::line::{break_paragraph_lines_streaming, LayoutLine};
 use crate::model::{Block, Chapter, ChapterPageTable, PageBreak, TextAlign};
-use crate::shape::ShapeCache;
+use crate::shape::{ShapeCache, ShapedWord};
 use hypher::Lang;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -420,48 +420,207 @@ pub fn paginate_chapter_with_images(
                 let left_margin_px = em_px * 0.8;
                 let code_size = config.font_size * 0.82;
                 let line_h = code_size * (300.0 / 72.0) * 1.25;
-                let block_start_y = cur_y;
+                let mut page_bar_start_y = cur_y;
 
                 cur_y += em_px * 0.35; // Space before code block
 
+                let code_x = left_margin_px + 8.0;
+                let max_w = (content_w - code_x - 8.0).max(60.0);
+
                 for c_line in code.lines() {
-                    if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
-                        cur_page.end_char = last_char_pos;
-                        finish_page(
-                            &mut pages,
-                            &mut page_breaks,
-                            std::mem::take(&mut cur_page),
-                            cur_block_idx,
-                            cur_page_start_char,
-                            cur_page_start_byte,
-                            last_char_pos,
-                            last_byte_pos,
-                        );
-                        cur_page = PageLayout::default();
-                        cur_page.page_idx = pages.len();
-                        cur_y = 0.0;
-                        cur_page_start_char = usize::MAX;
-                        cur_page_start_byte = usize::MAX;
-                        cur_block_idx = b_idx;
+                    let expanded = c_line.replace('\t', "    ");
+
+                    if expanded.trim().is_empty() {
+                        if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
+                            if cur_y > page_bar_start_y {
+                                cur_page.elements.push(PageElement::QuoteBar {
+                                    x: (left_margin_px - 2.0).max(0.0),
+                                    y0: page_bar_start_y + 4.0,
+                                    y1: cur_y - 2.0,
+                                });
+                            }
+                            cur_page.end_char = last_char_pos;
+                            finish_page(
+                                &mut pages,
+                                &mut page_breaks,
+                                std::mem::take(&mut cur_page),
+                                cur_block_idx,
+                                cur_page_start_char,
+                                cur_page_start_byte,
+                                last_char_pos,
+                                last_byte_pos,
+                            );
+                            cur_page = PageLayout::default();
+                            cur_page.page_idx = pages.len();
+                            cur_y = 0.0;
+                            cur_page_start_char = usize::MAX;
+                            cur_page_start_byte = usize::MAX;
+                            cur_block_idx = b_idx;
+                            page_bar_start_y = 0.0;
+                        }
+                        cur_y += line_h;
+                        continue;
                     }
 
-                    if !c_line.trim().is_empty() {
-                        let shaped = cache.shape_code_word(c_line, code_size, fonts);
+                    // Measure leading indentation of the line
+                    let leading_spaces = expanded.chars().take_while(|c| *c == ' ').count();
+                    let indent_px = if leading_spaces > 0 {
+                        cache
+                            .shape_code_word(&expanded[..leading_spaces], code_size, fonts)
+                            .advance
+                    } else {
+                        0.0
+                    };
+                    let cont_indent = (indent_px + em_px * 0.5).min(max_w * 0.45);
+                    let cont_x = code_x + cont_indent;
+                    let cont_max_w = (content_w - cont_x - 8.0).max(60.0);
+
+                    let shaped = cache.shape_code_word(&expanded, code_size, fonts);
+                    if shaped.advance <= max_w {
+                        if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
+                            if cur_y > page_bar_start_y {
+                                cur_page.elements.push(PageElement::QuoteBar {
+                                    x: (left_margin_px - 2.0).max(0.0),
+                                    y0: page_bar_start_y + 4.0,
+                                    y1: cur_y - 2.0,
+                                });
+                            }
+                            cur_page.end_char = last_char_pos;
+                            finish_page(
+                                &mut pages,
+                                &mut page_breaks,
+                                std::mem::take(&mut cur_page),
+                                cur_block_idx,
+                                cur_page_start_char,
+                                cur_page_start_byte,
+                                last_char_pos,
+                                last_byte_pos,
+                            );
+                            cur_page = PageLayout::default();
+                            cur_page.page_idx = pages.len();
+                            cur_y = 0.0;
+                            cur_page_start_char = usize::MAX;
+                            cur_page_start_byte = usize::MAX;
+                            cur_block_idx = b_idx;
+                            page_bar_start_y = 0.0;
+                        }
                         cur_page.elements.push(PageElement::CodeLine {
                             shaped,
-                            x: left_margin_px + 8.0,
+                            x: code_x,
                             y: cur_y + line_h * 0.75,
                             size_pt: code_size,
                         });
+                        cur_y += line_h;
+                    } else {
+                        // Wrap long code line into multiple segments that fit within max_w
+                        let mut rem = expanded.as_str();
+                        let mut is_first = true;
+
+                        while !rem.is_empty() {
+                            let (cur_x_pos, cur_avail_w) = if is_first {
+                                (code_x, max_w)
+                            } else {
+                                (cont_x, cont_max_w)
+                            };
+
+                            let piece_shaped = cache.shape_code_word(rem, code_size, fonts);
+                            if piece_shaped.advance <= cur_avail_w {
+                                if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
+                                    if cur_y > page_bar_start_y {
+                                        cur_page.elements.push(PageElement::QuoteBar {
+                                            x: (left_margin_px - 2.0).max(0.0),
+                                            y0: page_bar_start_y + 4.0,
+                                            y1: cur_y - 2.0,
+                                        });
+                                    }
+                                    cur_page.end_char = last_char_pos;
+                                    finish_page(
+                                        &mut pages,
+                                        &mut page_breaks,
+                                        std::mem::take(&mut cur_page),
+                                        cur_block_idx,
+                                        cur_page_start_char,
+                                        cur_page_start_byte,
+                                        last_char_pos,
+                                        last_byte_pos,
+                                    );
+                                    cur_page = PageLayout::default();
+                                    cur_page.page_idx = pages.len();
+                                    cur_y = 0.0;
+                                    cur_page_start_char = usize::MAX;
+                                    cur_page_start_byte = usize::MAX;
+                                    cur_block_idx = b_idx;
+                                    page_bar_start_y = 0.0;
+                                }
+                                cur_page.elements.push(PageElement::CodeLine {
+                                    shaped: piece_shaped,
+                                    x: cur_x_pos,
+                                    y: cur_y + line_h * 0.75,
+                                    size_pt: code_size,
+                                });
+                                cur_y += line_h;
+                                break;
+                            }
+
+                            let split_idx = find_code_break_point(
+                                rem,
+                                &piece_shaped,
+                                cur_avail_w,
+                                code_size,
+                                fonts,
+                                cache,
+                            );
+
+                            let head = &rem[..split_idx];
+                            let tail = &rem[split_idx..];
+
+                            let head_shaped = cache.shape_code_word(head, code_size, fonts);
+                            if cur_y + line_h > content_h && !cur_page.elements.is_empty() {
+                                if cur_y > page_bar_start_y {
+                                    cur_page.elements.push(PageElement::QuoteBar {
+                                        x: (left_margin_px - 2.0).max(0.0),
+                                        y0: page_bar_start_y + 4.0,
+                                        y1: cur_y - 2.0,
+                                    });
+                                }
+                                cur_page.end_char = last_char_pos;
+                                finish_page(
+                                    &mut pages,
+                                    &mut page_breaks,
+                                    std::mem::take(&mut cur_page),
+                                    cur_block_idx,
+                                    cur_page_start_char,
+                                    cur_page_start_byte,
+                                    last_char_pos,
+                                    last_byte_pos,
+                                );
+                                cur_page = PageLayout::default();
+                                cur_page.page_idx = pages.len();
+                                cur_y = 0.0;
+                                cur_page_start_char = usize::MAX;
+                                cur_page_start_byte = usize::MAX;
+                                cur_block_idx = b_idx;
+                                page_bar_start_y = 0.0;
+                            }
+                            cur_page.elements.push(PageElement::CodeLine {
+                                shaped: head_shaped,
+                                x: cur_x_pos,
+                                y: cur_y + line_h * 0.75,
+                                size_pt: code_size,
+                            });
+                            cur_y += line_h;
+
+                            is_first = false;
+                            rem = tail.trim_start();
+                        }
                     }
-                    cur_y += line_h;
                 }
 
                 // Add subtle left vertical line to delineate code block cleanly
-                if cur_y > block_start_y {
+                if cur_y > page_bar_start_y {
                     cur_page.elements.push(PageElement::QuoteBar {
                         x: (left_margin_px - 2.0).max(0.0),
-                        y0: block_start_y + 4.0,
+                        y0: page_bar_start_y + 4.0,
                         y1: cur_y - 2.0,
                     });
                 }
@@ -600,8 +759,23 @@ pub fn paginate_chapter_with_images(
                 }
 
                 let max_w = content_w;
-                let max_h = content_h * 0.80; // Keep within page limits
-                let scale = (max_w / orig_w as f32).min(max_h / orig_h as f32).min(1.0);
+                let max_h = content_h * 0.85; // Keep within page limits
+
+                let fit_scale = (max_w / orig_w as f32).min(max_h / orig_h as f32);
+
+                // On e-ink screens (typically 300 DPI), images authored for standard 96 DPI displays
+                // appear tiny (1/3 of intended physical size) if clamped to 1.0 hardware pixel scale.
+                // - Small icons/bullets (orig < 100px) or horizontal divider ornaments (height < 40px)
+                //   are scaled by the DPI factor (~3.0x) so they match the text size without blowing up.
+                // - Substantive illustrations, diagrams, charts, photos, and book covers are scaled
+                //   to fill the available content width/height (up to 5.0x max upscale to keep fidelity).
+                let max_upscale = if (orig_w < 100 && orig_h < 100) || orig_h < 40 {
+                    3.0
+                } else {
+                    5.0
+                };
+                let scale = fit_scale.min(max_upscale);
+
                 let draw_w = (orig_w as f32 * scale).round();
                 let draw_h = (orig_h as f32 * scale).round();
 
@@ -653,4 +827,95 @@ pub fn paginate_chapter_with_images(
     }
 
     (ChapterPageTable { pages: page_breaks }, pages)
+}
+
+/// Find the best character index to break a long code line so it fits within `max_w`.
+///
+/// Scans shaped glyph clusters to identify the slice that fits within `max_w`,
+/// then prefers clean syntactic break points (whitespace, comma/semicolon, brackets, operators)
+/// before falling back to a character boundary. Always takes at least 1 character to guarantee progress.
+fn find_code_break_point(
+    text: &str,
+    shaped: &ShapedWord,
+    max_w: f32,
+    code_size: f32,
+    fonts: &FontSystem,
+    cache: &mut ShapeCache,
+) -> usize {
+    let mut cum_x = 0.0;
+    let mut last_valid_byte = 0;
+
+    for g in &shaped.glyphs {
+        cum_x += g.x_advance;
+        let cluster = g.cluster as usize;
+        if cum_x <= max_w && cluster <= text.len() {
+            if text.is_char_boundary(cluster) {
+                last_valid_byte = last_valid_byte.max(cluster);
+            }
+        } else {
+            break;
+        }
+    }
+
+    let first_char_end = text.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+    if last_valid_byte < first_char_end {
+        last_valid_byte = first_char_end;
+    }
+
+    let mut space_break = None;
+    let mut punct_break = None;
+
+    for (idx, c) in text[..last_valid_byte].char_indices() {
+        let next_idx = idx + c.len_utf8();
+        if c == ' ' {
+            space_break = Some(next_idx);
+        } else if matches!(c, ',' | ';' | ')' | ']' | '}' | '>' | ':' | '.' | '/' | '\\') {
+            punct_break = Some(next_idx);
+        } else if matches!(
+            c,
+            '(' | '[' | '{' | '<' | '=' | '+' | '-' | '*' | '&' | '|' | '!' | '?' | '%'
+        ) {
+            punct_break = Some(idx);
+        }
+    }
+
+    let chosen = if let Some(sb) = space_break {
+        if let Some(pb) = punct_break {
+            if pb > sb && pb - sb > 8 {
+                pb
+            } else {
+                sb
+            }
+        } else {
+            sb
+        }
+    } else if let Some(pb) = punct_break {
+        pb
+    } else {
+        last_valid_byte
+    };
+
+    let mut split_idx = chosen.max(first_char_end);
+    if !text.is_char_boundary(split_idx) {
+        while split_idx > first_char_end && !text.is_char_boundary(split_idx) {
+            split_idx -= 1;
+        }
+    }
+
+    // Verify head advance against max_w and retreat if kerning/shaping added width
+    while split_idx > first_char_end {
+        let head = &text[..split_idx];
+        let w = cache.shape_code_word(head, code_size, fonts).advance;
+        if w <= max_w {
+            break;
+        }
+        let prev_len = text[..split_idx]
+            .chars()
+            .next_back()
+            .map(|c| c.len_utf8())
+            .unwrap_or(1);
+        split_idx -= prev_len;
+    }
+
+    split_idx.max(first_char_end)
 }

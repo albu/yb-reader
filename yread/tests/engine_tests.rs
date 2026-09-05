@@ -1818,3 +1818,208 @@ fn test_font_families_are_family_scoped_in_shape_cache() {
         b
     );
 }
+
+#[test]
+fn test_code_block_long_lines_wrap_within_page_width() {
+    let long_code = "fn calculate_something_very_complex_with_many_parameters_and_deeply_nested_structures(first_argument: &amp;str, second_argument: usize, third_argument: &amp;[u8]) -&gt; Result&lt;String, MyCustomErrorType&gt; {";
+    let body = format!("<pre><code>{}</code></pre>", long_code);
+    let book = yread::epub::parse_epub(&epub_with_body(&body)).expect("parse");
+    let ch = &book.chapters[0];
+
+    assert!(matches!(&ch.blocks[0], Block::CodeBlock { .. }));
+
+    let config = LayoutConfig {
+        page_width: 800,
+        page_height: 1200,
+        margin_left: 50,
+        margin_right: 50,
+        margin_top: 60,
+        margin_bottom: 60,
+        font_size: 11.0,
+        line_spacing: 1.2,
+        paragraph_spacing: 0.5,
+        indent_em: 1.5,
+        hyphenate: true,
+        body_align: TextAlign::Justify,
+        word_spacing_mult: 1.0,
+        letter_spacing_px: 0.0,
+    };
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+
+    let (_pt, layouts) = yread::paginate::paginate_chapter_with_images(
+        ch,
+        None,
+        &config,
+        &fonts,
+        &mut cache,
+        None,
+    );
+
+    assert_eq!(layouts.len(), 1);
+    let content_w = config.content_width();
+
+    let code_lines: Vec<_> = layouts[0]
+        .elements
+        .iter()
+        .filter_map(|el| match el {
+            yread::paginate::PageElement::CodeLine {
+                shaped,
+                x,
+                y,
+                size_pt,
+            } => Some((*x, *y, *size_pt, shaped.advance)),
+            _ => None,
+        })
+        .collect();
+
+    // The long code line must wrap into at least 2 lines
+    assert!(
+        code_lines.len() >= 2,
+        "expected long line to wrap into >=2 lines, got {}",
+        code_lines.len()
+    );
+
+    // Every wrapped line must fit within content_w with margin
+    for (i, (x, _, _, adv)) in code_lines.iter().enumerate() {
+        assert!(
+            x + adv <= content_w,
+            "code line {} overflows content_w (x={:.1}, adv={:.1}, total={:.1} > content_w={:.1})",
+            i,
+            x,
+            adv,
+            x + adv,
+            content_w
+        );
+    }
+
+    // Continuation lines must be indented past base code_x
+    let first_x = code_lines[0].0;
+    let second_x = code_lines[1].0;
+    assert!(
+        second_x > first_x,
+        "continuation line should be indented (first_x={:.1}, second_x={:.1})",
+        first_x,
+        second_x
+    );
+
+    // Quote bar must be present to delineate the code block
+    let has_quote_bar = layouts[0]
+        .elements
+        .iter()
+        .any(|el| matches!(el, yread::paginate::PageElement::QuoteBar { .. }));
+    assert!(has_quote_bar, "quote bar must be present for code block");
+}
+
+#[test]
+fn test_pre_with_br_tags() {
+    let body = "<pre>line 1<br/>line 2<br/>line 3</pre>";
+    let book = yread::epub::parse_epub(&epub_with_body(body)).expect("parse");
+    let ch = &book.chapters[0];
+
+    match &ch.blocks[0] {
+        Block::CodeBlock { code } => {
+            let lines: Vec<&str> = code.lines().collect();
+            assert_eq!(lines, vec!["line 1", "line 2", "line 3"]);
+        }
+        _ => panic!("expected CodeBlock"),
+    }
+}
+
+#[test]
+fn test_image_scaling_high_dpi() {
+    let mut ch = yread::model::Chapter::default();
+    ch.blocks.push(Block::Image {
+        id: "diagram.png".to_string(),
+        caption: None,
+        width: None,
+        height: None,
+    });
+    ch.blocks.push(Block::Image {
+        id: "icon.png".to_string(),
+        caption: None,
+        width: None,
+        height: None,
+    });
+    ch.blocks.push(Block::Image {
+        id: "cover.jpg".to_string(),
+        caption: None,
+        width: None,
+        height: None,
+    });
+
+    let mut image_sizes = std::collections::HashMap::new();
+    image_sizes.insert("diagram.png".to_string(), (300u32, 200u32));
+    image_sizes.insert("icon.png".to_string(), (32u32, 32u32));
+    image_sizes.insert("cover.jpg".to_string(), (1600u32, 2400u32));
+
+    let config = LayoutConfig {
+        page_width: 1000,
+        page_height: 1400,
+        margin_left: 50,
+        margin_right: 50,
+        margin_top: 60,
+        margin_bottom: 60,
+        font_size: 11.0,
+        line_spacing: 1.2,
+        paragraph_spacing: 0.5,
+        indent_em: 1.5,
+        hyphenate: true,
+        body_align: TextAlign::Justify,
+        word_spacing_mult: 1.0,
+        letter_spacing_px: 0.0,
+    };
+    let fonts = FontSystem::default();
+    let mut cache = ShapeCache::new();
+
+    let (_pt, layouts) = yread::paginate::paginate_chapter_with_images(
+        &ch,
+        Some(&image_sizes),
+        &config,
+        &fonts,
+        &mut cache,
+        None,
+    );
+
+    let content_w = config.content_width();
+    let content_h = config.content_height();
+
+    // Extract rendered images
+    let mut images = Vec::new();
+    for page in &layouts {
+        for el in &page.elements {
+            if let yread::paginate::PageElement::Image {
+                id,
+                width,
+                height,
+                x,
+                ..
+            } = el
+            {
+                images.push((id.clone(), *width, *height, *x));
+            }
+        }
+    }
+
+    assert_eq!(images.len(), 3);
+
+    // 1. 300x200 diagram: previously clamped to 300px width (1 inch on 300 DPI screen).
+    // Now upscaled to fill content width (900px)!
+    let (d_id, d_w, d_h, d_x) = &images[0];
+    assert_eq!(d_id, "diagram.png");
+    assert_eq!(*d_w, content_w, "diagram should upscale to fill content width");
+    assert_eq!(*d_h, (200.0 * (content_w / 300.0)).round());
+    assert_eq!(*d_x, 0.0, "full-width diagram centered at 0");
+
+    // 2. 32x32 icon: should scale by ~3x (DPI scale ~96px), not blown up to 900px.
+    let (i_id, i_w, i_h, _) = &images[1];
+    assert_eq!(i_id, "icon.png");
+    assert_eq!(*i_w, 96.0, "icon should scale by 3x DPI scale to 96px");
+    assert_eq!(*i_h, 96.0);
+
+    // 3. 1600x2400 cover: must scale down to fit within content_w and content_h * 0.85
+    let (c_id, c_w, c_h, _) = &images[2];
+    assert_eq!(c_id, "cover.jpg");
+    assert!(*c_w <= content_w, "cover must not exceed content width");
+    assert!(*c_h <= content_h * 0.85 + 0.5, "cover must not exceed max height");
+}

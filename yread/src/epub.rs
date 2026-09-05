@@ -365,7 +365,9 @@ impl<R: Read + Seek> EpubParser<R> {
                         in_title_tag = true;
                         title_tag_buf.clear();
                     } else if n.eq_ignore_ascii_case(b"br") {
-                        if in_block {
+                        if in_pre {
+                            pre_buf.push('\n');
+                        } else if in_block {
                             let start = chapter.text.len();
                             chapter.text.push('\n');
                             current_char_count += 1;
