@@ -76,11 +76,13 @@ The Mac half — mirror server, menu-bar app, AI stream — lives in
   (`didn't`, `couldn't`, `reader's`, `--word`) catches inflected forms.
   Star a word and it lands in an SM-2 flashcard deck (Again / Hard /
   Good / Easy) with its own home-screen trainer.
-- **Screen mirror.** The Kindle shows a live grayscale copy of one Mac
-  window. Taps become real ←/→ key presses (page-turn presets: arrows,
-  space, pages); a Control mode turns the Kindle into a touchpad — taps
-  click where you tap, swipes scroll. Pairing is PIN-verified and token
-  based, so it works on any Wi-Fi network with nothing to configure.
+- **Screen mirror.** The Kindle displays crisp grayscale pages rendered
+  by the Mac companion's headless Chromium (with no window to manage and
+  no macOS permission grants required). Taps become real page turns
+  (presets: arrows, space, pages); a Control mode turns the Kindle into a
+  touchpad — taps click where you tap, swipes scroll. Pairing is
+  PIN-verified and token based, so it works on any Wi-Fi network with
+  nothing to configure.
 - **AI stream.** Your live coding session (Antigravity, Claude Code, or
   a terminal pipe) rendered as paginated e-ink pages — headings, nested
   lists, code blocks, tables, alerts.
@@ -366,8 +368,8 @@ is in [`companion/README.md`](companion/README.md).
 | Mirror | tap top-right corner / two-finger tap | screen clean (full flashing refresh) |
 | Mirror | swipe up bottom-left | mirror sheet (Control mode toggle, turn-key preset) |
 | Mirror | vertical swipe (read mode) | exit to launcher |
-| Mirror (control) | tap | click at that point in the window (`/tap`, crop-accurate) |
-| Mirror (control) | swipe | scroll the window (`/scroll`), natural-scroll direction |
+| Mirror (control) | tap | click at that point in the page (`/tap`, coordinate-accurate) |
+| Mirror (control) | swipe | scroll the page (`/scroll`), natural-scroll direction |
 | Mirror (control) | app-level edge gestures | disabled — every swipe goes to the page (exit via the sheet's Control toggle) |
 | Reader | tap left third / swipe east | previous page |
 | Reader | tap elsewhere / swipe west | next page |
@@ -396,7 +398,7 @@ is in [`companion/README.md`](companion/README.md).
 ```
 yb-reader/
   ybdev/     device layer: e-ink panel (MTK ioctls), frontlight, evdev input,
-             mirror PNG decoding, ssh (dropbear), plugin log — no heavy deps
+             mirror PNG / z4 decoding, ssh (dropbear), plugin log — no heavy deps
   reader/    the app: mirror protocol + Wi-Fi receive server, UI, MuPDF reader,
              AI stream screen
   yread/     the typesetting engine (XHTML/FB2/TXT → blocks → shaped raster)
@@ -408,7 +410,8 @@ yb-reader/
              the small source zip the receive page offers in its "Companion
              (macOS)" card — unzip on a Mac, `uv sync` +
              `bash mac/make-app.sh`, and the menu-bar app is built locally
-             (self-signed, so no paid signing, notarization or Gatekeeper)
+             (ad-hoc signed, so no paid signing, notarization or Gatekeeper;
+             headless needs no macOS privacy grants)
   packages/  KPM package incl. bin/{start,boot}.sh + upstart/yb-reader.conf
              (the takeover pieces) + bin/dropbear (bundled ssh server)
   resources/ fonts embedded into the binary (OFL license texts alongside)

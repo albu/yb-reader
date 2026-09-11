@@ -670,6 +670,17 @@ pub fn discover_trusted(
     if !store.devices.is_empty() {
         for s in &servers {
             if let Some(token) = trust_reply(s, store, &nonce_hex) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // refresh_device_ip writes to disk only when the IP actually changed.
+                let _ = ybdev::devices::refresh_device_ip(
+                    &ybdev::devices::devices_path(),
+                    &token,
+                    &s.ip,
+                    now,
+                );
                 return Some((s.clone(), Some(token)));
             }
         }

@@ -9,6 +9,12 @@ set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$HOME/Applications/yb-mirror.app"
 
+# First build only: fetch the headless browser (~150 MB, cached in
+# ~/Library/Caches/ms-playwright — `uv sync` installs the playwright wheel
+# but never downloads browsers). Idempotent: no-ops when already present.
+cd "$REPO"
+uv run playwright install chromium
+
 mkdir -p "$APP/Contents/MacOS"
 clang -DREPO_PATH="\"$REPO\"" -o "$APP/Contents/MacOS/yb-mirror" \
     "$REPO/mac/launcher.c"
@@ -31,19 +37,9 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 </plist>
 EOF
 
-# Sign with the stable self-signed identity when present (grants then
-# survive rebuilds; ad-hoc signatures get fresh cdhashes every build and
-# macOS devalues their TCC grants overnight). Falls back to ad-hoc with a
-# warning — the app still runs, permissions just won't stick as well.
-IDENTITY="yb-mirror dev"
-if security find-identity -v -p codesigning | grep -q "$IDENTITY"; then
-    codesign --force --identifier local.yb-mirror \
-        --sign "$IDENTITY" "$APP" >/dev/null 2>&1
-else
-    echo "warning: '$IDENTITY' not in keychain — signing ad-hoc." >&2
-    echo "  (permissions to this app will not survive rebuilds; see" >&2
-    echo "   README for creating the identity once)" >&2
-    codesign --force -s - "$APP" >/dev/null 2>&1 || true
-fi
+# Ad-hoc signing is the floor macOS wants for bundles. Signature stability
+# used to matter because privacy grants keyed to the code hash; the headless
+# server needs no grants, so there is nothing to preserve across rebuilds.
+codesign --force -s - "$APP" >/dev/null 2>&1 || true
 
 echo "built $APP (baked to $REPO — rebuild via mac/make-app.sh if the repo moves)"

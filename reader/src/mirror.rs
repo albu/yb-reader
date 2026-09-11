@@ -219,7 +219,7 @@ impl MirrorScreen {
     }
 
     fn frame_query(&self) -> String {
-        format!("w={}&h={}&bpp=4", self.w, self.h)
+        format!("w={}&h={}&bpp=4&fmt=z4", self.w, self.h)
     }
 
     /// Connect, using the remembered address if it still works, discovering
@@ -465,7 +465,12 @@ impl MirrorScreen {
             return Action::Keep;
         }
         let t0 = Instant::now();
-        let decoded = ybdev::img::decode_png_gray(&frame, self.w, self.h);
+        let decoded = if frame.starts_with(b"\x89PNG") {
+            ybdev::img::decode_png_gray(&frame, self.w, self.h)
+        } else {
+            ybdev::img::decode_z4(&frame, self.w, self.h)
+                .or_else(|| ybdev::img::decode_png_gray(&frame, self.w, self.h))
+        };
         let decode_ms = t0.elapsed().as_millis();
         match decoded {
             Some(gray) => {
@@ -509,7 +514,7 @@ impl MirrorScreen {
                 }
             }
             None => {
-                plog("present_last: PNG decode failed");
+                plog("present_last: frame decode failed");
                 Action::Keep
             }
         }

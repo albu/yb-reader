@@ -14,12 +14,12 @@ or the yb-mirror.app bundle), so nothing ever installs into system python.
   ▸ Open log
   ▸ Quit                   (stops everything it started)
 
-The mirror server keeps its own stay-awake/display logic; this app only
+The mirror server keeps its own stay-awake/idle-sleep logic; this app only
 owns process lifetimes. Two deliberate details:
+  - the server starts ONLY when you click Start mirror — an idle server
+    must never hold the Mac awake or drain it overnight;
   - if a mirror server is already running (started from a Terminal, e.g.
-    during development), Start refuses rather than fighting over the port;
-  - on launch, if no server is up, the mirror starts by itself (2 s
-    later) — "cold start resumes the last book" without a Terminal.
+    during development), Start refuses rather than fighting over the port.
 """
 
 import atexit
@@ -43,7 +43,7 @@ from Foundation import NSMakeRect, NSMutableParagraphStyle, NSAttributedString
 def make_icon(mirror_on=False, ai_on=False, size=18.0, with_text=True):
     """Menu-bar icon: 'YB' glyph, plus status dots:
       - Bottom-left dot: AI stream active
-      - Bottom-right dot: Screen mirror active
+      - Bottom-right dot: Kindle actively using the mirror
     Template mode tints black/white for light/dark menu bars."""
     img = NSImage.alloc().initWithSize_(((size, size)))
     img.lockFocus()
@@ -100,8 +100,9 @@ LOG = os.path.join("/tmp", "yb-mirror-menubar.log")
 PORT = 8765
 AI_PORT = 8768
 
-# The everyday session command from the README quick start.
-SERVER_ARGS = ["--app", "Safari", "--autosize", "--crop-top", "55"]
+# The everyday session command from the README quick start: headless
+# Chromium — no visible window, no permission grants.
+SERVER_ARGS = []
 
 
 def log(*a):
@@ -133,6 +134,17 @@ def ping_ok(port=PORT):
             return r.status == 200
     except OSError:
         return False
+
+
+def get_status(port=PORT, timeout=2.0):
+    """/status JSON, or None. Loopback-only on the server side, so this
+    always talks to a server on this Mac."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/status",
+                                    timeout=timeout) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
 
 
 def kill_script(script_path):
@@ -179,6 +191,11 @@ class MirrorBar(rumps.App):
                                          callback=self.start_mirror)
         self.stop_item = rumps.MenuItem("Stop mirror",
                                         callback=self.stop_mirror)
+        # Headless mode's "give it a head": the server relaunches its own
+        # Chromium with a visible window for logins and manual browsing.
+        # Label tracks /status in _tick, so it self-heals a lost POST.
+        self.head_item = rumps.MenuItem("Show reader window",
+                                        callback=self.toggle_headed)
         self.start_ai_item = rumps.MenuItem("Start AI stream",
                                             callback=self.start_ai)
         self.stop_ai_item = rumps.MenuItem("Stop AI stream",
@@ -189,6 +206,7 @@ class MirrorBar(rumps.App):
             self.state,
             self.start_item,
             self.stop_item,
+            self.head_item,
             None,
             self.ai_state,
             self.start_ai_item,
@@ -199,13 +217,7 @@ class MirrorBar(rumps.App):
             rumps.MenuItem("Open log", callback=self.open_log),
         ]
         rumps.Timer(self.tick, 5).start()
-        rumps.Timer(self.autostart, 2).start()
         log("menu bar app started (pid", os.getpid(), ")")
-
-    def autostart(self, timer):
-        timer.stop()  # one-shot, never again
-        if not ping_ok():
-            self.start_mirror(None)
 
     # ------------------------------------------------------------ mirror ---
 
@@ -222,7 +234,26 @@ class MirrorBar(rumps.App):
             [sys.executable, SERVER, "--parent-pid", str(os.getpid())]
             + SERVER_ARGS,
             stdout=open(LOG, "a"), stderr=subprocess.STDOUT, cwd=REPO)
-        notify("Mirror", "starting — Safari opens with your last book")
+        notify("Mirror", "starting — headless Chromium opens your last book")
+
+    def toggle_headed(self, _):
+        """Show/Hide reader window: POST /browser and let the server do the
+        relaunch (same profile, so logins survive). Label truth comes from
+        /status in _tick, not from this POST's success."""
+        if not ping_ok():
+            notify("Mirror", "not running")
+            return
+        try:
+            # data=b"" makes urllib POST (the server routes on the method)
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{PORT}/browser?headed=toggle",
+                    data=b"", timeout=20) as r:
+                d = json.loads(r.read())
+            notify("Mirror", "reader window shown — log in if needed"
+                   if d.get("headed") else "reader window hidden")
+        except Exception as e:
+            body = getattr(e, "read", lambda: b"")()
+            notify("Mirror", f"toggle failed: {e} {body[:120]}".strip())
 
     def stop_mirror(self, _):
         stopped_here = self._stop(self.server_proc)
@@ -289,15 +320,10 @@ class MirrorBar(rumps.App):
         (it refreshes on every Kindle request), then the persisted handshake
         record from previous sessions."""
         if ping_ok(PORT):
-            try:
-                with urllib.request.urlopen(
-                        f"http://127.0.0.1:{PORT}/status", timeout=2.0) as r:
-                    d = json.loads(r.read())
-                ip = (d.get("kindle") or {}).get("ip")
-                if ip:
-                    return ip
-            except Exception:
-                pass
+            d = get_status()
+            ip = (d or {}).get("kindle", {}).get("ip")
+            if ip:
+                return ip
         p = os.path.expanduser("~/.yb-mirror-last-kindle")
         try:
             with open(p) as f:
@@ -354,16 +380,50 @@ class MirrorBar(rumps.App):
             notify("AI Stream", f"AI stream server exited (code {code})")
         mirror_up = ping_ok(PORT)
         ai_up = ping_ok(AI_PORT)
-
-        if mirror_up:
-            mirror_state = "Mirror: on" + ("" if self.server_proc else " (external)")
-        else:
-            mirror_state = "Mirror: off"
+        reading = False  # Kindle in contact right now?
+        keep = False     # server holding its no-sleep assertion? (dot)
 
         if ai_up:
             ai_state = "AI Stream: on 🟢"
         else:
             ai_state = "AI Stream: off"
+
+        # Reader-window toggle label + status line. The DOT tracks live
+        # Kindle contact (last_seen within 120 s — rides out the radio's
+        # 20-30 s naps). The LINE tracks the keep-awake contract: "(reading)"
+        # while in contact, then a live countdown of the server's remaining
+        # no-sleep grace, and "(idle)" only once the assertion is actually
+        # released — never claim idle while the Mac is still held awake.
+        if mirror_up:
+            st = get_status()
+            browser = (st or {}).get("browser") or {}
+            last_seen = ((st or {}).get("kindle") or {}).get("last_seen") or 0
+            age = time.time() - last_seen
+            reading = 0 < age < 120
+            keep = bool(browser.get("keep_awake"))
+            grace = browser.get("idle_grace") or 600
+            if st is not None and st.get("mode") == "headless":
+                self.head_item.title = ("Hide reader window"
+                                        if browser.get("headed")
+                                        else "Show reader window")
+                self.head_item.hidden = False
+            else:
+                # older/external server without the /browser endpoint
+                self.head_item.hidden = True
+            if reading:
+                mirror_state = "Mirror: on (reading)"
+            elif keep and grace == 0:
+                mirror_state = "Mirror: on (staying awake)"
+            elif keep:
+                mins = max(1, int((grace - age) // 60) + 1)
+                mirror_state = f"Mirror: on (sleep in ~{mins}m)"
+            else:
+                mirror_state = "Mirror: on (idle)"
+            if not self.server_proc:
+                mirror_state += " (external)"
+        else:
+            self.head_item.hidden = True
+            mirror_state = "Mirror: off"
 
         self.state.title = mirror_state
         self.ai_state.title = ai_state
@@ -372,7 +432,7 @@ class MirrorBar(rumps.App):
         if state_key != self._last_state:
             log("state:", mirror_state, "|", ai_state)
             self._last_state = state_key
-            self.icon = ICONS[(mirror_up, ai_up)]
+            self.icon = ICONS[(keep, ai_up)]
 
     def open_log(self, _):
         subprocess.Popen(["open", "-t", LOG])

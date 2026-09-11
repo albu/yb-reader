@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 libc = "0.2"
+miniz_oxide = "0.8"
 png = "0.17"
 # JPEG for screensaver photos; same version/features as yread, so the
 # lockfile gains nothing new.

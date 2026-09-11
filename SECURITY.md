@@ -104,8 +104,9 @@ would burn flash writes for noise).
 The reader opens no port for these. The risk is the opposite direction: a
 hostile LAN host that answers the configured address feeds frames/markdown
 to the device. That input is treated as untrusted — frame bodies are
-capped at 4 MB, markdown nesting at depth 64, PNG decoding rejects
-sub-IHDR first frames, and parsing happens inside `catch_unwind` so a
+capped at 4 MB, markdown nesting at depth 64, frame decoding rejects
+malformed inputs (sub-IHDR first frames in PNG; dimension/payload mismatches
+in z4), and parsing happens inside `catch_unwind` so a
 parser panic surfaces as an open error, not a crash loop.
 
 **Credentials.** Two sources, in priority order:
@@ -130,8 +131,9 @@ the probe) and, once at least one Kindle has paired via the receive page
 `http://localhost:8765/api/pair` — CORS/preflight handled, so the browser
 handshake actually completes), requires `X-YB-Secret` on Kindle-facing
 endpoints — 401 otherwise. The pairing endpoint and the Mac-side admin
-endpoints (`/status`, `/rewin`, `/autosize`) are localhost-only, so a LAN
-peer can neither mint pairings nor read the paired identities. Discovery
+endpoints (`/status`, `/rewin`, `/autosize`, `/browser`) are localhost-only, so a LAN
+peer can neither mint pairings nor read the paired identities or drive the
+reader browser. Discovery
 replies announce the *requesting* Kindle's own `device_id` (the probe
 carries its `kindle_id`), so one Mac can serve several Kindles without
 their trust checks colliding. A static `SECRET=` in `companion/mirror.conf`

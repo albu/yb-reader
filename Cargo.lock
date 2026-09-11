@@ -1290,6 +1290,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "libc",
+ "miniz_oxide",
  "png 0.17.16",
 ]
 

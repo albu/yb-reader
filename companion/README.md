@@ -1,12 +1,13 @@
-# yb-mirror — Kindle as a mirror screen for your Mac (plus a live AI stream)
+# yb-mirror — your web reader on a Kindle (plus a live AI stream)
 
-Your Mac runs everything (browser, reader, whatever); the Kindle shows a
-grayscale copy of one window; taps become real ←/→ arrow keys on the Mac.
+The reading page runs in the Mac's own **headless Chromium**; the Kindle
+shows it as crisp grayscale pages; taps become real page turns. No visible
+window, nothing to keep on-screen — and no macOS permission grants at all.
 
 ```
 Mac (server.py)                        Kindle (yb-reader mirror)
-  Quartz window capture ── PNG gray ─▶  e-ink fullscreen
-  CGEventPostToPid ←/→  ◀── tap zones ──  tap/swipe gestures
+  headless Chromium ── PNG / z4 ─────▶  e-ink fullscreen
+  keyboard/mouse via Playwright ◀── taps ──  tap/swipe gestures
 ```
 
 The same zip also ships **ai_stream.py**: a live feed of your AI coding
@@ -14,14 +15,14 @@ session (Antigravity, Claude Code, or any terminal pipe), rendered as
 paginated e-ink pages in yb-reader's **Live AI Stream** screen.
 
 Page-turn budget: one request tells the server to press the key and return
-the new frame as soon as the window content changes *and settles* — chapter
+the new frame as soon as the page content changes *and settles* — chapter
 boundaries render a loading screen first, and the server waits it out before
-answering. The Mac's own share is ~0.05–0.15 s per turn (the key goes
-straight to the reader app's process via `CGEventPostToPid` — no osascript
-activation, no focus steal; capture is in-process Quartz; PNGs encode at
-zlib level 1); what you feel on top of that is the site's own re-render
-after the keypress, Wi-Fi + Kindle-side PNG decode, and the e-ink partial
-refresh (~0.1–0.25 s, panel physics). 4-bit grayscale PNGs halve the Wi-Fi
+answering. The Mac's own share is one page screenshot + frame encode (tens of
+ms; the key goes straight into the page via Playwright — no focus
+involvement at all); what you feel on top of that is the site's own re-render
+after the keypress, Wi-Fi + Kindle-side frame decode (~10 ms for z4), and the e-ink partial
+refresh (~0.1–0.25 s, panel physics). Read the real split off the two logs
+(troubleshooting below) instead of trusting any table. 4-bit grayscale frames (packed z4 or PNG) halve the Wi-Fi
 transfer; levels are rounded, not truncated, so paper stays pure white. The
 Kindle side keeps one HTTP/1.1 connection open for the whole session (a
 `/ping` heartbeat every few seconds keeps it — and the Kindle's power-saving
@@ -42,37 +43,48 @@ certificates to buy.
 unzip yb-mirror.zip
 cd yb-mirror
 uv sync                      # installs deps into a local venv (needs uv once)
-bash mac/make-app.sh         # builds ~/Applications/yb-mirror.app (needs clang)
+bash mac/make-app.sh         # builds ~/Applications/yb-mirror.app (needs clang);
+                             # also fetches the headless Chromium (~150 MB, once)
 open ~/Applications/yb-mirror.app
 ```
 
-Then grant the three privacy permissions once (below). Requirements: macOS,
-[`uv`](https://docs.astral.sh/uv/) and Xcode Command Line Tools.
+No privacy permissions to grant — headless mode needs none. Requirements:
+macOS, [`uv`](https://docs.astral.sh/uv/) and Xcode Command Line Tools.
 
 ## Quick start (Mac)
 
 ```bash
 cd yb-mirror
 uv sync
-uv run mac/server.py --app Safari --autosize --crop-top 55
+uv run mac/server.py --url <reading-url>     # first visit: pick your book
 ```
 
-One command starts the whole session: the server reopens your last book
-(see below), sizes the window to the Kindle's aspect, and holds a
-`caffeinate` no-idle-sleep assertion for its own lifetime (so the Mac can't
-doze off mid-read; opt out with `--no-stay-awake`). The **display** is
-held awake only while the Kindle is actually using the mirror and released
-`--display-idle` seconds after the last contact (default 30 min —
-distraction-proof); if it did sleep, the next Kindle tap wakes it and the
-session resumes by itself. Still run it in a normal
+One command starts the whole session: the server launches its headless
+Chromium and opens the URL (a bare start reopens your last book — see
+below), and holds a `caffeinate` no-idle-sleep assertion for its own
+lifetime (so the Mac can't doze off mid-read; opt out with
+`--no-stay-awake`). Still run it in a normal
 Terminal window of your own — processes left running from detached/
 background contexts get demoted by macOS after a while and then accept
 connections without ever answering them.
 
-First-ever run (or when you want a *new* reader window): add
-`--url <reading-url>`. It opens a *new* frontmost window, which
-the server then mirrors. Without `--url`, an already-open reader window is
-mirrored as-is, and a cold start resumes the last book.
+The page renders at 618×824 CSS px with a 2× device scale — exactly the
+Kindle's 1236×1648 panel, so every frame is pixel-exact: no crop, no
+stretch, no upscaled text. Logins and cookie banners are one-time: either
+tap through them on the Kindle, or give the browser a real window for a
+minute (`POST /browser?headed=1`, or menu bar → **Show reader window**) —
+the profile remembers. A cold start resumes the last book: the reader's
+own position sync lives in the same persistent profile
+(`~/.yb-mirror-chromium`).
+
+**Night reading** is the default: the Mac is held awake only while the
+Kindle is in contact, and released 10 minutes after the last request
+(`--idle-sleep` tunes this) — then the Mac's own idle timer or the lid
+takes over, and the screen goes dark whenever it likes either way
+(headless never needs the display). Sleep is a pause, not session loss:
+wake the Mac and the next Kindle tap resumes the book. Putting the
+Kindle to sleep starts the countdown; a held-open mirror screen keeps
+the Mac awake, since that reads as "about to be read".
 
 ## Menu bar app (no Terminal)
 
@@ -82,11 +94,15 @@ open ~/Applications/yb-mirror.app
 ```
 
 A `YB` icon in the menu bar — with status dots in its bottom corners
-(template-mode, adapts to dark menu bars): **bottom-right while the mirror
-is on**, **bottom-left while the AI stream is on**:
+(template-mode, adapts to dark menu bars): **bottom-right while the Kindle
+is actively using the mirror**, **bottom-left while the AI stream is on**:
 
 - **Start mirror** / **Stop mirror** (same flags as the quick start;
   refuses politely if a server already runs in a Terminal)
+- **Show reader window** / **Hide reader window** (headless mode): give the
+  server's browser a real, clickable window for a minute — log in, pick a
+  book, clear a cookie banner — then hide it again; same profile, so the
+  session and position survive the round trip
 - **Start AI stream** / **Stop AI stream** (the live AI session feed, see
   below; port 8768)
 - **Open Kindle Web Manager…** (opens yb-reader's receive page on the
@@ -103,27 +119,22 @@ Items → add `yb-mirror.app`. If the repo moves, rebuild with `make-app.sh`
 (the path is baked into the compiled launcher — a *script* executable there
 is refused by macOS LaunchServices with `-10669`, which is why it's C).
 
-**Auto-start**: on launch, if no mirror server is already running, the app
-starts one by itself after ~2 s — a cold start with no Terminal resumes
-your last book. The AI stream always starts explicitly.
+**Start is explicit**: the mirror server runs only while you started it —
+menu bar → **Start mirror** (or the Terminal command). Nothing runs in the
+background otherwise, so the app can never drain the Mac: an idle server
+holds no sleep assertion, releases the one it holds 10 minutes after the
+Kindle goes quiet, and sleeps with the Mac. Stop mirror when you want a
+zero footprint again. The AI stream always starts explicitly too.
 
-**Last-book memory**: a background job follows the mirrored window and
-remembers its URL in `~/.yb-mirror-last-url` (refreshed every minute; it
-follows book switches, since the window title *is* the book name). On a
-cold start — no window open, no `--url` given — the server reopens the
+**Last-book memory**: a background job remembers the page's URL in
+`~/.yb-mirror-last-url` (refreshed every minute, read straight from the
+browser). On a cold start — no `--url` given — the server reopens the
 last page automatically: modern web readers encode the book in the URL
-and sync your position, so the book comes back where you left it. `--no-resume` disables this.
+and sync your position, so the book comes back where you left it.
+`--no-resume` disables this.
 
-- `--autosize` resizes Safari so its content is exactly the Kindle's 0.75
-  aspect (1236×1648) — no text is cropped and nothing is stretched. It first
-  sets the window height, reads back the real (possibly clamped) height, then
-  sets the width to match.
-- `--crop-top 55` removes the Safari title bar / traffic lights (the one
-  "crop" that's safe — it's browser chrome, not text). Tune the number to
-  your browser (Chrome's tab bar is taller).
-- The server automatically removes the window shadow/rounded corners via the
-  alpha channel, applies a gamma contrast curve (default 2.0), and resamples
-  with bilinear interpolation for clean text.
+Frames get a gamma contrast curve (default 2.0, `--contrast`) and bilinear
+resampling for clean e-ink text.
 
 Verify it's alive:
 
@@ -131,30 +142,7 @@ Verify it's alive:
 curl http://127.0.0.1:8765/status
 ```
 
-### Permissions (System Settings → Privacy & Security), once
-
-- **Screen Recording** for your terminal app — window capture needs it
-  (both the in-process Quartz path and the `screencapture` fallback).
-  Without it, captures come back empty or title-bar-only.
-- **Accessibility** for your terminal app — synthetic arrow keys need it.
-- **Automation** for your terminal app → Safari/Chrome — used by
-  `--activate` and by the last-book memory (it reads the mirrored window's URL via
-  AppleScript; without it there's simply nothing to resume).
-
-### One-time: stable signing identity (recommended)
-
-macOS keys those privacy grants to the app's *code hash*. An ad-hoc
-signature gets a fresh hash on every rebuild, so macOS quietly stops
-honoring the grants — you'd re-grant Screen Recording & co after each
-rebuild. Signing with a stable self-signed identity keeps the hash — and
-your grants — across rebuilds.
-
-Keychain Access → Certificate Assistant → **Create a Certificate…**:
-Name `yb-mirror dev`, Identity Type *Self-Signed Root*, Certificate Type
-*Code Signing*. `make-app.sh` picks it up automatically and falls back to
-ad-hoc (with a warning) when it's absent.
-
-### Under the hood: the C launcher and the signing dance
+### Under the hood: the C launcher
 
 - **The launcher is C, not a script**, because macOS refuses to
   LaunchServices-open an app bundle whose executable is a script (`open`
@@ -163,35 +151,23 @@ ad-hoc (with a warning) when it's absent.
   `/tmp/yb-mirror-menubar.log` (so tracebacks survive), `cd`s to the repo,
   and `exec`s `uv run mac/menubar.py` — the whole app still runs inside
   this project's uv venv, never system python. The repo path is baked in at
-  build time; move the repo, rebuild with `make-app.sh`.
-- **The bundle is always signed** because modern macOS wants bundles signed
-  (ad-hoc is the floor). The subtle part is *which* signature — see the
-  stable identity above. A notarized, Developer-ID-signed build would cost
-  $99/yr and still prompt for the same three privacy grants, so for this
-  audience the stable local identity is the right stop.
-- **The three grants are per-machine by design** — no package can ship with
-  them pre-granted. Every user grants them once, in System Settings, on
-  their own Mac.
+  build time; move the repo, rebuild with `make-app.sh`. The bundle is
+  signed ad-hoc — the floor macOS wants for bundles; nothing here depends
+  on signature stability, because nothing requests privacy grants.
 
 ### Options
 
 ```
---app NAME            app to mirror (default Safari)
---title SUBSTR        only consider windows whose title contains SUBSTR
---activate            bring the app (and its front window) forward before
-                      each capture (single-tab use; needs Automation)
---autosize            resize the window to the optimal mirror size at startup
+--css-width N         CSS viewport width (default 618; scale is 2, so
+                      frames come out 1236 px wide — the Kindle fb)
+--headed              launch with a visible window (toggle any time via
+                      POST /browser or the menu bar item)
+--idle-sleep N        secs of Kindle quiet before the Mac may sleep again
+                      (default 600; 0 = hold while the server runs;
+                      --no-stay-awake holds nothing at all)
 --url URL             open this URL at startup (fresh sessions)
 --no-resume           don't reopen the last remembered page on a cold start
 --no-stay-awake       don't hold a caffeinate no-idle-sleep assertion
---display-idle N      secs of Kindle quiet before the screen may sleep
-                      again (default 1800; 0 = never hold it awake)
---crop-top N          shave N window points off the top (Safari tab bar ~55)
---crop-bottom N       shave N points off the bottom
---crop-left N         shave N points off the left
---crop-right N        shave N points off the right
---no-shadow-crop      keep the window's shadow/rounded corners
---no-aspect-crop      don't center-crop to 0.75 as a fallback (may look stretched)
 --contrast GAMMA      grayscale gamma, higher = darker text (default 2.0, 1.0 = off)
 --port N              HTTP port (default 8765)
 ```
@@ -332,33 +308,26 @@ it alongside paired tokens.
   isolation), pin the address in `mirror.conf` (`SERVER=…`, or
   `./sync-ip.sh`).
 
-**The mirror shows the wrong window/tab**
-- The server logs every candidate window at startup (`candidate windows: …`)
-  and picks the largest. Use `--title "some text from the window title"` to
-  force the right one, or `--activate` to bring the browser forward first.
+**The first headless session shows a login page or a cookie banner**
+- Expected once: the server's Chromium has its own fresh profile
+  (`~/.yb-mirror-chromium`). Tap through it on the Kindle, or menu bar →
+  **Show reader window** and do it with a mouse; the profile remembers from
+  then on.
 
-**Text is cropped on the sides**
-- That happens only when the window aspect isn't 0.75 (the fallback
-  center-crop cuts width). Use `--autosize` so the window itself is the
-  right shape and nothing gets cropped. If you still see it, the window was
-  resized manually after autosize.
+**"browser is still starting" / a 503 on early frames**
+- Transient: Chromium takes a few seconds to launch and the first `goto` a
+  few more. The Kindle just retries; nothing to fix. A permanent error
+  naming playwright or the browser executable means setup didn't finish —
+  `uv sync && uv run playwright install chromium`.
 
-**Text looks too tall / too wide**
-- The window aspect doesn't match 0.75 (stretched to fill). Run with
-  `--autosize`. Avoid `--no-aspect-crop` unless you accept stretching.
-
-**Text is blurry / letters look dirty**
-- The window is being upscaled — make it larger (`--autosize`). The old
-  nearest-neighbour resizer caused jaggies; current frames are bilinear.
+**The headless page renders dark / in the wrong colors**
+- The server pins Chromium to light color scheme and sRGB, so a dark-mode
+  Mac can't flip the page; if the site still renders dark, it's the site's
+  own theme setting — switch it to light in the reader window.
 
 **Everything is gray / washed out**
 - Increase `--contrast` (default 2.0). Real pages have no true black; the
   gamma curve maps gray text closer to black.
-
-**Black borders / shadow around the image**
-- Automatic shadow crop is on; it can be disabled with `--no-shadow-crop`.
-  Black borders usually mean an older server build — restart with the current
-  `mac/server.py`.
 
 **The server "died" / is silent**
 - The server only logs when it serves a frame. If the Kindle isn't
@@ -366,14 +335,6 @@ it alongside paired tokens.
   `lsof -iTCP:8765 -sTCP:LISTEN`. Starting a second instance fails with
   "address already in use" plus a hint about `lsof` — kill the old one or
   use `--port`.
-
-**The mirror died ~10 minutes into Kindle-only reading** *(older builds)*
-- Window capture fails on a sleeping display (`no window` errors), and
-  page-turn keys posted to Safari don't count as display activity — so the
-  screen's own idle timer used to kill mid-book sessions. The server now
-  holds the display awake while the Kindle is in contact and wakes it
-  (`caffeinate -u`) on the first contact after a sleep; `--display-idle`
-  tunes how long the screen stays lit after the Kindle goes quiet.
 
 **curl connects but waits forever / Kindle says "Mac not found"**
 - The server process was demoted by macOS into background scheduling
@@ -421,16 +382,19 @@ it alongside paired tokens.
 
 **Mirror server** (`mac/server.py`, port 8765):
 
-`GET /frame[.png]?w&h[&depth&stride&bpp]` raw-fb or PNG frame, loader-waited
-and settled (w/h/bpp are remembered, and any frame-bearing request re-sets
-them) · `POST /next /prev[?wait=1[&id=N]]` arrow keys — posted straight to
-the app's process, so the reader window keeps working while the Mac's focus
+`GET /frame[.png|.z4]?w&h[&depth&stride&bpp&fmt=z4]` raw-fb, PNG, or z4 frame, loader-waited
+and settled (w/h/bpp/fmt are remembered, and any frame-bearing request re-sets
+them) · `POST /next /prev[?wait=1[&id=N]]` arrow keys — delivered into the
+page (Playwright), so the reader keeps working while the Mac's focus
 is elsewhere; `id` is an idempotency key (a retried turn with the same id
 answers with the current frame instead of pressing the key again — that's
 what makes radio-drop retries safe); the wait reply is the new PNG plus
 `X-Seq`/`X-Changed`/`X-Settled` headers (`X-Dup` on deduplicated retries) ·
 `GET /ping` keep-alive heartbeat · `POST /tap {x,y}` coordinate-mapped mouse
-click (for menus; unused by the mirror) · `GET /status` · `POST /rewin` ·
+click (for menus; unused by the mirror) · `GET /status` (reports `mode`,
+and in headless also `browser{headed,url,viewport,alive}`) · `POST /rewin` ·
+`POST /browser?headed=1|0|toggle` (headless: relaunch the server's browser
+with/without a visible window — localhost-only) ·
 `POST /autosize` · `POST /api/pair` (completes the pairing the Kindle's
 receive page starts: after the PIN-verified `/api/pair` on the Kindle, its
 browser posts the token + device id here, and `/status` then reports the
@@ -456,22 +420,23 @@ secret). Same UDP discovery on 8766 when the port is free.
 
 ## Known limits
 
-- Keep the mirrored window unminimized and on the current Space; if frames
-  come back stale, that's usually why.
-- No reflow — text is pixels; the window is auto-sized for crisp output.
-  On a 1440×900-class display the autosized window tops out at 600×856 pt,
-  so the capture is mildly (~3%) upscaled to the Kindle's 1236×1648 — a
-  bigger display buys crisper fonts.
-- A closed/reopened window is re-found automatically on the next capture;
-  a *minimized* one can't be captured (unminimize first).
-- Occluded-window capture works via window ID, but keep the window visible.
+- One page per server; the browser is this server's own Chromium profile —
+  a separate identity from your everyday Safari/Chrome (that's what keeps
+  it grant-free).
+- Viewport is CSS sized to the Kindle fb at 2×; `--css-width` retunes it,
+  but there's no arbitrary window geometry to push around.
+- A collapsed reader site that swallows arrow keys when an input has focus
+  behaves the same as it would in any browser.
+- Text is pixels — no reflow; but the viewport is pixel-exact at the
+  panel's native size, so there is nothing to crop, stretch or upscale.
 - Avoid opening Kindle menus while mirroring; the fullscreen view is modal.
 
 ## Why this shape
 
 Modern web readers are typically client-only JS web apps; the
 Kindle's built-in browser renders them blank or struggles to run them. Mirroring sidesteps all of it: no
-automation, no undocumented APIs — the Mac side is just you, in a normal
-browser, with a very patient external monitor attached. The AI stream fills
+automation, no undocumented APIs — and with the page in the server's own
+headless browser, not even the macOS privacy grants are needed, which was
+the roughest edge of every previous install. The AI stream fills
 the same screen with the one other thing that's long-form and worth reading
 on e-ink while you work: the transcript of the session doing the work.
