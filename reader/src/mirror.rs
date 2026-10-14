@@ -102,11 +102,134 @@ impl TurnPreset {
 const PRESETS: [TurnPreset; 3] = [TurnPreset::Arrows, TurnPreset::Space, TurnPreset::Pages];
 
 /// Quick-settings sheet metrics in points — same idioms as the reader's
+/// Quick-settings sheet metrics in points — same idioms as the reader's
 /// quick_settings sheet (grab pill, 8.5pt row labels, pt(22) buttons).
-const SHEET_H_PT: f32 = 104.0;
+const SHEET_H_PT: f32 = 136.0;
 const SHEET_PAD_PT: f32 = 16.0;
 const SHEET_ROW_H_PT: f32 = 25.0;
 const SHEET_BTN_H_PT: f32 = 22.0;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecentItem {
+    pub id: usize,
+    pub title: String,
+    pub url: String,
+    pub active: bool,
+}
+
+pub fn parse_recent_json(json: &str) -> Vec<RecentItem> {
+    let mut items = Vec::new();
+    let Some(start_arr) = json.find('[') else {
+        return items;
+    };
+    let Some(end_arr) = json.rfind(']') else {
+        return items;
+    };
+    if end_arr <= start_arr {
+        return items;
+    }
+    let arr_str = &json[start_arr + 1..end_arr];
+
+    let mut pos = 0;
+    let bytes = arr_str.as_bytes();
+    while pos < bytes.len() {
+        if let Some(rel_start) = arr_str[pos..].find('{') {
+            let actual_start = pos + rel_start;
+            let mut depth = 0;
+            let mut in_str = false;
+            let mut esc = false;
+            let mut actual_end = None;
+            for (idx, &b) in bytes[actual_start..].iter().enumerate() {
+                if in_str {
+                    if esc {
+                        esc = false;
+                    } else if b == b'\\' {
+                        esc = true;
+                    } else if b == b'"' {
+                        in_str = false;
+                    }
+                } else {
+                    if b == b'"' {
+                        in_str = true;
+                    } else if b == b'{' {
+                        depth += 1;
+                    } else if b == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            actual_end = Some(actual_start + idx);
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(end) = actual_end {
+                let obj = &arr_str[actual_start..=end];
+                let id = ybdev::devices::extract_json_u64(obj, "id")
+                    .map(|n| n as usize)
+                    .unwrap_or(items.len());
+                let title = ybdev::devices::extract_json_str(obj, "title").unwrap_or_default();
+                let url = ybdev::devices::extract_json_str(obj, "url").unwrap_or_default();
+                let active = obj.contains("\"active\": true") || obj.contains("\"active\":true");
+                if !url.is_empty() {
+                    items.push(RecentItem {
+                        id,
+                        title: if title.is_empty() { url.clone() } else { title },
+                        url,
+                        active,
+                    });
+                }
+                pos = end + 1;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    items
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RecentHit {
+    Dismiss,
+    Select(usize),
+}
+
+fn recent_dialog_rects(w: i32, h: i32, item_count: usize) -> (Rect, Vec<Rect>, Rect) {
+    let card_w = (w - 2 * pt(30.0)).min(pt(320.0));
+    let card_x = (w - card_w) / 2;
+    let btn_h = pt(40.0);
+    let gap = pt(8.0);
+    let n = item_count.max(1);
+    let items_total_h = n as i32 * btn_h + (n as i32 - 1).max(0) * gap;
+    let header_h = pt(44.0);
+    let cancel_h = pt(30.0);
+    let pad = pt(14.0);
+    let card_h = pad + header_h + items_total_h + pad + cancel_h + pad;
+    let card_y = (h - card_h) / 2;
+    let card = Rect::new(card_x, card_y, card_w, card_h);
+
+    let mut item_rects = Vec::with_capacity(item_count);
+    let start_y = card_y + pad + header_h;
+    let btn_w = card_w - 2 * pad;
+    for i in 0..item_count {
+        item_rects.push(Rect::new(
+            card_x + pad,
+            start_y + i as i32 * (btn_h + gap),
+            btn_w,
+            btn_h,
+        ));
+    }
+
+    let cancel_btn = Rect::new(
+        card_x + pad,
+        card_y + card_h - pad - cancel_h,
+        btn_w,
+        cancel_h,
+    );
+
+    (card, item_rects, cancel_btn)
+}
 
 /// What a tap on the open sheet means. Pure data so the hit mapping is
 /// testable without a Painter.
@@ -115,13 +238,15 @@ enum SheetHit {
     Dismiss,
     ToggleControl,
     Preset(TurnPreset),
+    OpenRecent,
 }
 
 /// Sheet geometry shared by draw and hit-testing, panel pixels.
-fn sheet_rows(w: i32, h: i32) -> (i32, i32, i32, Rect) {
+fn sheet_rows(w: i32, h: i32) -> (i32, i32, i32, i32, Rect, Rect) {
     let sheet_y = h - pt(SHEET_H_PT);
     let row1_y = sheet_y + pt(12.0);
     let row2_y = row1_y + pt(SHEET_ROW_H_PT) + pt(4.0);
+    let row3_y = row2_y + pt(SHEET_ROW_H_PT) + pt(4.0);
     let btn_w = pt(120.0);
     let control_btn = Rect::new(
         w - pt(SHEET_PAD_PT) - btn_w,
@@ -129,7 +254,13 @@ fn sheet_rows(w: i32, h: i32) -> (i32, i32, i32, Rect) {
         btn_w,
         pt(SHEET_BTN_H_PT),
     );
-    (sheet_y, row1_y, row2_y, control_btn)
+    let recent_btn = Rect::new(
+        w - pt(SHEET_PAD_PT) - btn_w,
+        row3_y,
+        btn_w,
+        pt(SHEET_BTN_H_PT),
+    );
+    (sheet_y, row1_y, row2_y, row3_y, control_btn, recent_btn)
 }
 
 /// The three preset radio buttons on row 2, left to right.
@@ -186,6 +317,8 @@ pub struct MirrorScreen {
     /// the settled frame until it does (or the deadline passes); taps
     /// stay live the whole time.
     settle_deadline: Option<Instant>,
+    recent_dialog: bool,
+    recent_items: Vec<RecentItem>,
 }
 
 impl MirrorScreen {
@@ -215,6 +348,8 @@ impl MirrorScreen {
             settings: false,
             auth_required: false,
             settle_deadline: None,
+            recent_dialog: false,
+            recent_items: Vec::new(),
         }
     }
 
@@ -228,7 +363,10 @@ impl MirrorScreen {
         if self.conn.is_some() {
             return true;
         }
-        wifi::ensure_wifi();
+        if !wifi::is_wifi_on() {
+            wifi::turn_on_wifi();
+            wifi::wait_for_wifi(Duration::from_millis(500));
+        }
 
         let devices_path = ybdev::devices::devices_path();
         let kindle_id_path = ybdev::devices::kindle_id_path();
@@ -656,7 +794,8 @@ impl MirrorScreen {
     /// quick_settings sheet (shadow, pill, row labels, radio buttons).
     fn draw_sheet(&self, p: &mut Painter) {
         let w = self.w as i32;
-        let (sheet_y, row1_y, row2_y, control_btn) = sheet_rows(w, self.h as i32);
+        let (sheet_y, row1_y, row2_y, row3_y, control_btn, recent_btn) =
+            sheet_rows(w, self.h as i32);
 
         p.hline_t(sheet_y - 2, 0, w, 1, 140);
         p.hline_t(sheet_y - 1, 0, w, 1, 100);
@@ -717,7 +856,19 @@ impl MirrorScreen {
             }
         }
 
-        let footer_y = row2_y + pt(SHEET_ROW_H_PT) + pt(6.0) + pt(13.0);
+        // Row 3: RECENT BOOKS / SWITCH BOOK
+        p.text(pt(SHEET_PAD_PT), row3_y + pt(15.0), 8.5, 110, "RECENT BOOKS");
+        p.rect_outline_t(recent_btn, 1, 120);
+        p.text_center_in(
+            recent_btn.x,
+            recent_btn.x + recent_btn.w,
+            row3_y + pt(15.0),
+            8.0,
+            0,
+            "SWITCH BOOK",
+        );
+
+        let footer_y = row3_y + pt(SHEET_ROW_H_PT) + pt(6.0) + pt(13.0);
         p.text_center_in(
             pt(SHEET_PAD_PT),
             w - pt(SHEET_PAD_PT),
@@ -765,6 +916,10 @@ impl MirrorScreen {
                 }
                 Action::Redraw
             }
+            Some(SheetHit::OpenRecent) => {
+                self.settings = false;
+                self.open_recent_dialog()
+            }
             None => Action::Keep,
         }
     }
@@ -786,7 +941,8 @@ impl MirrorScreen {
     /// Map a tap to a sheet control. Above the sheet = dismiss; inside
     /// the toggle / a radio = that action; label gutters = nothing.
     fn sheet_hit(&self, x: i32, y: i32) -> Option<SheetHit> {
-        let (sheet_y, _, row2_y, control_btn) = sheet_rows(self.w as i32, self.h as i32);
+        let (sheet_y, _, row2_y, _, control_btn, recent_btn) =
+            sheet_rows(self.w as i32, self.h as i32);
         if y < sheet_y {
             return Some(SheetHit::Dismiss);
         }
@@ -798,7 +954,178 @@ impl MirrorScreen {
                 return Some(SheetHit::Preset(preset));
             }
         }
+        if recent_btn.contains(x, y) {
+            return Some(SheetHit::OpenRecent);
+        }
         None
+    }
+
+    fn open_recent_dialog(&mut self) -> Action {
+        plog("mirror: fetching recent books");
+        if let Some(items) = self.fetch_recent() {
+            self.recent_items = items;
+        } else {
+            self.recent_items = Vec::new();
+        }
+        self.recent_dialog = true;
+        Action::Redraw
+    }
+
+    fn fetch_recent(&mut self) -> Option<Vec<RecentItem>> {
+        if !self.ensure_conn() {
+            return None;
+        }
+        let mut buf = Vec::new();
+        let mut sink = |chunk: &[u8]| {
+            if buf.len() + chunk.len() > 64 * 1024 {
+                return false;
+            }
+            buf.extend_from_slice(chunk);
+            true
+        };
+        let mut r = self.conn.as_mut().and_then(|c| {
+            c.request("GET", "/recent", &mut sink).ok()
+        });
+        if r.is_none() {
+            buf.clear();
+            let mut sink = |chunk: &[u8]| {
+                if buf.len() + chunk.len() > 64 * 1024 {
+                    return false;
+                }
+                buf.extend_from_slice(chunk);
+                true
+            };
+            r = self.conn.as_mut().and_then(|c| {
+                c.request("GET", "/recent", &mut sink).ok()
+            });
+        }
+        let resp = r?;
+        if resp.status == 200 {
+            if let Ok(s) = std::str::from_utf8(&buf) {
+                return Some(parse_recent_json(s));
+            }
+        }
+        None
+    }
+
+    fn draw_recent_dialog(&self, p: &mut Painter) {
+        let (w, h) = (self.w as i32, self.h as i32);
+        for y in (0..h).step_by(3) {
+            p.hline_t(y, 0, w, 1, 235);
+        }
+
+        let (card, item_rects, cancel_btn) =
+            recent_dialog_rects(w, h, self.recent_items.len());
+
+        p.rect(
+            Rect::new(card.x + pt(4.0), card.y + pt(4.0), card.w, card.h),
+            205,
+        );
+        p.rect(card, 255);
+        p.rect_outline_t(card, 2, 0);
+
+        p.text_center(card.y + pt(26.0), 10.5, 0, "SWITCH BOOK");
+        p.text_center(
+            card.y + pt(40.0),
+            7.5,
+            120,
+            "Tap a recent book to open in the active tab",
+        );
+
+        if self.recent_items.is_empty() {
+            p.text_center(card.y + pt(80.0), 8.5, 120, "No recent books recorded");
+        } else {
+            let max_w_pt = (card.w - pt(48.0)) as f32 / yui::painter::PX;
+            for (i, item) in self.recent_items.iter().enumerate() {
+                if let Some(&btn) = item_rects.get(i) {
+                    let display_title = p.truncate(8.0, &item.title, max_w_pt);
+                    if item.active {
+                        p.rect(btn, 0);
+                        p.text(
+                            btn.x + pt(12.0),
+                            btn.y + pt(25.0),
+                            8.0,
+                            255,
+                            &format!("● {}", display_title),
+                        );
+                    } else {
+                        p.rect(btn, 255);
+                        p.rect_outline_t(btn, 1, 140);
+                        p.text(
+                            btn.x + pt(12.0),
+                            btn.y + pt(25.0),
+                            8.0,
+                            0,
+                            &display_title,
+                        );
+                    }
+                }
+            }
+        }
+
+        p.rect(cancel_btn, 240);
+        p.rect_outline_t(cancel_btn, 1, 180);
+        p.text_center_in(
+            cancel_btn.x,
+            cancel_btn.x + cancel_btn.w,
+            cancel_btn.y + pt(20.0),
+            7.5,
+            80,
+            "CANCEL",
+        );
+    }
+
+    fn recent_hit(&self, x: i32, y: i32) -> Option<RecentHit> {
+        let (card, item_rects, cancel_btn) = recent_dialog_rects(
+            self.w as i32,
+            self.h as i32,
+            self.recent_items.len(),
+        );
+        if !card.contains(x, y) {
+            return Some(RecentHit::Dismiss);
+        }
+        if cancel_btn.contains(x, y) {
+            return Some(RecentHit::Dismiss);
+        }
+        for (i, r) in item_rects.iter().enumerate() {
+            if r.contains(x, y) {
+                return Some(RecentHit::Select(i));
+            }
+        }
+        None
+    }
+
+    fn recent_gesture(&mut self, g: Gesture) -> Action {
+        if let Gesture::Swipe {
+            dir: SwipeDir::South,
+            ..
+        } = g
+        {
+            self.recent_dialog = false;
+            return Action::Redraw;
+        }
+        let Gesture::Tap { x, y } = g else {
+            return match g {
+                Gesture::TwoFingerTap => Action::RedrawFull,
+                _ => Action::Keep,
+            };
+        };
+        match self.recent_hit(x as i32, y as i32) {
+            Some(RecentHit::Dismiss) => {
+                self.recent_dialog = false;
+                Action::Redraw
+            }
+            Some(RecentHit::Select(idx)) => {
+                self.recent_dialog = false;
+                if let Some(item) = self.recent_items.get(idx) {
+                    plog(&format!("mirror: switching to recent book {}: {}", item.id, item.url));
+                    self.act(&format!("/recent/select?book_id={}", item.id))
+                } else {
+                    Action::Redraw
+                }
+            }
+            None => Action::Keep,
+        }
     }
 }
 
@@ -814,6 +1141,7 @@ impl Screen for MirrorScreen {
     fn on_leave(&mut self) {
         self.ping_chain = false;
         self.conn = None;
+        self.recent_dialog = false;
         crate::awake::screen_wants_awake(false);
         plog("mirror exit");
     }
@@ -847,6 +1175,9 @@ impl Screen for MirrorScreen {
             if self.settings {
                 self.draw_sheet(p);
             }
+            if self.recent_dialog {
+                self.draw_recent_dialog(p);
+            }
         } else {
             // No frame yet (server was down at entry): own the state
             // instead of pushing an overlay — an overlay's dismiss gesture
@@ -871,6 +1202,10 @@ impl Screen for MirrorScreen {
                 }
                 _ => Action::Pop,
             };
+        }
+        // The recent dialog owns the glass while open.
+        if self.recent_dialog {
+            return self.recent_gesture(g);
         }
         // The sheet owns the glass while open: every gesture routes to
         // it, nothing reaches the frame handlers.
@@ -939,15 +1274,15 @@ impl Screen for MirrorScreen {
     /// gesture while open. Read mode (and the app-wide two-finger
     /// screen-clean) keeps the edges.
     fn default_edges(&self) -> bool {
-        !self.control && !self.settings
+        !self.control && !self.settings && !self.recent_dialog
     }
 
     fn on_tick(&mut self) -> Action {
         self.ping_tick();
-        // The sheet owns the glass: a settle present would repaint the
+        // The sheet and recent dialog own the glass: a settle present would repaint the
         // frame over it. Pings (above) keep the radio warm; settle polls
-        // resume the tick after the sheet closes.
-        if self.settings {
+        // resume the tick after they close.
+        if self.settings || self.recent_dialog {
             return Action::Keep;
         }
         // Settle correction: one frame fetch per tick until the server
@@ -1022,12 +1357,16 @@ mod tests {
     #[test]
     fn sheet_hit_maps_rows_labels_and_dismiss() {
         let s = screen();
-        let (sheet_y, _, row2_y, control_btn) = sheet_rows(1236, 1648);
+        let (sheet_y, _, row2_y, _, control_btn, recent_btn) = sheet_rows(1236, 1648);
         assert_eq!(s.sheet_hit(10, 10), Some(SheetHit::Dismiss));
         assert_eq!(s.sheet_hit(10, sheet_y - 1), Some(SheetHit::Dismiss));
         assert_eq!(
             s.sheet_hit(control_btn.x + 5, control_btn.y + 11),
             Some(SheetHit::ToggleControl)
+        );
+        assert_eq!(
+            s.sheet_hit(recent_btn.x + 5, recent_btn.y + 11),
+            Some(SheetHit::OpenRecent)
         );
         // Each radio maps to its own preset, left to right.
         for (preset, r) in preset_buttons(1236, row2_y) {
@@ -1042,7 +1381,7 @@ mod tests {
 
     #[test]
     fn preset_buttons_are_disjoint_and_inside_the_sheet() {
-        let (sheet_y, _, row2_y, _) = sheet_rows(1236, 1648);
+        let (sheet_y, _, row2_y, _, _, _) = sheet_rows(1236, 1648);
         let btns = preset_buttons(1236, row2_y);
         for (p, r) in &btns {
             assert!(r.x > 0 && r.x + r.w <= 1236 - pt(SHEET_PAD_PT));
@@ -1095,7 +1434,7 @@ mod tests {
     fn sheet_toggles_control_and_picks_preset() {
         let mut s = screen();
         s.settings = true;
-        let (_, _, _, control_btn) = sheet_rows(1236, 1648);
+        let (_, _, _, _, control_btn, _) = sheet_rows(1236, 1648);
         assert!(!s.control);
         assert!(matches!(
             s.sheet_gesture(tap(control_btn.x + 5, control_btn.y + 11)),
@@ -1180,5 +1519,103 @@ mod tests {
         // fire before any frame fetch (which would need a server).
         assert!(matches!(s.on_tick(), Action::Keep));
         assert!(s.settle_deadline.is_some(), "deadline survives the sheet");
+    }
+
+    #[test]
+    fn parse_recent_json_extracts_items_and_flags() {
+        let json = r#"{
+            "recent": [
+                {"id": 0, "title": "Book One", "url": "https://example.com/books/1", "active": true},
+                {"id": 1, "title": "Book Two", "url": "https://example.com/books/2", "active": false},
+                {"id": 2, "title": "Война и мир", "url": "https://example.com/books/3", "active": false}
+            ]
+        }"#;
+        let items = parse_recent_json(json);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].id, 0);
+        assert_eq!(items[0].title, "Book One");
+        assert_eq!(items[0].url, "https://example.com/books/1");
+        assert!(items[0].active);
+
+        assert_eq!(items[1].id, 1);
+        assert_eq!(items[1].title, "Book Two");
+        assert_eq!(items[1].url, "https://example.com/books/2");
+        assert!(!items[1].active);
+
+        assert_eq!(items[2].id, 2);
+        assert_eq!(items[2].title, "Война и мир");
+        assert_eq!(items[2].url, "https://example.com/books/3");
+        assert!(!items[2].active);
+
+        // Empty or malformed json
+        assert!(parse_recent_json("").is_empty());
+        assert!(parse_recent_json("{}").is_empty());
+        assert!(parse_recent_json(r#"{"recent": []}"#).is_empty());
+    }
+
+    #[test]
+    fn recent_dialog_rects_and_hits() {
+        let mut s = screen();
+        s.recent_items = vec![
+            RecentItem {
+                id: 0,
+                title: "Book 1".into(),
+                url: "https://example.com/1".into(),
+                active: true,
+            },
+            RecentItem {
+                id: 1,
+                title: "Book 2".into(),
+                url: "https://example.com/2".into(),
+                active: false,
+            },
+        ];
+        let (card, item_rects, cancel_btn) = recent_dialog_rects(1236, 1648, 2);
+        assert_eq!(item_rects.len(), 2);
+        assert!(card.w > 0 && card.h > 0);
+
+        // Outside card -> Dismiss
+        assert_eq!(s.recent_hit(10, 10), Some(RecentHit::Dismiss));
+        // Cancel button -> Dismiss
+        assert_eq!(
+            s.recent_hit(cancel_btn.x + 10, cancel_btn.y + 10),
+            Some(RecentHit::Dismiss)
+        );
+        // Item 0 -> Select(0)
+        assert_eq!(
+            s.recent_hit(item_rects[0].x + 10, item_rects[0].y + 10),
+            Some(RecentHit::Select(0))
+        );
+        // Item 1 -> Select(1)
+        assert_eq!(
+            s.recent_hit(item_rects[1].x + 10, item_rects[1].y + 10),
+            Some(RecentHit::Select(1))
+        );
+    }
+
+    #[test]
+    fn recent_gesture_dismisses_on_south_swipe_or_tap_outside() {
+        let mut s = screen();
+        s.recent_dialog = true;
+        // South swipe closes
+        assert!(matches!(
+            s.recent_gesture(swipe(SwipeDir::South, 600, 800)),
+            Action::Redraw
+        ));
+        assert!(!s.recent_dialog);
+
+        // Tap outside closes
+        s.recent_dialog = true;
+        assert!(matches!(s.recent_gesture(tap(10, 10)), Action::Redraw));
+        assert!(!s.recent_dialog);
+    }
+
+    #[test]
+    fn on_tick_with_the_recent_dialog_open_holds_settle_polls() {
+        let mut s = screen();
+        s.settle_deadline = Some(Instant::now() + Duration::from_secs(3));
+        s.recent_dialog = true;
+        assert!(matches!(s.on_tick(), Action::Keep));
+        assert!(s.settle_deadline.is_some(), "deadline survives the recent dialog");
     }
 }

@@ -20,12 +20,8 @@ pub const MAX_BODY_BYTES: i64 = 16 * 1024 * 1024;
 /// until the allocator aborts.
 const MAX_LINE_BYTES: usize = 16 * 1024;
 /// Hard wall-clock ceiling on one request()'s RECEIVE phase, checked before
-/// every socket read. The per-read REQUEST_TIMEOUT restarts on each byte,
-/// so a peer trickling 1 B/4.9 s could otherwise hold a request open
-/// forever — and mirror.rs runs these requests inline on the UI thread,
-/// where "forever" freezes the device. Legit frames land in tens of ms on
-/// a warm link (radio wake adds ~0.2 s); 2.5 s is ~10× headroom.
-pub const REQUEST_BUDGET: Duration = Duration::from_millis(2_500);
+/// every socket read.
+pub const REQUEST_BUDGET: Duration = Duration::from_millis(4_000);
 /// The pairing challenge runs synchronously on the tap/gesture path, so it
 /// must never hang a tap: dedicated short timeouts instead of the mirror's
 /// normal 3 s connect / 2.5 s request budget.
@@ -96,8 +92,7 @@ impl Conn {
         self.kindle_id = kindle_id;
     }
 
-    /// Override the per-request wall-clock budget (tests shrink it).
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn set_budget(&mut self, budget: Duration) {
         self.budget = budget;
     }

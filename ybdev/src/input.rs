@@ -415,16 +415,44 @@ impl Input {
         const _: () = assert!(EVIOCGRAB == 0x4004_4590 as crate::mtk::Ioctl);
         // `as _`: the request type is c_int on 32-bit targets and c_ulong
         // on the 64-bit host — let inference pick per target.
-        let rv = unsafe { libc::ioctl(f.as_raw_fd(), EVIOCGRAB as _, &1i32) };
+        let mut rv = unsafe { libc::ioctl(f.as_raw_fd(), EVIOCGRAB as _, &1i32) };
+        if rv != 0 {
+            for _ in 0..6 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                rv = unsafe { libc::ioctl(f.as_raw_fd(), EVIOCGRAB as _, &1i32) };
+                if rv == 0 {
+                    break;
+                }
+            }
+        }
+        let err = if rv != 0 {
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+        } else {
+            0
+        };
         crate::log::plog(&format!(
-            "touch grab on {}: {}",
+            "touch grab on {}: {}{}",
             path,
-            if rv == 0 { "ok" } else { "FAILED" }
+            if rv == 0 { "ok" } else { "FAILED" },
+            if rv != 0 {
+                format!(" (errno {})", err)
+            } else {
+                String::new()
+            }
         ));
 
         let pwr_f = discover_pwrkey().and_then(|p| {
             let file = OpenOptions::new().read(true).write(false).open(&p).ok()?;
-            let rv = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, &1i32) };
+            let mut rv = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, &1i32) };
+            if rv != 0 {
+                for _ in 0..6 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    rv = unsafe { libc::ioctl(file.as_raw_fd(), EVIOCGRAB as _, &1i32) };
+                    if rv == 0 {
+                        break;
+                    }
+                }
+            }
             crate::log::plog(&format!(
                 "pwrkey opened on {} (grab {})",
                 p,

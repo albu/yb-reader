@@ -27,6 +27,7 @@ Run:  uv run server.py                      # resumes the last page
 import argparse
 import json
 import os
+import re
 import signal
 import socket
 import struct
@@ -51,24 +52,106 @@ KEY_CODES = {
 }
 
 LAST_URL_PATH = os.path.expanduser("~/.yb-mirror-last-url")
+RECENT_URLS_PATH = os.path.expanduser("~/.yb-mirror-recent.json")
 LAST_KINDLE_PATH = os.path.expanduser("~/.yb-mirror-last-kindle")
+BOOK_FILTER_PATH = os.path.expanduser("~/.yb-mirror-book-filter")
+
+_filter_cache = {"mtime": 0, "patterns": []}
 
 
 def log(*a):
     print(f"[{time.strftime('%H:%M:%S')}]", *a, file=sys.stderr, flush=True)
 
 
+def load_book_patterns():
+    env_p = os.environ.get("YB_BOOK_PATTERN", "").strip()
+    patterns = [env_p] if env_p else []
+    if os.path.isfile(BOOK_FILTER_PATH):
+        try:
+            mtime = os.path.getmtime(BOOK_FILTER_PATH)
+            if mtime != _filter_cache["mtime"] or not _filter_cache["patterns"]:
+                file_patterns = []
+                with open(BOOK_FILTER_PATH, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            file_patterns.append(line)
+                _filter_cache["mtime"] = mtime
+                _filter_cache["patterns"] = file_patterns
+            patterns.extend(_filter_cache["patterns"])
+        except Exception as e:
+            log(f"reading book filter failed: {e}")
+    return patterns
+
+
+def is_book_url(url):
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    patterns = load_book_patterns()
+    if not patterns:
+        return True
+    for p in patterns:
+        try:
+            if re.search(p, url):
+                return True
+        except re.error:
+            if p in url:
+                return True
+    return False
+
+
+def normalize_book_url(url):
+    if not url:
+        return ""
+    return url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+
+def is_meaningful_title(title, url=""):
+    if not title:
+        return False
+    t = str(title).strip()
+    if not t or len(t) < 2:
+        return False
+    if "://" in t or t.startswith("www.") or "/" in t:
+        return False
+    if url:
+        norm = normalize_book_url(url)
+        path_or_domain = norm.split("://", 1)[-1]
+        if t == path_or_domain or path_or_domain.endswith("/" + t) or path_or_domain.endswith(t):
+            return False
+    return True
+
+
+def clean_book_title(title):
+    if not title:
+        return ""
+    t = str(title).replace("\u00a0", " ").strip()
+    for sep in (" — ", " – ", " - ", " | "):
+        if sep in t:
+            prefix, suffix = t.rsplit(sep, 1)
+            if 0 < len(suffix.strip()) <= 60 and len(prefix.strip()) > 0:
+                t = prefix.strip()
+                break
+    return t
+
+
 def read_last_url():
     try:
         with open(LAST_URL_PATH) as f:
             url = f.read().strip()
-        return url if url.startswith("http") else None
+        if is_book_url(url):
+            return url
     except OSError:
-        return None
+        pass
+    for it in read_recent_urls():
+        u = it.get("url", "")
+        if is_book_url(u):
+            return u
+    return None
 
 
 def save_last_url(url):
-    if not url or not url.startswith("http"):
+    if not is_book_url(url):
         return
     try:
         with open(LAST_URL_PATH, "w") as f:
@@ -76,6 +159,68 @@ def save_last_url(url):
         log(f"remembered page: {url}")
     except OSError as e:
         log(f"remembering page failed: {e}")
+
+
+def read_recent_urls():
+    try:
+        with open(RECENT_URLS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            valid = []
+            seen = set()
+            for item in data:
+                if isinstance(item, dict):
+                    url = item.get("url", "")
+                    norm = normalize_book_url(url)
+                    if is_book_url(url) and norm not in seen:
+                        seen.add(norm)
+                        raw_title = item.get("title") or norm.split("://", 1)[-1]
+                        valid.append({
+                            "url": url,
+                            "title": clean_book_title(raw_title) or str(raw_title)
+                        })
+            if valid:
+                return valid[:3]
+    except Exception:
+        pass
+    last = read_last_url()
+    if last and is_book_url(last):
+        raw_t = normalize_book_url(last).split("://", 1)[-1]
+        return [{"url": last, "title": clean_book_title(raw_t) or raw_t}]
+    return []
+
+
+def save_recent_url(url, title=""):
+    if not is_book_url(url):
+        return
+    try:
+        items = read_recent_urls()
+        norm_url = normalize_book_url(url)
+        found_idx = -1
+        existing_title = ""
+        for i, it in enumerate(items):
+            if normalize_book_url(it.get("url", "")) == norm_url:
+                found_idx = i
+                existing_title = it.get("title", "")
+                break
+        clean_title = clean_book_title(title)
+        final_title = ""
+        if is_meaningful_title(clean_title, url):
+            final_title = clean_title
+        elif is_meaningful_title(existing_title, url):
+            final_title = existing_title
+        else:
+            final_title = clean_title or existing_title or norm_url.split("://", 1)[-1]
+        if found_idx >= 0:
+            items.pop(found_idx)
+        items.insert(0, {"url": url, "title": final_title})
+        items = items[:3]
+        tmp = RECENT_URLS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, RECENT_URLS_PATH)
+    except Exception as e:
+        log(f"saving recent url failed: {e}")
 
 
 def parent_watchdog(parent_pid, interval=5):
@@ -96,15 +241,20 @@ def parent_watchdog(parent_pid, interval=5):
 
 
 def remember_loop(mirror, interval=60):
-    """Background: keep ~/.yb-mirror-last-url pointed at whatever the
-    browser is reading, so the next cold start can resume the book
+    """Background: keep ~/.yb-mirror-last-url and ~/.yb-mirror-recent.json pointed
+    at whatever the browser is reading, so the next cold start can resume the book
     (--resume, the default) instead of the catalog. The URL is a cached
     attribute of the browser object — nothing to query, nothing to
     mis-attribute. save_last_url ignores non-HTTP values (no page loaded
     yet, about:blank)."""
     while True:
         try:
-            mirror.save_url(mirror.current_url())
+            curr = mirror.current_url()
+            if curr:
+                mirror.save_url(curr)
+                if hasattr(mirror, "save_recent") and mirror.save_recent:
+                    t = mirror.current_title() if hasattr(mirror, "current_title") else ""
+                    mirror.save_recent(curr, t)
         except Exception as e:  # never let the rememberer kill the server
             log(f"rememberer: {e}")
         time.sleep(interval)
@@ -304,7 +454,7 @@ class Mirror:
         self.last_gray = None  # last served frame, for wait-for-change
         self.geo = None  # served rect (page CSS px) of the last capture
         self.last_activity = 0.0  # last Kindle contact; drives keep-awake
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.kindle_lock = threading.Lock()
         self.last_kindle_ip = None   # learned from the Kindle's own requests
         self.last_kindle_seen = 0.0
@@ -471,6 +621,9 @@ class Mirror:
             settled = stable and not self._is_loader(gray)
             return self._png_reply(gray, True, settled, start, 1)
 
+    def goto(self, url, wait=False, timeout=10.0):
+        pass
+
 
 def run_discovery(tcp_port, udp_port):
     """Answer 'ybmirror' UDP probes so the Kindle can find this Mac with no
@@ -604,7 +757,10 @@ class Handler(BaseHTTPRequestHandler):
         """True when a Kindle-facing request may proceed. Enforcement is
         OFF until at least one Kindle has paired (see pairing.authorized);
         after that, the request must carry the paired token as
-        X-YB-Secret (X-YB-Kindle-Id says which Kindle it is, optional)."""
+        X-YB-Secret (X-YB-Kindle-Id says which Kindle it is, optional).
+        Loopback clients are always authorized."""
+        if self._is_loopback(self.client_address):
+            return True
         return pairing.authorized(
             self.headers.get("X-YB-Kindle-Id") or None,
             self.headers.get("X-YB-Secret") or "")
@@ -613,7 +769,7 @@ class Handler(BaseHTTPRequestHandler):
         m = self.mirror
         # Kindle-facing endpoints refresh the activity clock that scopes
         # the display keep-awake; /status (our own curl probes) does not.
-        if self.path.startswith(("/ping", "/frame")):
+        if self.path.startswith(("/ping", "/frame", "/recent")):
             if not self._authorized():
                 return self._json(
                     {"error": "unauthorized — open the receive page from "
@@ -673,7 +829,19 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             log(f"frame #{m.seq} {len(payload)}B")
-            return
+        if self.path.startswith("/recent"):
+            items = read_recent_urls()
+            active_url = getattr(m, "url", "") or ""
+            norm_active = normalize_book_url(active_url)
+            res = []
+            for idx, it in enumerate(items):
+                res.append({
+                    "id": idx,
+                    "title": it["title"],
+                    "url": it["url"],
+                    "active": normalize_book_url(it["url"]) == norm_active,
+                })
+            return self._json({"recent": res}, cors=True)
         self._json({"error": "not found"}, 404)
 
     def _png(self, payload, w, h, extra=None, log_line=None):
@@ -766,7 +934,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         m = self.mirror
         q = self._query()
-        if self.path.startswith(("/next", "/prev", "/key", "/scroll", "/tap")):
+        if self.path.startswith(("/next", "/prev", "/key", "/scroll", "/tap", "/recent/select")):
             if not self._authorized():
                 return self._json(
                     {"error": "unauthorized — open the receive page from "
@@ -875,6 +1043,82 @@ class Handler(BaseHTTPRequestHandler):
             if not self._admin_only():
                 return
             return self._json({"autosized": bool(m.autosize())})
+        if self.path.startswith("/open"):
+            if not self._admin_only():
+                return
+            url = q.get("url")
+            if not url and body:
+                try:
+                    url = json.loads(body).get("url")
+                except Exception:
+                    pass
+            if not url:
+                return self._json({"error": "missing url"}, 400)
+            if not url.startswith(("http://", "https://")):
+                return self._json({"error": "invalid url scheme"}, 400)
+            try:
+                m.goto(url)
+                return self._json({"ok": True, "url": url})
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
+        if self.path.startswith("/recent/select"):
+            items = read_recent_urls()
+            target_url = None
+            book_id_str = q.get("book_id") or q.get("book")
+            if book_id_str is not None:
+                try:
+                    idx = int(book_id_str)
+                    if 0 <= idx < len(items):
+                        target_url = items[idx]["url"]
+                except ValueError:
+                    pass
+            if not target_url:
+                target_url = q.get("url")
+            if not target_url and body:
+                try:
+                    p = json.loads(body)
+                    if "book_id" in p:
+                        idx = int(p["book_id"])
+                        if 0 <= idx < len(items):
+                            target_url = items[idx]["url"]
+                    elif "url" in p:
+                        target_url = p["url"]
+                except Exception:
+                    pass
+            if not target_url:
+                return self._json({"error": "invalid book_id or url"}, 400)
+
+            curr_url = getattr(m, "url", "") or ""
+            if curr_url and normalize_book_url(curr_url) == normalize_book_url(target_url):
+                if wait:
+                    self._apply_frame_params()
+                    try:
+                        payload, w, h = m.frame_settled()
+                    except Exception as e:
+                        return self._json({"error": str(e)}, 503)
+                    return self._png(payload, w, h, {
+                        "X-Changed": "1",
+                        "X-Settled": "1",
+                    }, f"recent select: already on {target_url}")
+                return self._json({"selected": target_url, "already_active": True})
+
+            try:
+                m.goto(target_url, wait=bool(wait), timeout=8.0)
+            except Exception as e:
+                log(f"goto error during recent select: {e}")
+
+            if wait:
+                self._apply_frame_params()
+                try:
+                    payload, w, h = m.frame_settled()
+                except Exception as e:
+                    return self._json({"error": str(e)}, 503)
+                return self._png(payload, w, h, {
+                    "X-Changed": "1",
+                    "X-Settled": "1",
+                }, f"recent select: navigated to {target_url}")
+
+            return self._json({"selected": target_url})
         self._json({"error": "not found"}, 404)
 
     def log_message(self, *a):  # quiet default request logging
@@ -916,7 +1160,12 @@ def main():
                     help="exit when this pid disappears (used by the "
                          "menu bar app so a crashed app can't leave an "
                          "orphaned server behind)")
+    ap.add_argument("--book-pattern", default="",
+                    help="regex or substring filter for book URLs to remember "
+                         "(overrides ~/.yb-mirror-book-filter)")
     args = ap.parse_args()
+    if args.book_pattern:
+        os.environ["YB_BOOK_PATTERN"] = args.book_pattern
 
     def _bye(*_):
         # SIGTERM (menu bar stop, pkill, parent watchdog) must close the
@@ -946,7 +1195,8 @@ def main():
     Handler.mirror = make_headless_mirror(Mirror, resize_gray)(
         contrast=args.contrast, css_width=args.css_width,
         headed=args.headed, key_codes=KEY_CODES,
-        read_url=read_last_url, save_url=save_last_url)
+        read_url=read_last_url, save_url=save_last_url,
+        save_recent=save_recent_url)
     Handler.mirror.start(args.url, resume=not args.no_resume)
     # Night reading: hold the no-sleep assertion only while the Kindle is
     # in contact. Seeded so a just-started server can't be slept out from

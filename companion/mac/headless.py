@@ -102,6 +102,32 @@ if (!window.__ybArmed) {
 }
 """
 
+SINGLE_TAB_INIT_JS = """
+(() => {
+  // Enforce single-tab: rewrite target="_blank" so clicks stay in this tab
+  document.addEventListener('click', (e) => {
+    try {
+      const a = e.target.closest('a');
+      if (a && a.target && a.target.toLowerCase() === '_blank') {
+        a.target = '_self';
+      }
+    } catch (_) {}
+  }, true);
+
+  // Redirect window.open to current tab
+  try {
+    const origOpen = window.open;
+    window.open = function(url, target, features) {
+      if (url) {
+        window.location.href = url;
+        return window;
+      }
+      return origOpen ? origOpen.apply(window, arguments) : null;
+    };
+  } catch (_) {}
+})();
+"""
+
 
 def log(*a):
     print(f"[{time.strftime('%H:%M:%S')}]", *a, file=sys.stderr, flush=True)
@@ -170,7 +196,7 @@ def make_headless_mirror(Mirror, resize_gray):
 
         def __init__(self, contrast=2.0, css_width=DEFAULT_CSS_W,
                      headed=False, key_codes=None, read_url=None,
-                     save_url=None):
+                     save_url=None, save_recent=None):
             # crop/aspect knobs died with the window backend; the viewport
             # IS the served rect.
             super().__init__(app=APP_LABEL, contrast=contrast)
@@ -183,7 +209,9 @@ def make_headless_mirror(Mirror, resize_gray):
                                for name, code in (key_codes or {}).items()
                                if name in PLAYWRIGHT_KEYS}
             self.read_url, self.save_url = read_url, save_url
+            self.save_recent = save_recent
             self.url = None      # cached page URL (captures + goto keep it true)
+            self.cached_title = ""
             self.start_error = None
             self.pw = self.ctx = self.page = None
             self.ready = threading.Event()
@@ -246,37 +274,110 @@ def make_headless_mirror(Mirror, resize_gray):
                                         # page to white-on-black and wreck
                                         # the gamma curve
                 accept_downloads=False)
+            self.ctx.add_init_script(SETTLE_SIGNAL_JS)
+            self.ctx.add_init_script(SINGLE_TAB_INIT_JS)
+            self.ctx.on("page", self._on_page)
             self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
-            self.page.set_default_timeout(5000)
-            # Render sentinel: init script covers every future navigation,
-            # the direct evaluate covers the document we're attaching to
-            # right now. Running both is harmless (guard in the script).
-            self.page.add_init_script(SETTLE_SIGNAL_JS)
-            try:
-                self.page.evaluate(SETTLE_SIGNAL_JS)
-            except Exception:
-                pass  # the init script covers the next navigation anyway
+            for p in self.ctx.pages:
+                self._setup_page(p)
             self._vp_for = None
             self.app = "chromium (headed)" if self.headed else APP_LABEL
             log(f"browser: {'headed' if self.headed else 'headless'} chromium, "
                 f"profile {PROFILE_DIR}, viewport "
                 f"{self.css_w}x{self.css_h} @ {self.scale}x")
 
+        def _is_page_error(self, page):
+            if not page or page.is_closed():
+                return False
+            try:
+                err = page.evaluate("""() => {
+                    if (document.querySelector('[data-test-id*="NOT_FOUND"], [data-test-id*="not_found"], [data-test-id*="error_screen"], [data-test-id*="error-screen"]')) {
+                        return true;
+                    }
+                    const text = document.body ? document.body.innerText : '';
+                    if (text.includes('эта книга сейчас недоступна') ||
+                        text.includes('Страница не найдена') ||
+                        text.includes('Сейчас нет того, что вы искали')) {
+                        return true;
+                    }
+                    return false;
+                }""")
+                return bool(err)
+            except Exception:
+                return False
+
+        def _update_page_state(self, page):
+            if not page or page.is_closed():
+                return
+            u = page.url or self.url or ""
+            if not (u and u.startswith(("http://", "https://"))):
+                return
+            if self._is_page_error(page):
+                return
+            t = ""
+            try:
+                t = page.title()
+            except Exception:
+                pass
+            if t:
+                self.cached_title = t
+            if self.save_url:
+                self.save_url(u)
+            if self.save_recent:
+                self.save_recent(u, t or self.cached_title)
+
+        def _setup_page(self, page):
+            page.set_default_timeout(5000)
+            def on_nav(frame):
+                if frame == page.main_frame:
+                    u = page.url
+                    if u and u.startswith(("http://", "https://")):
+                        self.url = u
+            page.on("framenavigated", on_nav)
+            def on_close():
+                if self.page == page:
+                    pages = [p for p in self.ctx.pages if not p.is_closed()]
+                    self.page = pages[-1] if pages else None
+                    if self.page and not self.page.is_closed():
+                        self._update_page_state(self.page)
+            page.on("close", on_close)
+
+        def _on_page(self, page):
+            self._setup_page(page)
+            self.page = page
+            self._update_page_state(page)
+            if self.ctx and self.ctx.pages:
+                log(f"browser: page opened ({len(self.ctx.pages)} open)")
+
+        def _active_page(self):
+            if not self.ctx:
+                return self.page
+            if self.page and not self.page.is_closed():
+                return self.page
+            pages = [p for p in self.ctx.pages if not p.is_closed()]
+            if pages:
+                self.page = pages[-1]
+                return self.page
+            return None
+
         def _ensure(self):
             """Browser-thread only: relaunch + re-goto when the context or
             page died (crash, headed-toggle race). Direct navigation here —
             calling goto() would queue behind ourselves (rule 2 below)."""
-            if self.ctx is not None and self.page is not None \
-                    and not self.page.is_closed():
+            page = self._active_page()
+            if self.ctx is not None and page is not None \
+                    and not page.is_closed():
                 return
             log("browser: (re)launching")
             self._launch()
             url = self.url or (self.read_url() if self.read_url else None)
             if url:
-                try:
-                    self.page.goto(url, timeout=8000)
-                except Exception as e:
-                    log(f"relaunch goto: {e}")
+                page = self._active_page()
+                if page:
+                    try:
+                        page.goto(url, timeout=8000)
+                    except Exception as e:
+                        log(f"relaunch goto: {e}")
 
         def close(self):
             """Bounded best-effort teardown for SIGTERM / Ctrl-C. Without
@@ -293,23 +394,36 @@ def make_headless_mirror(Mirror, resize_gray):
             except Exception:
                 pass
 
-        def goto(self, url):
-            """Navigate, fire-and-forget. Safe from any thread: the job
-            serializes on the browser thread, so a screenshot queued behind
-            a slow load simply waits it out (bounded by the nav timeout)."""
+        def goto(self, url, wait=False, timeout=10.0):
+            """Navigate. If wait is True, blocks until navigation and initial
+            render settle. If False, fire-and-forget on the browser thread."""
             if not url:
                 return
             self.url = url
             def nav():
-                if self.page is None:
+                page = self._active_page()
+                if page is None:
                     return
                 try:
-                    self.page.goto(url, timeout=8000)
-                    self.url = self.page.url
+                    norm = lambda u: u.split("#", 1)[0].split("?", 1)[0].rstrip("/") if u else ""
+                    current = page.url or ""
+                    if not (current and norm(current) == norm(url)):
+                        page.goto(url, timeout=8000)
+                        try:
+                            page.wait_for_function(
+                                "() => Boolean(document.title && document.title.length > 0)",
+                                timeout=2500)
+                        except Exception:
+                            pass
+                    self.url = page.url
+                    self._update_page_state(page)
                 except Exception as e:
                     # a slow or bad site must never wedge the job queue
                     log(f"goto {url[:60]!r}: {e}")
-            self.q.put((nav, queue.Queue(), "goto"))
+            if wait:
+                self._call(nav, timeout=timeout, what=f"goto {url[:30]}")
+            else:
+                self.q.put((nav, queue.Queue(), "goto"))
 
         # ------------------------------------------------- job protocol ---
 
@@ -379,24 +493,33 @@ def make_headless_mirror(Mirror, resize_gray):
             if fbw and fbh and (fbw, fbh) != self._vp_for:
                 css = (max(1, round(fbw / self.scale)),
                        max(1, round(fbh / self.scale)))
-                if css != (self.css_w, self.css_h):
-                    self.page.set_viewport_size(
-                        {"width": css[0], "height": css[1]})
-                    log(f"viewport: {css[0]}x{css[1]} @ {self.scale}x "
-                        f"for fb {fbw}x{fbh}")
+                page = self._active_page()
+                if page and not page.is_closed():
+                    if css != (self.css_w, self.css_h):
+                        try:
+                            page.set_viewport_size(
+                                {"width": css[0], "height": css[1]})
+                            log(f"viewport: {css[0]}x{css[1]} @ {self.scale}x "
+                                f"for fb {fbw}x{fbh}")
+                        except Exception:
+                            pass
                 self.css_w, self.css_h = css
                 self._vp_for = (fbw, fbh)
 
         def _shot(self, fbw, fbh):
             """Browser thread only. Returns (png, css_w, css_h, url)."""
             self._ensure()
+            page = self._active_page()
+            if page is None:
+                raise RuntimeError("no active page in browser")
             self._fit_viewport(fbw, fbh)
+            self._update_page_state(page)
             # animations="disabled" snaps a reader's turn animation to its
             # end state — strictly helps settle/loader detection.
-            return (self.page.screenshot(type="png", timeout=4000,
+            return (page.screenshot(type="png", timeout=4000,
                                          caret="hide",
                                          animations="disabled"),
-                    self.css_w, self.css_h, self.page.url)
+                    self.css_w, self.css_h, page.url)
 
         def _turn_shot(self, fbw, fbh, deadline):
             """Browser thread only: the TURN capture. Waits for the page's
@@ -405,18 +528,22 @@ def make_headless_mirror(Mirror, resize_gray):
             screenshot. Deadline-bounded: a page that never goes quiet
             (spinner, live clock) still ships one frame at the deadline."""
             self._ensure()
+            page = self._active_page()
+            if page is None:
+                raise RuntimeError("no active page in browser")
             self._fit_viewport(fbw, fbh)
             rem_ms = max(10, int((deadline - time.time()) * 1000))
             try:
-                self.page.wait_for_function(
+                page.wait_for_function(
                     "() => window.__ybSettled === true",
                     timeout=rem_ms, polling="raf")
             except Exception:
                 pass
-            return (self.page.screenshot(type="png", timeout=4000,
+            self._update_page_state(page)
+            return (page.screenshot(type="png", timeout=4000,
                                          caret="hide",
                                          animations="disabled"),
-                    self.css_w, self.css_h, self.page.url)
+                    self.css_w, self.css_h, page.url)
 
         def frame_after_change(self, timeout=3.0, poll=0.02,
                                settle_tries=4, settle_gap=0.03, trust=False):
@@ -476,11 +603,14 @@ def make_headless_mirror(Mirror, resize_gray):
                 raise RuntimeError(
                     f"no headless mapping for keycode {keycode:#x}")
             def press():
+                page = self._active_page()
+                if page is None or page.is_closed():
+                    return
                 if shift:
-                    self.page.keyboard.down("Shift")
-                self.page.keyboard.press(name)  # press() has no modifiers arg
+                    page.keyboard.down("Shift")
+                page.keyboard.press(name)  # press() has no modifiers arg
                 if shift:
-                    self.page.keyboard.up("Shift")
+                    page.keyboard.up("Shift")
             self._call(press, timeout=8.0, what=f"key {name}")
 
         def tap(self, x, y):
@@ -492,8 +622,11 @@ def make_headless_mirror(Mirror, resize_gray):
             g = self.geo
             cx = g["x"] + (x + 0.5) * g["w"] / g["fbw"]
             cy = g["y"] + (y + 0.5) * g["h"] / g["fbh"]
-            self._call(lambda: self.page.mouse.click(cx, cy),
-                       timeout=8.0, what=f"tap {cx:.0f},{cy:.0f}")
+            def click():
+                page = self._active_page()
+                if page and not page.is_closed():
+                    page.mouse.click(cx, cy)
+            self._call(click, timeout=8.0, what=f"tap {cx:.0f},{cy:.0f}")
             return int(cx), int(cy)
 
         def scroll(self, dx, dy):
@@ -511,9 +644,10 @@ def make_headless_mirror(Mirror, resize_gray):
             sx = round(dx * g["w"] / g["fbw"])
             sy = round(dy * g["h"] / g["fbh"])
             def wheel():
-                # a wheel event lands at the pointer, so park it mid-page
-                self.page.mouse.move(self.css_w / 2, self.css_h / 2)
-                self.page.mouse.wheel(-sx, -sy)
+                page = self._active_page()
+                if page and not page.is_closed():
+                    page.mouse.move(self.css_w / 2, self.css_h / 2)
+                    page.mouse.wheel(-sx, -sy)
             self._call(wheel, timeout=8.0, what=f"scroll {sx},{sy}")
             return sx, sy
 
@@ -526,10 +660,15 @@ def make_headless_mirror(Mirror, resize_gray):
             def refit():
                 css = (max(1, round(fb["w"] / self.scale)),
                        max(1, round(fb["h"] / self.scale)))
-                if css != (self.css_w, self.css_h):
-                    self.page.set_viewport_size(
-                        {"width": css[0], "height": css[1]})
-                    log(f"viewport: {css[0]}x{css[1]} @ {self.scale}x")
+                page = self._active_page()
+                if page and not page.is_closed():
+                    if css != (self.css_w, self.css_h):
+                        try:
+                            page.set_viewport_size(
+                                {"width": css[0], "height": css[1]})
+                            log(f"viewport: {css[0]}x{css[1]} @ {self.scale}x")
+                        except Exception:
+                            pass
                 self.css_w, self.css_h = css
                 self._vp_for = (fb["w"], fb["h"])
             self._call(refit, what="autosize")
@@ -547,13 +686,14 @@ def make_headless_mirror(Mirror, resize_gray):
             if headed == self.headed:
                 return self.status()
             def flip():
+                page = self._active_page()
                 try:
-                    url = (self.page.url
-                           if self.page and not self.page.is_closed()
+                    url = (page.url
+                           if page and not page.is_closed()
                            else self.url)
                 except Exception:
                     url = self.url
-                if url:
+                if url and url.startswith(("http://", "https://")):
                     self.url = url
                     if self.save_url:
                         self.save_url(url)   # survives even a crash here
@@ -563,10 +703,12 @@ def make_headless_mirror(Mirror, resize_gray):
                 self.headed = headed
                 self._launch()
                 if self.url:
-                    try:
-                        self.page.goto(self.url, timeout=8000)
-                    except Exception as e:
-                        log(f"headed relaunch goto: {e}")
+                    page = self._active_page()
+                    if page:
+                        try:
+                            page.goto(self.url, timeout=8000)
+                        except Exception as e:
+                            log(f"headed relaunch goto: {e}")
             self._call(flip, timeout=30.0, what="headed toggle")
             return self.status()
 
@@ -576,6 +718,9 @@ def make_headless_mirror(Mirror, resize_gray):
             """Cached — no browser round trip (the rememberer polls this
             every minute; the value refreshes on every capture anyway)."""
             return self.url
+
+        def current_title(self):
+            return self.cached_title
 
         def status(self):
             """Plain attributes only: /status is polled by the menu bar, so
